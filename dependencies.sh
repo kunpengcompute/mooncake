@@ -93,39 +93,37 @@ fi
 
 # Update package lists
 print_section "Updating package lists"
-apt-get update
 check_success "Failed to update package lists"
 
 # Install system packages
 print_section "Installing system packages"
 echo -e "${YELLOW}This may take a few minutes...${NC}"
 
-SYSTEM_PACKAGES="build-essential \
-                  cmake \
-                  git \
-                  wget \
-                  libibverbs-dev \
-                  libgoogle-glog-dev \
-                  libgtest-dev \
-                  libjsoncpp-dev \
-                  libunwind-dev \
-                  libnuma-dev \
-                  libpython3-dev \
-                  libboost-all-dev \
-                  libssl-dev \
-                  libgrpc-dev \
-                  libgrpc++-dev \
-                  libprotobuf-dev \
-                  libyaml-cpp-dev \
-                  protobuf-compiler-grpc \
-                  libcurl4-openssl-dev \
-                  libhiredis-dev \
-                  liburing-dev \
-                  libjemalloc-dev \
-                  pkg-config \
-                  patchelf"
+SYSTEM_PACKAGES="@development \
+                 cmake \
+                 git \
+                 wget \
+                 rdma-core-devel \
+                 glog-devel \
+                 gtest-devel \
+                 jsoncpp-devel \
+                 libunwind-devel \
+                 numactl-devel \
+                 python3-devel \
+                 boost-devel \
+                 openssl-devel \
+                 grpc-devel \
+                 protobuf-devel \
+                 yaml-cpp-devel \
+                 grpc-plugins \
+                 libcurl-devel \
+                 hiredis-devel \
+                 liburing-devel \
+                 jemalloc-devel \
+                 pkgconf-pkg-config \
+                 patchelf"
 
-apt-get install -y $SYSTEM_PACKAGES
+yum install -y $SYSTEM_PACKAGES
 check_success "Failed to install system packages"
 print_success "System packages installed successfully"
 
@@ -183,6 +181,35 @@ check_success "Failed to install yalantinglibs"
 
 print_success "yalantinglibs installed successfully"
 
+# Install spdk
+print_section "Installing spdk"
+
+cd "${REPO_ROOT}/thirdparties"
+
+if [ -d "spdk" ]; then
+    rm -rf spdk
+fi
+
+git clone https://github.com/spdk/spdk.git
+
+cd spdk
+
+git checkout v23.01.1
+
+git submodule update --init
+
+./scripts/pkgdep.sh
+
+./configure --with-rdma
+
+make -j
+
+make install
+
+cp dpdk/build/lib/*.a /usr/local/lib
+
+print_success "spdk installed successfully"
+
 # Initialize and update git submodules
 print_section "Initializing Git Submodules"
 
@@ -207,48 +234,6 @@ if [ -f "${REPO_ROOT}/.gitmodules" ]; then
 else
     echo -e "${YELLOW}No .gitmodules file found. Skipping...${NC}"
     exit 1
-fi
-
-print_section "Installing Go $GOVER"
-
-install_go() {
-    ARCH=$(uname -m)
-    if [ "$ARCH" = "aarch64" ]; then
-        ARCH="arm64"
-    elif [ "$ARCH" = "x86_64" ]; then
-        ARCH="amd64"
-    else
-        echo "Unsupported architecture: $ARCH"
-        exit 1
-    fi
-    # Download Go
-    echo "Downloading Go $GOVER..."
-    wget -q --show-progress https://go.dev/dl/go$GOVER.linux-$ARCH.tar.gz
-    check_success "Failed to download Go $GOVER"
-
-    # Install Go
-    echo "Installing Go $GOVER..."
-    tar -C /usr/local -xzf go$GOVER.linux-$ARCH.tar.gz
-    check_success "Failed to install Go $GOVER"
-
-    # Clean up downloaded file
-    rm -f go$GOVER.linux-$ARCH.tar.gz
-    check_success "Failed to clean up Go installation file"
-
-    print_success "Go $GOVER installed successfully"
-}
-
-# Check if Go is already installed
-if command -v go &> /dev/null; then
-    GO_VERSION=$(go version | awk '{print $3}')
-    if [[ "$GO_VERSION" == "go$GOVER" ]]; then
-        echo -e "${YELLOW}Go $GOVER is already installed. Skipping...${NC}"
-    else
-        echo -e "${YELLOW}Found Go $GO_VERSION. Will install Go $GOVER...${NC}"
-        install_go
-    fi
-else
-    install_go
 fi
 
 # Add Go to PATH if not already there

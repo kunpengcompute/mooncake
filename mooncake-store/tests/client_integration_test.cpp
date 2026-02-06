@@ -735,8 +735,8 @@ TEST_F(ClientIntegrationTest, BatchQueryIpOperations) {
     if ((test_client_id_.first == 0 && test_client_id_.second == 0) ||
         (segment_provider_client_id_.first == 0 &&
          segment_provider_client_id_.second == 0)) {
-        GTEST_SKIP()
-            << "Could not capture client_ids, skipping BatchQueryIp test";
+        //GTEST_SKIP()
+        //    << "Could not capture client_ids, skipping BatchQueryIp test";
     }
 
     // Test 1: Query IP for test_client_
@@ -878,8 +878,8 @@ TEST_F(ClientIntegrationTest, BatchPutDuplicateKeys) {
 TEST_F(ClientIntegrationTest, BatchReplicaClearOperations) {
     // Skip test if we couldn't capture client_id
     if (test_client_id_.first == 0 && test_client_id_.second == 0) {
-        GTEST_SKIP() << "Could not capture test_client_id, skipping "
-                        "BatchReplicaClear test";
+        //GTEST_SKIP() << "Could not capture test_client_id, skipping "
+        //                "BatchReplicaClear test";
     }
 
     const std::string test_data = "Test data for BatchReplicaClear";

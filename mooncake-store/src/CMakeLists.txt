@@ -26,6 +26,7 @@ set(MOONCAKE_STORE_SOURCES
     dummy_client.cpp
     http_metadata_server.cpp
     file_storage.cpp
+    spdk_hello.cpp
 )
 
 set(EXTRA_LIBS "")
@@ -46,6 +47,58 @@ add_library(mooncake_store ${MOONCAKE_STORE_SOURCES})
 # Note: transfer_engine is PRIVATE to avoid propagating its dependencies (e.g., vendor-specific hardware)
 # to targets that don't need it (e.g., mooncake_master).
 # Targets that need transfer_engine should link it explicitly.
+
+set(SPDK_LIB_DIR /usr/local/lib)
+set(DPDK_LIB_DIR /usr/local/lib)
+
+set(SPDK_STATIC_LIBS
+	-Wl,--whole-archive    # 确保libspdk_event.a 和libspdk_nvme.a全量链接，防止丢失预初始化内容
+    ${SPDK_LIB_DIR}/libspdk_event.a
+	${SPDK_LIB_DIR}/libspdk_rdma.a
+    ${SPDK_LIB_DIR}/libspdk_nvme.a
+	-Wl,--no-whole-archive  # 恢复按需链接
+	${SPDK_LIB_DIR}/libspdk_vfio_user.a
+	${SPDK_LIB_DIR}/libspdk_dma.a
+	${SPDK_LIB_DIR}/libspdk_init.a
+    ${SPDK_LIB_DIR}/libspdk_env_dpdk.a
+    ${SPDK_LIB_DIR}/libspdk_log.a
+    ${SPDK_LIB_DIR}/libspdk_util.a
+    ${SPDK_LIB_DIR}/libspdk_blob.a
+    ${SPDK_LIB_DIR}/libspdk_blobfs.a
+    ${SPDK_LIB_DIR}/libspdk_bdev.a
+    ${SPDK_LIB_DIR}/libspdk_conf.a
+    ${SPDK_LIB_DIR}/libspdk_json.a
+    ${SPDK_LIB_DIR}/libspdk_jsonrpc.a
+    ${SPDK_LIB_DIR}/libspdk_sock.a
+    ${SPDK_LIB_DIR}/libspdk_thread.a
+    ${SPDK_LIB_DIR}/libspdk_trace.a
+    ${SPDK_LIB_DIR}/libspdk_vmd.a
+    ${SPDK_LIB_DIR}/libspdk_rpc.a
+
+    ${DPDK_LIB_DIR}/librte_eal.a
+    ${DPDK_LIB_DIR}/librte_mempool.a
+    ${DPDK_LIB_DIR}/librte_ring.a
+    ${DPDK_LIB_DIR}/librte_bus_pci.a
+    ${DPDK_LIB_DIR}/librte_pci.a
+    ${DPDK_LIB_DIR}/librte_timer.a
+    ${DPDK_LIB_DIR}/librte_telemetry.a
+    ${DPDK_LIB_DIR}/librte_kvargs.a
+    ${DPDK_LIB_DIR}/librte_mbuf.a
+	-Wl,--whole-archive # 确保librte_mempool_ring.a全量链接，防止丢失预初始化内容
+    ${DPDK_LIB_DIR}/librte_mempool_ring.a
+	-Wl,--no-whole-archive
+    ${DPDK_LIB_DIR}/librte_power.a
+    ${DPDK_LIB_DIR}/librte_ethdev.a
+    ${DPDK_LIB_DIR}/librte_net.a
+    ${DPDK_LIB_DIR}/librte_vhost.a
+    ${DPDK_LIB_DIR}/librte_cryptodev.a
+    ${DPDK_LIB_DIR}/librte_hash.a
+    ${DPDK_LIB_DIR}/librte_rcu.a
+
+    # 系统库
+    pthread dl numa rt m uuid crypto aio z elf ibverbs rdmacm
+)
+
 target_link_libraries(mooncake_store
     PUBLIC
         cachelib_memory_allocator
@@ -53,6 +106,7 @@ target_link_libraries(mooncake_store
         glog::glog
         gflags::gflags
         ${EXTRA_LIBS}
+        ${SPDK_STATIC_LIBS}
     PRIVATE
         transfer_engine
 )

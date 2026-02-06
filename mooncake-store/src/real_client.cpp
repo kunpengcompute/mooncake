@@ -21,6 +21,7 @@
 #include "rpc_types.h"
 #include "file_storage.h"
 #include "default_config.h"
+#include "spdk_hello.h"
 
 namespace mooncake {
 
@@ -165,6 +166,10 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     const std::string &ipc_socket_path, bool enable_offload) {
     this->protocol = protocol;
     this->ipc_socket_path_ = ipc_socket_path;
+
+    /* spdk start */
+    spdk_start();
+    /* spdk end*/
 
     // Remove port if hostname already contains one
     std::string hostname = local_hostname;

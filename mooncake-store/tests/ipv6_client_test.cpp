@@ -217,7 +217,7 @@ TEST_F(IPv6ClientTest, BasicPutGetOverIPv6Loopback) {
     // Skip if not using IPv6
     const char* use_ipv6 = getenv("MC_USE_IPV6");
     if (!use_ipv6 || std::string(use_ipv6) != "1") {
-        GTEST_SKIP() << "MC_USE_IPV6 is not set to 1; skipping IPv6 test";
+        //GTEST_SKIP() << "MC_USE_IPV6 is not set to 1; skipping IPv6 test";
     }
 
     // Start in-proc master
@@ -277,13 +277,13 @@ TEST_F(IPv6ClientTest, BasicPutGetOverLinkLocalIPv6) {
     // Skip if link-local address not provided
     const char* ll_addr = getenv("SERVER_ADDRESS_LL");
     if (!ll_addr || std::string(ll_addr).empty()) {
-        GTEST_SKIP()
-            << "SERVER_ADDRESS_LL is not set; skipping link-local test";
+        //GTEST_SKIP()
+        //    << "SERVER_ADDRESS_LL is not set; skipping link-local test";
     }
 
     const char* use_ipv6 = getenv("MC_USE_IPV6");
     if (!use_ipv6 || std::string(use_ipv6) != "1") {
-        GTEST_SKIP() << "MC_USE_IPV6 is not set to 1; skipping IPv6 test";
+        //GTEST_SKIP() << "MC_USE_IPV6 is not set to 1; skipping IPv6 test";
     }
 
     std::string server_address = ll_addr;
@@ -340,7 +340,7 @@ TEST_F(IPv6ClientTest, BatchOperationsOverIPv6) {
     // Skip if not using IPv6
     const char* use_ipv6 = getenv("MC_USE_IPV6");
     if (!use_ipv6 || std::string(use_ipv6) != "1") {
-        GTEST_SKIP() << "MC_USE_IPV6 is not set to 1; skipping IPv6 test";
+        //GTEST_SKIP() << "MC_USE_IPV6 is not set to 1; skipping IPv6 test";
     }
 
     // Start in-proc master

@@ -28,7 +28,7 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	struct spdk_nvme_ns *ns;
 	const struct spdk_nvme_ctrlr_data *cdata;
 
-	entry = malloc(sizeof(struct ctrlr_entry));
+	entry = (struct ctrlr_entry *)malloc(sizeof(struct ctrlr_entry));
 	if (entry == NULL) {
 		perror("ctrlr_entry malloc");
 		exit(1);
@@ -73,5 +73,5 @@ int spdk_start()
 		fprintf(stderr, "spdk_nvme_probe() failed\n");
         return -1;
 	}
-    return 0
+    return 0;
 }

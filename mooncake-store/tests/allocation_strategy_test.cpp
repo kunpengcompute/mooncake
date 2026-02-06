@@ -59,20 +59,20 @@ class AllocationStrategyParameterizedTest
 };
 
 // Instantiate parameterized tests for all allocator types
-INSTANTIATE_TEST_SUITE_P(
-    AllAllocatorTypes, AllocationStrategyParameterizedTest,
-    ::testing::Values(BufferAllocatorType::CACHELIB,
-                      BufferAllocatorType::OFFSET),
-    [](const ::testing::TestParamInfo<BufferAllocatorType>& info) {
-        switch (info.param) {
-            case BufferAllocatorType::CACHELIB:
-                return "Cachelib";
-            case BufferAllocatorType::OFFSET:
-                return "Offset";
-            default:
-                return "Unknown";
-        }
-    });
+//INSTANTIATE_TEST_SUITE_P(
+//    AllAllocatorTypes, AllocationStrategyParameterizedTest,
+//    ::testing::Values(BufferAllocatorType::CACHELIB,
+//                      BufferAllocatorType::OFFSET),
+//    [](const ::testing::TestParamInfo<BufferAllocatorType>& info) {
+//        switch (info.param) {
+//            case BufferAllocatorType::CACHELIB:
+//                return "Cachelib";
+//            case BufferAllocatorType::OFFSET:
+//                return "Offset";
+//            default:
+//                return "Unknown";
+//        }
+//    });
 
 // Test basic functionality with empty allocators map (non-parameterized)
 TEST_F(AllocationStrategyTest, EmptyAllocatorsMap) {

@@ -1,7 +1,4 @@
-#include "mooncake_alloc.h"
-#include <cstdlib>
-
-#include "mooncake_alloc.h"
+#include "memory_alloc.h"
 #include <cstdlib>
 #include <atomic>
 #include <mutex>

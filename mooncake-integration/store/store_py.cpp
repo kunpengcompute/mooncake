@@ -798,12 +798,12 @@ class MooncakeHostMemAllocatorPyWrapper {
     ~MooncakeHostMemAllocatorPyWrapper() { shm_helper_ = nullptr; }
 };
 
-uintptr_t get_alloc_func_ptr()
+uintptr_t get_alloc_func_addr()
 {
     return reinterpret_cast<uintptr_t>(&hugepage_memory_alloc);
 }
 
-uintptr_t get_free_func_ptr()
+uintptr_t get_free_func_addr()
 {
     return reinterpret_cast<uintptr_t>(&hugepage_memory_free);
 }
@@ -1410,8 +1410,8 @@ PYBIND11_MODULE(store, m) {
         py::arg("node"),
         "Bind the current thread and memory allocation preference to the "
         "specified NUMA node");
-    m.def("get_alloc_func_ptr", &get_alloc_func_ptr);
-    m.def("get_free_func_ptr", &get_free_func_ptr);
+    m.def("get_alloc_func_addr", &get_alloc_func_addr);
+    m.def("get_free_func_addr", &get_free_func_addr);
 }
 
 }  // namespace mooncake

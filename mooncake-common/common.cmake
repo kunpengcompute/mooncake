@@ -55,7 +55,7 @@ add_compile_options(-fno-tree-slp-vectorize)
 
 option(BUILD_EXAMPLES "Build examples" ON)
 
-option(BUILD_UNIT_TESTS "Build unit tests" ON)
+option(BUILD_UNIT_TESTS "Build unit tests" OFF)
 option(USE_CUDA "option for enabling gpu features for NVIDIA GPU" OFF)
 option(USE_MUSA "option for enabling gpu features for MTHREADS GPU" OFF)
 option(USE_HIP "option for enabling gpu features for AMD GPU" OFF)

@@ -27,6 +27,7 @@ set(MOONCAKE_STORE_SOURCES
     http_metadata_server.cpp
     file_storage.cpp
     spdk_hello.cpp
+    memory_alloc.cpp
 )
 
 set(EXTRA_LIBS "")

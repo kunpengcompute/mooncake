@@ -614,6 +614,20 @@ tl::expected<void, ErrorCode> WrappedMasterService::MountSegment(
         [] { MasterMetricManager::instance().inc_mount_segment_failures(); });
 }
 
+tl::expected<void, ErrorCode> WrappedMasterService::MountSSDSegment(
+    const Segment& segment, const UUID& client_id) {
+    return execute_rpc(
+        "MountSSDSegment",
+        [&] { return master_service_.MountSSDSegment(segment, client_id); },
+        [&](auto& timer) {
+            timer.LogRequest("base=", segment.base, ", size=", segment.size,
+                             ", segment_name=", segment.name,
+                             ", id=", segment.id);
+        },
+        [] { nullptr; },
+        [] { nullptr; });
+}
+
 tl::expected<void, ErrorCode> WrappedMasterService::ReMountSegment(
     const std::vector<Segment>& segments, const UUID& client_id) {
     return execute_rpc(
@@ -750,6 +764,8 @@ void RegisterRpcService(
     server.register_handler<&mooncake::WrappedMasterService::RemoveAll>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::MountSegment>(
+        &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::MountSSDSegment>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::ReMountSegment>(
         &wrapped_master_service);

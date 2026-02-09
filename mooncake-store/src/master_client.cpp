@@ -112,6 +112,11 @@ struct RpcNameTraits<&WrappedMasterService::MountSegment> {
 };
 
 template <>
+struct RpcNameTraits<&WrappedMasterService::MountSSDSegment> {
+    static constexpr const char* value = "MountSSDSegment";
+};
+
+template <>
 struct RpcNameTraits<&WrappedMasterService::ReMountSegment> {
     static constexpr const char* value = "ReMountSegment";
 };
@@ -498,6 +503,19 @@ tl::expected<void, ErrorCode> MasterClient::MountSegment(
                      ", client_id=", client_id_);
 
     auto result = invoke_rpc<&WrappedMasterService::MountSegment, void>(
+        segment, client_id_);
+    timer.LogResponseExpected(result);
+    return result;
+}
+
+tl::expected<void, ErrorCode> MasterClient::MountSSDSegment(
+    const Segment& segment) {
+    ScopedVLogTimer timer(1, "MasterClient::MountSSDSegment");
+    timer.LogRequest("base=", segment.base, ", size=", segment.size,
+                     ", name=", segment.name, ", id=", segment.id,
+                     ", client_id=", client_id_);
+
+    auto result = invoke_rpc<&WrappedMasterService::MountSSDSegment, void>(
         segment, client_id_);
     timer.LogResponseExpected(result);
     return result;

@@ -122,6 +122,12 @@ auto MasterService::MountSegment(const Segment& segment, const UUID& client_id)
     return {};
 }
 
+auto MasterService::MountSSDSegment(const Segment& segment, const UUID& client_id)
+    -> tl::expected<void, ErrorCode> {
+    LOG(INFO) << "name is: " << segment.name <<" te_endpoint is: " << segment.te_endpoint;
+    return {};
+}
+
 auto MasterService::ReMountSegment(const std::vector<Segment>& segments,
                                    const UUID& client_id)
     -> tl::expected<void, ErrorCode> {

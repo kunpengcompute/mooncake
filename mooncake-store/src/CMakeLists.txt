@@ -28,6 +28,7 @@ set(MOONCAKE_STORE_SOURCES
     file_storage.cpp
     spdk_hello.cpp
     memory_alloc.cpp
+    ssd_register_client.cpp
 )
 
 set(EXTRA_LIBS "")

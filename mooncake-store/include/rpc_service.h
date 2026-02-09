@@ -85,6 +85,9 @@ class WrappedMasterService {
     tl::expected<void, ErrorCode> MountSegment(const Segment& segment,
                                                const UUID& client_id);
 
+    tl::expected<void, ErrorCode> MountSSDSegment(const Segment& segment,
+                                               const UUID& client_id);
+
     tl::expected<void, ErrorCode> ReMountSegment(
         const std::vector<Segment>& segments, const UUID& client_id);
 

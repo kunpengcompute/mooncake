@@ -220,6 +220,9 @@ class MasterClient {
     [[nodiscard]] tl::expected<void, ErrorCode> MountSegment(
         const Segment& segment);
 
+    [[nodiscard]] tl::expected<void, ErrorCode> MountSSDSegment(
+        const Segment& segment);
+
     /**
      * @brief Re-mount segments, invoked when the client is the first time to
      * connect to the master or the client Ping TTL is expired and need

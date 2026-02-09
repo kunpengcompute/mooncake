@@ -6,6 +6,7 @@
 #include "dummy_client.h"
 #include "real_client.h"
 #include "memory_alloc.h"
+#include "ssd_register_client.h"
 
 #include <cstdlib>  // for atexit
 
@@ -808,6 +809,13 @@ uintptr_t get_free_func_addr()
     return reinterpret_cast<uintptr_t>(&hugepage_memory_free);
 }
 
+class MooncakeDistributedSSDRegisterPyWrapper {
+   public:
+    std::shared_ptr<SSDRegisterClient> register_{nullptr};
+
+    MooncakeDistributedSSDRegisterPyWrapper() = default;
+};
+
 PYBIND11_MODULE(store, m) {
     // Define the ReplicateConfig class
     py::class_<ReplicateConfig>(m, "ReplicateConfig")
@@ -927,6 +935,20 @@ PYBIND11_MODULE(store, m) {
              [](MooncakeHostMemAllocatorPyWrapper &self, uintptr_t ptr) {
                  py::gil_scoped_release release;
                  return self.shm_helper_->free(reinterpret_cast<void *>(ptr));
+             });
+
+     py::class_<MooncakeDistributedSSDRegisterPyWrapper>(m, "MooncakeDistributedSSDRegister")
+        .def(py::init<>())
+        .def("real_register",
+             [](MooncakeDistributedSSDRegisterPyWrapper &self, const std::string &nqn = "",
+                size_t nsid = 1,
+                const std::string &traddr = "",
+                size_t trsvcid = 4420,
+                const std::string &master_server_addr = "127.0.0.1:50051") {
+                self.register_ = std::make_shared<SSDRegisterClient>();
+                return self.register_->set_register(
+                    nqn, nsid, traddr, trsvcid, master_server_addr
+                 );
              });
 
     // Create a wrapper that exposes DistributedObjectStore with Python-specific

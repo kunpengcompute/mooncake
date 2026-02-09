@@ -1,0 +1,19 @@
+#include "master_client.h"
+#include "types.h"
+#include <string>
+
+namespace mooncake {
+   #define OPERATION_OK 0
+   #define OPERATION_FAILED -1
+
+class SSDRegisterClient {
+   public:
+      SSDRegisterClient();
+      ~SSDRegisterClient();
+
+      int set_register(const std::string &nqn, size_t nsid, const std::string &traddr, size_t trsvcid, const std::string &master_server_addr);
+ 
+   private: 
+      MasterClient master_client_;
+   };
+}

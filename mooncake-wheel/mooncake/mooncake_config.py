@@ -56,6 +56,10 @@ class MooncakeConfig:
     protocol: str
     device_name: Optional[str]
     master_server_address: str
+    nqn: str
+    nsid: int 
+    traddr: str
+    trsvcid: int
 
     @staticmethod
     def from_file(file_path: str) -> 'MooncakeConfig':
@@ -82,6 +86,10 @@ class MooncakeConfig:
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
+            nqn=config.get("nqn"),
+            nsid=config.get("nsid"),
+            traddr=config.get("traddr"),
+            trsvcid=config.get("trsvcid")
         )
 
     @staticmethod

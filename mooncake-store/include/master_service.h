@@ -56,6 +56,9 @@ class MasterService {
     auto MountSegment(const Segment& segment, const UUID& client_id)
         -> tl::expected<void, ErrorCode>;
 
+    auto MountSSDSegment(const Segment& segment, const UUID& client_id)
+        -> tl::expected<void, ErrorCode>;
+
     /**
      * @brief Re-mount segments, invoked when the client is the first time to
      * connect to the master or the client Ping TTL is expired and need

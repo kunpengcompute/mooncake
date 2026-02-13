@@ -4,8 +4,22 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <set>
 #include "transfer_engine.h"
 #include "transport/transport.h"
+#include "spdk/spdk_wrapper.h"
+
+static void nvmf_io_complete(void *ctx, const struct spdk_nvme_cpl *cpl) {
+    if (unlikely(!ctx)) {
+        LOG(ERROR) << "nvmf_io_complete ctx is null";
+        return;
+    }
+
+    mooncake::SpdkNofTask *task = reinterpret_cast<mooncake::SpdkNofTask *>(ctx);
+    task->cb_fn(ctx, cpl);
+
+    delete task;
+}
 
 namespace mooncake {
 
@@ -112,6 +126,164 @@ void FilereadWorkerPool::workerThread() {
             }
         }
     }
+
+    VLOG(2) << "FilereadWorkerPool worker thread exiting";
+}
+
+// ============================================================================
+// SpdkNofWorkerPool Implementation
+// ============================================================================
+// to fully utilize the available ssd bandwidth, we use a default of 4 worker
+// threads.
+constexpr int kDefaultSpdkNofWorkers = 4;
+
+SpdkNofWorkerPool::SpdkNofWorkerPool() : shutdown_(false) {
+    VLOG(1) << "Creating SpdkNofWorkerPool with " << kDefaultSpdkNofWorkers
+            << " workers";
+
+    // Start worker threads
+    workers_.reserve(kDefaultSpdkNofWorkers);
+    task_queue_.resize(kDefaultSpdkNofWorkers);
+    queue_mutex_.resize(kDefaultSpdkNofWorkers);
+    queue_cv_.resize(kDefaultSpdkNofWorkers);
+    for (int i = 0; i < kDefaultSpdkNofWorkers; ++i) {
+        workers_.emplace_back(&SpdkNofWorkerPool::workerThread, this, i);
+    }
+}
+
+SpdkNofWorkerPool::~SpdkNofWorkerPool() {
+    if (shutdown_.exchange(true)) {
+        return;
+    }
+
+    for (auto &cv: queue_cv_) {
+        cv.notify_all();
+    }
+
+    for (auto &worker: workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+
+    VLOG(1) << "SpdkNofWorkerPool destroyed";
+}
+
+void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
+    if (shutdown_.load()) {
+        LOG(WARNING)
+            << "Attempting to submit task to shutdown SpdkNofWorkerPool";
+        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+        return;
+    }
+
+    int worker_idx = -1;
+    {
+        std::lock_guard<std::mutex> lock(seg_mutex_);
+        nof_seg_handle *seg = task.seg_handle;
+        if (seg_to_worker_.find(seg) != seg_to_worker_.end()) {
+            worker_idx = seg_to_worker_[seg];
+        } else {
+            worker_idx = (seg_num++ % kDefaultSpdkNofWorkers);
+            seg_to_worker_[seg] = worker_idx;
+        }
+    }
+    if (unlikely(worker_idx < 0 || worker_idx >= kDefaultSpdkNofWorkers)) {
+        LOG(ERROR) << "seg is not bind to invalid worker " << worker_idx;
+        task.state->set_completed(ErrorCode::TRANSFER_FAIL);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_[worker_idx]);
+        task_queue_[worker_idx].push(std::move(task));
+    }
+    queue_cv_[worker_idx].notify_one();     // only one equal notify one?
+}
+
+static void task_complete(void *ctx, const struct spdk_nvme_cpl* cpl) {
+    SpdkNofTask *task = reinterpret_cast<SpdkNofTask *>(ctx);
+    if (unlikely(spdk_nvme_cpl_is_error(cpl))) {
+        LOG(ERROR) << "task_complete: I/O failed" << spdk_nvme_cpl_get_status_string(&cpl->status);
+        task->state->set_completed(ErrorCode::TRANSFER_FAIL);
+    } else {
+        task->state->set_completed(ErrorCode::OK);
+    }
+}
+
+void SpdkNofWorkerPool::workerThread(int work_idx) {
+    VLOG(2) << "FilereadWorkerPool worker thread started";
+
+    size_t pending_io = 0;
+    set<nof_seg_handle *> seg_set;
+    auto &task_queue = task_queue_[work_idx];
+    auto &queue_cv = queue_cv_[work_idx];
+    auto &queue_mutex = queue_mutex_[work_idx];
+    void *poll_group = SpdkWrapper::GetInstance().NvmePollGroupCreate();
+    if (!poll_group) {
+        LOG(ERROR) << "nvme poll group create failed, work_idx " << work_idx;
+        return ;
+    }
+
+    while (true) {
+        SpdkNofTask *task = nullptr;
+
+        // Wait for task or shutdown signal
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            queue_cv.wait(lock, [this] {
+                return shutdown_.load() || !task_queue.empty() || pending_io;
+            });
+
+            if (shutdown_.load() && task_queue.empty() && (pending_io == 0)) {
+                break;
+            }
+
+            if (!task_queue.empty()) {
+                task = new SpdkNofTask(std::move(task_queue.front()));
+                task_queue.pop();
+                task->cb_fn = &task_complete;
+            }
+        }
+
+        if (task) {
+            try {
+                if (seg_set.find(task->seg_handle) == seg_set.end()) {
+                    LOG(INFO) << "seg_handle " << task->seg_handle << " bind to worker " << work_idx;
+                    SpdkWrapper::GetInstance().NvmePollGroupAdd(poll_group, task->seg_handle);
+                    seg_set.insert(task->seg_handle);
+                }
+
+                int ret = SpdkWrapper::GetInstance().SubmitRequest(task->seg_handle,
+                    task->ptr, task->lba, task->lba_count, task->op, nvmf_io_complete, task);
+                if (unlikely(ret != 0)) {
+                    LOG(INFO) << "seg " << task->seg_handle << " submit io fail";
+                    task->state->set_completed(ErrorCode::TRANSFER_FAIL);
+                    delete task;
+                } else {
+                    pending_io++;
+                }
+            } catch (const std::exception& e) {
+                LOG(ERROR) << "Exception during spdk nvmf submit io: " << e.what();
+                task->state->set_completed(ErrorCode::TRANSFER_FAIL);
+                delete task;
+            }
+        }
+
+        if (pending_io > 0) {
+            int ret = SpdkWrapper::GetInstance().NvmePollGroupProcessCompletion(poll_group, 8);
+            if (unlikely(ret < 0 || ret > pending_io)) {
+                LOG(ERROR) << "poll completion error: ret " << ret << ", pending_io " << pending_io;  // pending io???
+            } else {
+                pending_io -= ret;
+            }
+        }
+    }
+
+    for (auto &seg : seg_set) {
+        SpdkWrapper::GetInstance().NvmePollGroupRemove(poll_group, seg);
+    }
+    SpdkWrapper::GetInstance().NvmePollGroupDestroy(poll_group);
 
     VLOG(2) << "FilereadWorkerPool worker thread exiting";
 }
@@ -437,7 +609,7 @@ TransferSubmitter::TransferSubmitter(TransferEngine& engine,
 
 std::optional<TransferFuture> TransferSubmitter::submit(
     const Replica::Descriptor& replica, std::vector<Slice>& slices,
-    TransferRequest::OpCode op_code) {
+    TransferRequest::OpCode op_code, void *ptr, size_t size) {
     std::optional<TransferFuture> future;
 
     if (replica.is_memory_replica()) {
@@ -461,6 +633,15 @@ std::optional<TransferFuture> TransferSubmitter::submit(
                 LOG(ERROR) << "Unknown transfer strategy: " << strategy;
                 return std::nullopt;
         }
+    } else if (replica.is_nof_replica()) {
+        auto& ssd_desc = replica.get_nof_descriptor();
+        auto& handle = ssd_desc.buffer_descriptor;
+
+        if (!ptr || (size == 0)) {
+            return std::nullopt;
+        }
+
+        future = submitSpdkNofOperation(handle, ptr, size, op_code);
     } else {
         future = submitFileReadOperation(replica, slices, op_code);
     }
@@ -632,6 +813,37 @@ std::optional<TransferFuture> TransferSubmitter::submitTransferEngineOperation(
         requests.emplace_back(request);
     }
     return submitTransfer(requests);
+}
+
+std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
+    const AllocatedBuffer::Descriptor& handle, void *ptr, size_t size,
+    const TransferRequest::OpCode op_code) {
+    if (handle.transport_endpoint_.empty() || handle.size_ < size) {
+        LOG(ERROR) << "Transport endpoint " << handle.transport_endpoint_
+                   << " buffer size " << handle.size_ << ", request size" << size;
+        return std::nullopt;
+    }
+
+    nof_seg_handle *seg_handle = SpdkWrapper::GetInstance().OpenNofSegment(handle.transport_endpoint_);
+    if (!seg_handle) {
+        LOG(ERROR) << "Failed to open segment for endpoint='"
+                   << handle.transport_endpoint_ << "'";
+        return std::nullopt;
+    }
+
+    uint32_t block_size = SpdkWrapper::GetInstance.GetBlockSize(seg_handle);
+    if ((block_size == INVALID_BLOCK_SIZE) || (handle.buffer_address_ % block_size) || (size % block_size)) {
+        LOG(ERROR) << "request off " << handle.buffer_address_
+                   << ", size " << size << " is not " << block_size << " align";
+        return std::nullopt;
+    }
+
+    auto state = std::make_shared<SpdkNofOperationState>();
+    SpdkNofTask task(seg_handle, ptr, handle.buffer_address_ / block_size, size / block_size, op_code, state);
+    spdk_nvmf_pool_->submitTask(std::move(task));
+
+    VLOG(1) << "Spdk nvmf transfer submitted to " << handle.transport_endpoint_;
+    return TransferFuture(state);
 }
 
 std::optional<TransferFuture> TransferSubmitter::submitFileReadOperation(

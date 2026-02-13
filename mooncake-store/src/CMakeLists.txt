@@ -43,6 +43,9 @@ if(USE_3FS)
   set(EXTRA_LIBS ${HF3FS_API_LIB})
 endif()
 
+add_subdirectory(spdk)
+list(APPEND MOONCAKE_STORE_SOURCES  ${SPDK_WRAPPER_SOURCES})
+
 # The cache_allocator library
 include_directories(${Python3_INCLUDE_DIRS})
 add_library(mooncake_store ${MOONCAKE_STORE_SOURCES})

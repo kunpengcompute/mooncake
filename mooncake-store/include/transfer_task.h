@@ -27,8 +27,9 @@ namespace mooncake {
 enum class TransferStrategy {
     LOCAL_MEMCPY = 0,     // Local memory copy using memcpy
     TRANSFER_ENGINE = 1,  // Remote transfer using transfer engine
-    FILE_READ = 2,        // File read operation
-    EMPTY = 3
+    SPDK_NVMF = 2,        // Spdk nvmf operation
+    FILE_READ = 3,        // File read operation
+    EMPTY = 4
 };
 
 /**
@@ -138,6 +139,35 @@ class MemcpyOperationState : public OperationState {
 
     TransferStrategy get_strategy() const override {
         return TransferStrategy::LOCAL_MEMCPY;
+    }
+};
+
+/**
+ * @brief Operation state for local memcpy transfers
+ */
+class SpdkNofOperationState : public OperationState {
+   public:
+    bool is_completed() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return result_.has_value();
+    }
+
+    void set_completed(ErrorCode error_code) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            assert(!result_.has_value());
+            result_.emplace(error_code);
+        }
+        cv_.notify_all();
+    }
+
+    void wait_for_completion() override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return result_.has_value(); });
+    }
+
+    TransferStrategy get_strategy() const override {
+        return TransferStrategy::SPDK_NVMF;
     }
 };
 
@@ -303,6 +333,62 @@ class MemcpyWorkerPool {
     std::atomic<bool> shutdown_;
 };
 
+typedef void (*IoCompleteCallback)(void *ctx, const struct spdk_nvme_cpl* cpl);
+
+/**
+ * @brief Spdk nvmf operation descriptor
+ */
+struct SpdkNofTask {
+    nof_seg_handle *seg_handle;
+    void *ptr;
+    uint64_t lba;
+    uint32_t lba_count;
+    int op;
+    std::shared_ptr<SpdkNofOperationState> state;
+    IoCompleteCallback cb_fn;
+
+    SpdkNofTask(nof_seg_handle *handle, void *buf, uint64_t off, uint32_t len,
+        int op_code, std::shared_ptr<SpdkNofOperationState> s) :
+        seg_handle(handle), ptr(buf), lba(off), lba_count(len), , op(op_code),
+        state(std::move(s)), cb_fn(nullptr) {}
+};
+
+/**
+ * @brief Thread pool for asynchronous spdk nvmf operations
+ *
+ * This class manages multiple worker thread that executes spdk nvmf operations
+ * asynchronously.
+ */
+class SpdkNofWorkerPool {
+    public:
+    explicit SpdkNofWorkerPool();
+    ~SpdkNofWorkerPool();
+
+    // Non-copyable, non-movable
+    SpdkNofWorkerPool(const SpdkNofWorkerPool&) = delete;
+    SpdkNofWorkerPool& operator=(const SpdkNofWorkerPool&) = delete;
+    SpdkNofWorkerPool(SpdkNofWorkerPool&&) = delete;
+    SpdkNofWorkerPool& operator=(SpdkNofWorkerPool&&) = delete;
+
+    /**
+     * @brief Submit a spdk nvmf task for async execution
+     * @param task The spdk nvmf task to execute
+     */
+    void submitTask(SpdkNofTask task);
+
+   private:
+    void workerThread(int work_idx);
+
+    std::vector<std::thread> workers_;
+    std::vector<std::queue<SpdkNofTask *>> task_queue_;
+    std::vector<std::mutex> queue_mutex_;
+    std::vector<std::condition_variable> queue_cv_;
+    std::atomic<bool> shutdown_;
+    std::mutex seg_mutex_;
+    int seg_num = 0;
+    std::map<nof_seg_handle *, int> seg_to_worker_;
+};
+
 /**
  * @brief Fileread task for async execution
  */
@@ -383,7 +469,9 @@ class TransferSubmitter {
      */
     std::optional<TransferFuture> submit(const Replica::Descriptor& replica,
                                          std::vector<Slice>& slices,
-                                         TransferRequest::OpCode op_code);
+                                         TransferRequest::OpCode op_code,
+                                         void *ptr = nullptr,
+                                         size_t size = 0);
 
     std::optional<TransferFuture> submit_batch(
         const std::vector<Replica::Descriptor>& replicas,
@@ -393,6 +481,7 @@ class TransferSubmitter {
    private:
     TransferEngine& engine_;
     std::unique_ptr<MemcpyWorkerPool> memcpy_pool_;
+    std::unique_ptr<SpdkNofWorkerPool> spdk_nvmf_pool_;
     std::unique_ptr<FilereadWorkerPool> fileread_pool_;
     bool memcpy_enabled_;
     TransferMetric* transfer_metric_;
@@ -420,6 +509,15 @@ class TransferSubmitter {
     std::optional<TransferFuture> submitMemcpyOperation(
         const AllocatedBuffer::Descriptor& handle,
         const std::vector<Slice>& slices,
+        const TransferRequest::OpCode op_code);
+
+    /**
+     * @brief Submit memcpy operation asynchronously
+     */
+    std::optional<TransferFuture> submitSpdkNofOperation(
+        const AllocatedBuffer::Descriptor& handle,
+        void *ptr,
+        size_t size,
         const TransferRequest::OpCode op_code);
 
     /**

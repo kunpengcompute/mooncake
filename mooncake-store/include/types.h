@@ -201,6 +201,20 @@ struct Segment {
 YLT_REFL(Segment, id, name, base, size, te_endpoint);
 
 /**
+ * @brief Represents a contiguous NoF ssd region
+ */
+struct NoFSegment {
+    UUID id{0, 0};
+    std::string name{};  // Logical segment name used for preferred allocation
+    uintptr_t base{0};
+    size_t size{0};
+    // TE p2p endpoint (ip:port) for transport-only addressing
+    std::string te_endpoint{};
+    NoFSegment() = default;
+};
+YLT_REFL(NoFSegment, id, name, base, size, te_endpoint);
+
+/**
  * @brief Client status from the master's perspective
  */
 enum class ClientStatus {

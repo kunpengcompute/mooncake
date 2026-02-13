@@ -122,9 +122,42 @@ auto MasterService::MountSegment(const Segment& segment, const UUID& client_id)
     return {};
 }
 
-auto MasterService::MountSSDSegment(const Segment& segment, const UUID& client_id)
+auto MasterService::MountNoFSegment(const NoFSegment& segment, const UUID& client_id)
     -> tl::expected<void, ErrorCode> {
-    LOG(INFO) << "name is: " << segment.name <<" te_endpoint is: " << segment.te_endpoint;
+    ScopedNoFSegmentAccess nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
+
+    // Tell the client monitor thread to start timing for this client. To
+    // avoid the following undesired situations, this message must be sent
+    // after locking the segment mutex and before the mounting operation
+    // completes:
+    // 1. Sending the message before the lock: the client expires and
+    // unmouting invokes before this mounting are completed, which prevents
+    // this segment being able to be unmounted forever;
+    // 2. Sending the message after mounting the segment: After mounting
+    // this segment, when trying to push id to the queue, the queue is
+    // already full. However, at this point, the message must be sent,
+    // otherwise this client cannot be monitored and expired.
+    {
+        PodUUID pod_client_id;
+        pod_client_id.first = client_id.first;
+        pod_client_id.second = client_id.second;
+        if (!client_ping_queue_.push(pod_client_id)) {
+            LOG(ERROR) << "NoF segment mount: " << "segment_name=" << segment.name
+                       << ", error=client_ping_queue_full";
+            return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+        }
+    }
+
+    LOG(INFO) << "NoF segment mount: " << "client_id=" << client_id
+              << ", action=mount_segment, segment_name=" << segment.name;
+
+    auto err = nof_segment_access.MountSegment(segment, client_id);
+    if (err == ErrorCode::SEGMENT_ALREADY_EXISTS) {
+        // Return OK because this is an idempotent operation
+        return {};
+    } else if (err != ErrorCode::OK) {
+        return tl::make_unexpected(err);
+    }
     return {};
 }
 
@@ -173,6 +206,52 @@ auto MasterService::ReMountSegment(const std::vector<Segment>& segments,
     return {};
 }
 
+auto MasterService::ReMountNoFSegment(const std::vector<NoFSegment>& segments,
+                                   const UUID& client_id)
+    -> tl::expected<void, ErrorCode> {
+    std::unique_lock<std::shared_mutex> lock(client_mutex_);
+    if (ok_client_.contains(client_id)) {
+        LOG(WARNING) << "NoF segment remount: " << "client_id=" << client_id
+                     << ", warn=client_already_remounted";
+        // Return OK because this is an idempotent operation
+        return {};
+    }
+
+    ScopedNoFSegmentAccess nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
+
+    // Tell the client monitor thread to start timing for this client. To
+    // avoid the following undesired situations, this message must be sent
+    // after locking the segment mutex or client mutex and before the remounting
+    // operation completes:
+    // 1. Sending the message before the lock: the client expires and
+    // unmouting invokes before this remounting are completed, which prevents
+    // this segment being able to be unmounted forever;
+    // 2. Sending the message after remounting the segments: After remounting
+    // these segments, when trying to push id to the queue, the queue is
+    // already full. However, at this point, the message must be sent,
+    // otherwise this client cannot be monitored and expired.
+    PodUUID pod_client_id;
+    pod_client_id.first = client_id.first;
+    pod_client_id.second = client_id.second;
+    if (!client_ping_queue_.push(pod_client_id)) {
+        LOG(ERROR) << "NoF segment remount: " << "client_id=" << client_id
+                   << ", error=client_ping_queue_full";
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+
+    ErrorCode err = nof_segment_access.ReMountSegment(segments, client_id);
+    if (err != ErrorCode::OK) {
+        return tl::make_unexpected(err);
+    }
+
+    // Change the client status to OK
+    ok_client_.insert(client_id);
+    MasterMetricManager::instance().inc_active_clients();
+
+    return {};
+}
+
+
 void MasterService::ClearInvalidHandles() {
     for (auto& shard : metadata_shards_) {
         MutexLocker lock(&shard.mutex);
@@ -214,6 +293,40 @@ auto MasterService::UnmountSegment(const UUID& segment_id,
 
     // 3. Commit the unmount operation
     ScopedSegmentAccess segment_access = segment_manager_.getSegmentAccess();
+    auto err = segment_access.CommitUnmountSegment(segment_id, client_id,
+                                                   metrics_dec_capacity);
+    if (err != ErrorCode::OK) {
+        return tl::make_unexpected(err);
+    }
+    return {};
+}
+
+auto MasterService::UnmountNoFSegment(const UUID& segment_id,
+                                   const UUID& client_id)
+    -> tl::expected<void, ErrorCode> {
+    size_t metrics_dec_capacity = 0;  // to update the metrics
+
+    // 1. Prepare to unmount the segment by deleting its allocator
+    {
+        ScopedNoFSegmentAccess segment_access =
+            nof_segment_manager_.getNoFSegmentAccess();
+        ErrorCode err = segment_access.PrepareUnmountSegment(
+            segment_id, metrics_dec_capacity);
+        if (err == ErrorCode::SEGMENT_NOT_FOUND) {
+            // Return OK because this is an idempotent operation
+            return {};
+        }
+        if (err != ErrorCode::OK) {
+            return tl::make_unexpected(err);
+        }
+    }  // Release the segment mutex before long-running step 2 and avoid
+       // deadlocks
+
+    // 2. Remove the metadata of the related objects
+    // ClearInvalidHandles(); FIXME: remove the shard metadata (ranhaojia)
+
+    // 3. Commit the unmount operation
+    ScopedNoFSegmentAccess segment_access = nof_segment_manager_.getNoFSegmentAccess();
     auto err = segment_access.CommitUnmountSegment(segment_id, client_id,
                                                    metrics_dec_capacity);
     if (err != ErrorCode::OK) {
@@ -585,8 +698,8 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     const auto now = std::chrono::steady_clock::now();
     auto it = metadata_shards_[shard_idx].metadata.find(key);
-    if (it != metadata_shards_[shard_idx].metadata.end() &&
-        !CleanupStaleHandles(it->second)) {
+    if (it != metadata_shards_[shard_idx].metadata.end() && // The key exists and at least one replica is valid
+        !CleanupStaleHandles(it->second)) { // Lazy cleanup, delete expired replica
         auto& metadata = it->second;
         // If the object's PutStart expired and has not completed any
         // replicas, we can discard it and allow the new PutStart to
@@ -608,7 +721,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         }
     }
 
-    // Allocate replicas
+    // Allocate memory replicas
     std::vector<Replica> replicas;
     {
         ScopedAllocatorAccess allocator_access =
@@ -622,10 +735,10 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
         auto allocation_result = allocation_strategy_->Allocate(
             allocator_manager, slice_length, config.replica_num,
-            preferred_segments);
+            preferred_segments, std::set<std::string>(), ReplicaType::MEMORY);
 
         if (!allocation_result.has_value()) {
-            VLOG(1) << "Failed to allocate all replicas for key=" << key
+            VLOG(1) << "Failed to allocate memory replicas for key=" << key
                     << ", error: " << allocation_result.error();
             if (allocation_result.error() == ErrorCode::INVALID_PARAMS) {
                 return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
@@ -635,6 +748,36 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         }
 
         replicas = std::move(allocation_result.value());
+    }
+
+    // Allocate nof replicas
+    {
+        ScopedAllocatorAccess allocator_access =
+            nof_segment_manager_.getAllocatorAccess();
+        const auto& allocator_manager = allocator_access.getAllocatorManager();
+
+        std::vector<std::string> preferred_segments;
+        if (!config.preferred_segment.empty()) {
+            preferred_segments.push_back(config.preferred_segment);
+        }
+
+        auto allocation_result = allocation_strategy_->Allocate(
+            allocator_manager, slice_length, config.replica_num,
+            preferred_segments, std::set<std::string>(), ReplicaType::NOF_SSD);
+
+        if (!allocation_result.has_value()) {
+            VLOG(1) << "Failed to allocate nof replicas for key=" << key
+                    << ", error: " << allocation_result.error();
+            if (allocation_result.error() == ErrorCode::INVALID_PARAMS) {
+                return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            }
+            need_eviction_ = true;
+            return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+        }
+        
+        for (auto& replica : allocation_result.value()) {
+            replicas.push_back(std::move(replica));
+        }
     }
 
     // If disk replica is enabled, allocate a disk replica
@@ -647,8 +790,22 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     std::vector<Replica::Descriptor> replica_list;
     replica_list.reserve(replicas.size());
+    int i = 0;
+    LOG(INFO) << "PutStart, create replicas: client_id=" << client_id
+              << ", key=" << key << ", slice_length=" << slice_length;
     for (const auto& replica : replicas) {
-        replica_list.emplace_back(replica.get_descriptor());
+        const auto desc = replica.get_descriptor();
+        replica_list.emplace_back(desc);
+
+        if (replica.is_memory_replica()) {
+            const auto& mem_desc = desc.get_memory_descriptor();
+            LOG(INFO) << "Replica #" << ++i << ": buffer_address=" << mem_desc.buffer_descriptor.buffer_address_
+                  << ", transport_endpoint=" << mem_desc.buffer_descriptor.transport_endpoint_;
+        } else if (replica.is_nof_replica()) {
+            const auto& nof_desc = desc.get_nof_descriptor();
+            LOG(INFO) << "Replica #" << ++i << ": buffer_address=" << nof_desc.buffer_descriptor.buffer_address_
+                  << ", transport_endpoint=" << nof_desc.buffer_descriptor.transport_endpoint_;
+        }
     }
 
     // No need to set lease here. The object will not be evicted until
@@ -680,7 +837,8 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
     }
 
     for (auto& replica : metadata.replicas) {
-        if (replica.type() == replica_type) {
+        // FIXME: replica_type is deprecated temporarily
+        if (replica.type() == ReplicaType::MEMORY || replica.type() == ReplicaType::NOF_SSD) {
             replica.mark_complete();
         }
         if (enable_offload_) {
@@ -918,10 +1076,12 @@ bool MasterService::CleanupStaleHandles(ObjectMetadata& metadata) {
     auto replica_it = metadata.replicas.begin();
     while (replica_it != metadata.replicas.end()) {
         // Use any_of algorithm to check if any handle has an invalid allocator
+        // Then replica type can be either MEMORY or NOF_SSD
         bool has_invalid_mem_handle = replica_it->has_invalid_mem_handle();
+        bool has_invalid_nof_handle = replica_it->has_invalid_nof_handle();
 
         // Remove replicas with invalid handles using erase-remove idiom
-        if (has_invalid_mem_handle) {
+        if (has_invalid_mem_handle || has_invalid_nof_handle) { // either mem handle or nof handle is invalid
             replica_it = metadata.replicas.erase(replica_it);
         } else {
             ++replica_it;

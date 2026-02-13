@@ -1,0 +1,18 @@
+[
+    {
+      "nqn": "nqn.spdk:cnode",
+      "nsid": 1,
+      "traddr": "192.168.65.81",
+      "trsvcid": 4420,
+      "master_server_address": "192.168.65.81:50051",
+      "metadata_server": ""
+    },
+    {
+      "nqn": "nqn.spdk:cnode1",
+      "nsid": 1,
+      "traddr": "192.168.65.57",
+      "trsvcid": 4420,
+      "master_server_address": "192.168.65.81:50051",
+      "metadata_server": ""
+    }
+  ]

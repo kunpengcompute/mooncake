@@ -85,13 +85,19 @@ class WrappedMasterService {
     tl::expected<void, ErrorCode> MountSegment(const Segment& segment,
                                                const UUID& client_id);
 
-    tl::expected<void, ErrorCode> MountSSDSegment(const Segment& segment,
+    tl::expected<void, ErrorCode> MountNoFSegment(const NoFSegment& segment,
                                                const UUID& client_id);
 
     tl::expected<void, ErrorCode> ReMountSegment(
         const std::vector<Segment>& segments, const UUID& client_id);
 
+    tl::expected<void, ErrorCode> ReMountNoFSegment(
+        const std::vector<NoFSegment>& segments, const UUID& client_id);
+
     tl::expected<void, ErrorCode> UnmountSegment(const UUID& segment_id,
+                                                 const UUID& client_id);
+
+    tl::expected<void, ErrorCode> UnmountNoFSegment(const UUID& segment_id,
                                                  const UUID& client_id);
 
     tl::expected<std::string, ErrorCode> GetFsdir();

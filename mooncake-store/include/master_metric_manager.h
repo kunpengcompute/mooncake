@@ -38,6 +38,15 @@ class MasterMetricManager {
     void inc_valid_get_nums(int64_t val = 1);
     void inc_total_get_nums(int64_t val = 1);
 
+    // NoF segment Metrics
+    void inc_allocated_nof_size(const std::string& segment, int64_t val = 1);
+    void dec_allocated_nof_size(const std::string& segment, int64_t val = 1);
+    void reset_allocated_nof_size();
+    void inc_total_nof_capacity(const std::string& segment, int64_t val = 1);
+    void dec_total_nof_capacity(const std::string& segment, int64_t val = 1);
+    void reset_total_nof_capacity();
+    double get_global_nof_used_ratio(void);
+
     enum class CacheHitStat {
         MEMORY_HITS,
         SSD_HITS,
@@ -62,6 +71,17 @@ class MasterMetricManager {
     double get_segment_mem_used_ratio(const std::string& segment);
     int64_t get_segment_allocated_mem_size(const std::string& segment);
     int64_t get_segment_total_mem_capacity(const std::string& segment);
+
+    // NoF segment Metrics
+    void inc_allocated_nof_size(int64_t val = 1);
+    void dec_allocated_nof_size(int64_t val = 1);
+    void inc_total_nof_capacity(int64_t val = 1);
+    void dec_total_nof_capacity(int64_t val = 1);
+    int64_t get_allocated_nof_size();
+    int64_t get_total_nof_capacity();
+    double get_segment_nof_used_ratio(const std::string& segment);
+    int64_t get_segment_allocated_nof_size(const std::string& segment);
+    int64_t get_segment_total_nof_capacity(const std::string& segment);
 
     // File Storage Metrics
     void inc_allocated_file_size(int64_t val = 1);
@@ -107,10 +127,16 @@ class MasterMetricManager {
     void inc_remove_all_failures(int64_t val = 1);
     void inc_mount_segment_requests(int64_t val = 1);
     void inc_mount_segment_failures(int64_t val = 1);
+    void inc_mount_nof_segment_requests(int64_t val = 1);
+    void inc_mount_nof_segment_failures(int64_t val = 1);
     void inc_unmount_segment_requests(int64_t val = 1);
     void inc_unmount_segment_failures(int64_t val = 1);
+    void inc_unmount_nof_segment_requests(int64_t val = 1);
+    void inc_unmount_nof_segment_failures(int64_t val = 1);
     void inc_remount_segment_requests(int64_t val = 1);
     void inc_remount_segment_failures(int64_t val = 1);
+    void inc_remount_nof_segment_requests(int64_t val = 1);
+    void inc_remount_nof_segment_failures(int64_t val = 1);
     void inc_ping_requests(int64_t val = 1);
     void inc_ping_failures(int64_t val = 1);
 
@@ -256,6 +282,18 @@ class MasterMetricManager {
         mem_total_capacity_per_segment_;  // Segment memory capacity update for
                                           // gauge
 
+    // NoF Segment Metrics
+    ylt::metric::gauge_t
+        nof_allocated_size_; // Overall NoF SSD usage update for gauge
+    ylt::metric::gauge_t
+        nof_total_capacity_; // Overall NoF SSD capacity update for gauge
+    ylt::metric::dynamic_gauge_1t
+        nof_allocated_size_per_segment_;  // NoF segment usage update for
+                                          // gauge
+    ylt::metric::dynamic_gauge_1t
+        nof_total_capacity_per_segment_;  // NoF segment capacity update for
+                                          // gauge
+
     // File Storage Metrics
     ylt::metric::gauge_t file_allocated_size_;
     ylt::metric::gauge_t file_total_capacity_;
@@ -289,10 +327,16 @@ class MasterMetricManager {
     ylt::metric::counter_t remove_all_failures_;
     ylt::metric::counter_t mount_segment_requests_;
     ylt::metric::counter_t mount_segment_failures_;
+    ylt::metric::counter_t mount_nof_segment_requests_;
+    ylt::metric::counter_t mount_nof_segment_failures_;
     ylt::metric::counter_t unmount_segment_requests_;
     ylt::metric::counter_t unmount_segment_failures_;
+    ylt::metric::counter_t unmount_nof_segment_requests_;
+    ylt::metric::counter_t unmount_nof_segment_failures_;
     ylt::metric::counter_t remount_segment_requests_;
     ylt::metric::counter_t remount_segment_failures_;
+    ylt::metric::counter_t remount_nof_segment_requests_;
+    ylt::metric::counter_t remount_nof_segment_failures_;
     ylt::metric::counter_t ping_requests_;
     ylt::metric::counter_t ping_failures_;
 

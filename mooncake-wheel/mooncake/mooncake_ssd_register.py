@@ -21,6 +21,8 @@ class MooncakeSSDRegister:
         "nsid": 1,
         "traddr": "192.168.65.56",
         "trsvcid": 4420,
+        "base":0,
+        "size":8196,
         "master_server_address": "192.168.65.87:50051",
         "metadata_server": ""
       },
@@ -29,6 +31,8 @@ class MooncakeSSDRegister:
         "nsid": 1,
         "traddr": "192.168.65.57",
         "trsvcid": 4420,
+        "base":0,
+        "size":8196,
         "master_server_address": "192.168.65.87:50051",
         "metadata_server": ""
       },
@@ -94,7 +98,9 @@ class MooncakeSSDRegister:
                     cfg["nsid"],
                     cfg["traddr"],
                     cfg["trsvcid"],
-                    cfg["master_server_address"]  
+                    cfg["master_server_address"],
+                    cfg["base"],
+                    cfg["size"]
                 )
                 if ret != 0:
                     raise RuntimeError(f"Registration failed with code {ret}")

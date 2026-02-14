@@ -60,6 +60,8 @@ class MooncakeConfig:
     nsid: int 
     traddr: str
     trsvcid: int
+    base: int
+    size: int
 
     @staticmethod
     def from_file(file_path: str) -> 'MooncakeConfig':
@@ -90,6 +92,9 @@ class MooncakeConfig:
             nsid=config.get("nsid"),
             traddr=config.get("traddr"),
             trsvcid=config.get("trsvcid")
+            trsvcid=config.get("trsvcid"),
+            base=config.get("base"),
+            size=config.get("size")
         )
 
     @staticmethod

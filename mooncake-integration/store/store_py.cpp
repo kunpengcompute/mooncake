@@ -944,10 +944,12 @@ PYBIND11_MODULE(store, m) {
                 size_t nsid = 1,
                 const std::string &traddr = "",
                 size_t trsvcid = 4420,
+                uintptr_t base = 0x0,
+                size_t size = 1024,
                 const std::string &master_server_addr = "127.0.0.1:50051") {
                 self.register_ = std::make_shared<SSDRegisterClient>();
                 return self.register_->set_register(
-                    nqn, nsid, traddr, trsvcid, master_server_addr
+                    nqn, nsid, traddr, trsvcid, base, size, master_server_addr
                  );
              });
 

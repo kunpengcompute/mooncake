@@ -11,6 +11,8 @@ int SSDRegisterClient::set_register(
     size_t nsid,
     const std::string &traddr, 
     size_t trsvcid,
+    uintptr_t base,
+    size_t size,
     const std::string &master_server_addr) {
     
     LOG(INFO) << "Registering SSD: nqn=" << nqn
@@ -26,14 +28,31 @@ int SSDRegisterClient::set_register(
     }
 
     NoFSegment segment;
-    segment.base = 16777216;
-    segment.size = 16777216;
+    segment.base = base;
+    segment.size = size;
     segment.id = generate_uuid();
     segment.name = nqn;
     segment.te_endpoint = traddr + ":" + std::to_string(trsvcid) + ":" + std::to_string(nsid);
     auto mount_result = master_client_.MountNoFSegment(segment);
     if (!mount_result) {
         LOG(ERROR) << "mount_segment_to_master_failed ";
+        return OPERATION_FAILED;
+    }
+
+    const std::string key = "sglang_mooncake_warmup_key";
+    std::vector<size_t> slice_lengths = {10, 20 ,30};
+    auto start_result = master_client_.PutStart(key, slice_lengths, ReplicateConfig{});
+    if (!start_result) {
+        LOG(ERROR) << "putstart_failed  ";
+        return OPERATION_FAILED;
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    auto end_result = master_client_.PutEnd(key, ReplicaType::NOF_SSD);
+    if (!end_result) {
+        ErrorCode err = end_result.error();
+        LOG(ERROR) << "Failed to end put operation: " << err;
         return OPERATION_FAILED;
     }
 

@@ -360,7 +360,7 @@ struct SpdkNofTask {
  * This class manages multiple worker thread that executes spdk nvmf operations
  * asynchronously.
  */
-constexpr int constkDefaultSpdkNofWorkers = 4;
+constexpr int kDefaultSpdkNofWorkers = 4;
 class SpdkNofWorkerPool {
     public:
     explicit SpdkNofWorkerPool();
@@ -382,9 +382,9 @@ class SpdkNofWorkerPool {
     void workerThread(int work_idx);
 
     std::vector<std::thread> workers_;
-    std::queue<SpdkNofTask> task_queue_[constkDefaultSpdkNofWorkers];
-    std::mutex queue_mutex_[constkDefaultSpdkNofWorkers];
-    std::condition_variable queue_cv_[constkDefaultSpdkNofWorkers];
+    std::queue<SpdkNofTask> task_queue_[kDefaultSpdkNofWorkers];
+    std::mutex queue_mutex_[kDefaultSpdkNofWorkers];
+    std::condition_variable queue_cv_[kDefaultSpdkNofWorkers];
     std::atomic<bool> shutdown_;
     std::mutex seg_mutex_;
     int seg_num = 0;

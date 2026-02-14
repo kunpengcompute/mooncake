@@ -26,7 +26,6 @@ set(MOONCAKE_STORE_SOURCES
     dummy_client.cpp
     http_metadata_server.cpp
     file_storage.cpp
-    spdk_hello.cpp
     memory_alloc.cpp
     ssd_register_client.cpp
 )

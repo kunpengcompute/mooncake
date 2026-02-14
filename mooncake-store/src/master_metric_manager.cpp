@@ -31,6 +31,17 @@ MasterMetricManager::MasterMetricManager()
       mem_total_capacity_per_segment_(
           "segment_total_capacity_bytes",
           "Total memory capacity of the mounted segment", {"segment"}),
+      nof_allocated_size_(
+          "master_nof_allocated_bytes",
+          "Total nof ssd bytes currently allocated across all segments"),
+      nof_total_capacity_("master_total_nof_capacity_bytes",
+                          "Total nof ssd capacity across all mounted segments"),
+      nof_allocated_size_per_segment_(
+          "nof_segment_allocated_bytes",
+          "Total nof ssd bytes currently allocated of the segment", {"segment"}),
+      nof_total_capacity_per_segment_(
+          "nof_segment_total_capacity_bytes",
+          "Total nof ssd capacity of the mounted segment", {"segment"}),
       file_allocated_size_(
           "master_allocated_file_size_bytes",
           "Total bytes currently allocated for file storage in 3fs/nfs"),
@@ -109,6 +120,22 @@ MasterMetricManager::MasterMetricManager()
       remount_segment_failures_(
           "master_remount_segment_failures_total",
           "Total number of failed RemountSegment requests"),
+      mount_nof_segment_requests_("master_mount_nof_segment_requests_total",
+                              "Total number of MountNoFSegment requests received"),
+      mount_nof_segment_failures_("master_mount_nof_segment_failures_total",
+                              "Total number of failed MountNoFSegment requests"),
+      unmount_nof_segment_requests_(
+          "master_unmount_nof_segment_requests_total",
+          "Total number of UnmountNoFSegment requests received"),
+      unmount_nof_segment_failures_(
+          "master_unmount_nof_segment_failures_total",
+          "Total number of failed UnmountNoFSegment requests"),
+      remount_nof_segment_requests_(
+          "master_remount_nof_segment_requests_total",
+          "Total number of RemountNoFSegment requests received"),
+      remount_nof_segment_failures_(
+          "master_remount_nof_segment_failures_total",
+          "Total number of failed RemountNoFSegment requests"),
       ping_requests_("master_ping_requests_total",
                      "Total number of ping requests received"),
       ping_failures_("master_ping_failures_total",
@@ -429,6 +456,76 @@ double MasterMetricManager::get_segment_mem_used_ratio(
     return allocated / capacity;
 }
 
+// NoF segment Metrics
+void MasterMetricManager::inc_allocated_nof_size(const std::string& segment,
+                                                 int64_t val) {
+    nof_allocated_size_.inc(val);
+    if (!segment.empty()) nof_allocated_size_per_segment_.inc({segment}, val);
+}
+
+void MasterMetricManager::dec_allocated_nof_size(const std::string& segment,
+                                                 int64_t val) {
+    nof_allocated_size_.dec(val);
+    if (!segment.empty()) nof_allocated_size_per_segment_.dec({segment}, val);
+}
+
+void MasterMetricManager::reset_allocated_nof_size() {
+    nof_allocated_size_.reset();
+}
+
+void MasterMetricManager::inc_total_nof_capacity(const std::string& segment,
+                                                 int64_t val) {
+    nof_total_capacity_.inc(val);
+    if (!segment.empty()) nof_total_capacity_per_segment_.inc({segment}, val);
+}
+
+void MasterMetricManager::dec_total_nof_capacity(const std::string& segment,
+                                                 int64_t val) {
+    nof_total_capacity_.dec(val);
+    if (!segment.empty()) nof_total_capacity_per_segment_.dec({segment}, val);
+}
+
+void MasterMetricManager::reset_total_nof_capacity() {
+    nof_total_capacity_.reset();
+}
+
+int64_t MasterMetricManager::get_allocated_nof_size() {
+    return nof_allocated_size_.value();
+}
+
+int64_t MasterMetricManager::get_total_nof_capacity() {
+    return nof_total_capacity_.value();
+}
+
+double MasterMetricManager::get_global_nof_used_ratio(void) {
+    double allocated = nof_allocated_size_.value();
+    double capacity = nof_total_capacity_.value();
+    if (capacity == 0) {
+        return 0.0;
+    }
+    return allocated / capacity;
+}
+
+int64_t MasterMetricManager::get_segment_allocated_nof_size(
+    const std::string& segment) {
+    return nof_allocated_size_per_segment_.value({segment});
+}
+
+int64_t MasterMetricManager::get_segment_total_nof_capacity(
+    const std::string& segment) {
+    return nof_total_capacity_per_segment_.value({segment});
+}
+
+double MasterMetricManager::get_segment_nof_used_ratio(
+    const std::string& segment) {
+    double allocated = get_segment_allocated_nof_size(segment);
+    double capacity = get_segment_total_nof_capacity(segment);
+    if (capacity == 0) {
+        return 0.0;
+    }
+    return allocated / capacity;
+}
+
 // File Storage Metrics
 void MasterMetricManager::inc_allocated_file_size(int64_t val) {
     file_allocated_size_.inc(val);
@@ -582,17 +679,35 @@ void MasterMetricManager::inc_mount_segment_requests(int64_t val) {
 void MasterMetricManager::inc_mount_segment_failures(int64_t val) {
     mount_segment_failures_.inc(val);
 }
+void MasterMetricManager::inc_mount_nof_segment_requests(int64_t val) {
+    mount_nof_segment_requests_.inc(val);
+}
+void MasterMetricManager::inc_mount_nof_segment_failures(int64_t val) {
+    mount_nof_segment_failures_.inc(val);
+}
 void MasterMetricManager::inc_unmount_segment_requests(int64_t val) {
     unmount_segment_requests_.inc(val);
 }
 void MasterMetricManager::inc_unmount_segment_failures(int64_t val) {
     unmount_segment_failures_.inc(val);
 }
+void MasterMetricManager::inc_unmount_nof_segment_requests(int64_t val) {
+    unmount_nof_segment_requests_.inc(val);
+}
+void MasterMetricManager::inc_unmount_nof_segment_failures(int64_t val) {
+    unmount_nof_segment_failures_.inc(val);
+}
 void MasterMetricManager::inc_remount_segment_requests(int64_t val) {
     remount_segment_requests_.inc(val);
 }
 void MasterMetricManager::inc_remount_segment_failures(int64_t val) {
     remount_segment_failures_.inc(val);
+}
+void MasterMetricManager::inc_remount_nof_segment_requests(int64_t val) {
+    remount_nof_segment_requests_.inc(val);
+}
+void MasterMetricManager::inc_remount_nof_segment_failures(int64_t val) {
+    remount_nof_segment_failures_.inc(val);
 }
 void MasterMetricManager::inc_ping_requests(int64_t val) {
     ping_requests_.inc(val);

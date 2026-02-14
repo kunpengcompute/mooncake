@@ -224,6 +224,14 @@ class MasterClient {
         const Segment& segment);
 
     /**
+     * @brief Registers a NoF ssd segment to master for allocation
+     * @param segment Segment to register
+     * @return tl::expected<void, ErrorCode> indicating success/failure
+     */
+    [[nodiscard]] tl::expected<void, ErrorCode> MountNoFSegment(
+        const NoFSegment& segment);
+
+    /**
      * @brief Re-mount segments, invoked when the client is the first time to
      * connect to the master or the client Ping TTL is expired and need
      * to remount. This function is idempotent. Client should retry if the
@@ -235,11 +243,30 @@ class MasterClient {
         const std::vector<Segment>& segments);
 
     /**
+     * @brief Re-mount NoF ssd segments, invoked when the client is the first time to
+     * connect to the master or the client Ping TTL is expired and need
+     * to remount. This function is idempotent. Client should retry if the
+     * return code is not ErrorCode::OK.
+     * @param segments Segments to remount
+     * @return tl::expected<void, ErrorCode> indicating success/failure
+     */
+    [[nodiscard]] tl::expected<void, ErrorCode> ReMountNoFSegment(
+        const std::vector<NoFSegment>& segments);
+
+    /**
      * @brief Unregisters a memory segment from master
      * @param segment_id ID of the segment to unmount
      * @return tl::expected<void, ErrorCode> indicating success/failure
      */
     [[nodiscard]] tl::expected<void, ErrorCode> UnmountSegment(
+        const UUID& segment_id);
+
+    /**
+     * @brief Unregisters a NoF ssd segment from master
+     * @param segment_id ID of the segment to unmount
+     * @return tl::expected<void, ErrorCode> indicating success/failure
+     */
+    [[nodiscard]] tl::expected<void, ErrorCode> UnmountNoFSegment(
         const UUID& segment_id);
 
     /**

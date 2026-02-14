@@ -25,11 +25,13 @@ int SSDRegisterClient::set_register(
         return OPERATION_FAILED;
     }
 
-    Segment segment;
+    NoFSegment segment;
+    segment.base = 16777216;
+    segment.size = 16777216;
     segment.id = generate_uuid();
     segment.name = nqn;
     segment.te_endpoint = traddr + ":" + std::to_string(trsvcid) + ":" + std::to_string(nsid);
-    auto mount_result = master_client_.MountSSDSegment(segment);
+    auto mount_result = master_client_.MountNoFSegment(segment);
     if (!mount_result) {
         LOG(ERROR) << "mount_segment_to_master_failed ";
         return OPERATION_FAILED;

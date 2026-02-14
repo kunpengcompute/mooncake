@@ -162,7 +162,9 @@ class AllocationStrategy {
         const std::vector<std::string>& preferred_segments =
             std::vector<std::string>(),
         const std::set<std::string>& excluded_segments =
-            std::set<std::string>()) = 0;
+            std::set<std::string>(),
+        const ReplicaType replica_type = 
+            ReplicaType::MEMORY) = 0;
 };
 
 /**
@@ -189,7 +191,9 @@ class RandomAllocationStrategy : public AllocationStrategy {
         const std::vector<std::string>& preferred_segments =
             std::vector<std::string>(),
         const std::set<std::string>& excluded_segments =
-            std::set<std::string>()) {
+            std::set<std::string>(),
+        const ReplicaType replica_type = 
+            ReplicaType::MEMORY) {
         // Validate input parameters
         if (slice_length == 0 || replica_num == 0) {
             return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
@@ -217,7 +221,7 @@ class RandomAllocationStrategy : public AllocationStrategy {
                                          slice_length, generator);
             if (buffer) {
                 replicas.emplace_back(std::move(buffer),
-                                      ReplicaStatus::PROCESSING);
+                                      ReplicaStatus::PROCESSING, replica_type);
                 return replicas;
             }
             return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
@@ -237,7 +241,7 @@ class RandomAllocationStrategy : public AllocationStrategy {
                                          slice_length, generator);
             if (buffer) {
                 replicas.emplace_back(std::move(buffer),
-                                      ReplicaStatus::PROCESSING);
+                                      ReplicaStatus::PROCESSING, replica_type);
                 if (replicas.size() == replica_num) {
                     return replicas;
                 }
@@ -270,7 +274,7 @@ class RandomAllocationStrategy : public AllocationStrategy {
                                          slice_length, generator);
             if (buffer) {
                 replicas.emplace_back(std::move(buffer),
-                                      ReplicaStatus::PROCESSING);
+                                      ReplicaStatus::PROCESSING, replica_type);
                 // Nit: no need to insert names[index] into used_segments here
                 // because we only traverse all names once, thus there is no
                 // chance to try allocating from a segment for the second time.
@@ -301,8 +305,8 @@ class RandomAllocationStrategy : public AllocationStrategy {
         // Randomly select a start point to distribute
         // allocations across all segments
         std::uniform_int_distribution<size_t> dist(0, num_segs - 1);
-        size_t seg_offset = dist(generator);
-        for (size_t i = 0; i < num_segs; i++) {
+        size_t seg_offset = dist(generator); // select a start segment to place replica
+        for (size_t i = 0; i < num_segs; i++) { // only allocate one replica
             auto& allocator = (*allocators)[(i + seg_offset) % num_segs];
             if (auto buffer = allocator->allocate(slice_length)) {
                 return buffer;

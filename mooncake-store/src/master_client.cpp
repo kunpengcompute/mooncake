@@ -112,8 +112,8 @@ struct RpcNameTraits<&WrappedMasterService::MountSegment> {
 };
 
 template <>
-struct RpcNameTraits<&WrappedMasterService::MountSSDSegment> {
-    static constexpr const char* value = "MountSSDSegment";
+struct RpcNameTraits<&WrappedMasterService::MountNoFSegment> {
+    static constexpr const char* value = "MountNoFSegment";
 };
 
 template <>
@@ -122,8 +122,18 @@ struct RpcNameTraits<&WrappedMasterService::ReMountSegment> {
 };
 
 template <>
+struct RpcNameTraits<&WrappedMasterService::ReMountNoFSegment> {
+    static constexpr const char* value = "ReMountNoFSegment";
+};
+
+template <>
 struct RpcNameTraits<&WrappedMasterService::UnmountSegment> {
     static constexpr const char* value = "UnmountSegment";
+};
+
+template <>
+struct RpcNameTraits<&WrappedMasterService::UnmountNoFSegment> {
+    static constexpr const char* value = "UnmountNoFSegment";
 };
 
 template <>
@@ -508,14 +518,14 @@ tl::expected<void, ErrorCode> MasterClient::MountSegment(
     return result;
 }
 
-tl::expected<void, ErrorCode> MasterClient::MountSSDSegment(
-    const Segment& segment) {
-    ScopedVLogTimer timer(1, "MasterClient::MountSSDSegment");
-    timer.LogRequest("base=", segment.base, ", size=", segment.size,
+tl::expected<void, ErrorCode> MasterClient::MountNoFSegment(
+    const NoFSegment& segment) {
+    ScopedVLogTimer timer(1, "MasterClient::MountNofSegment");
+    timer.LogRequest("NoF segment mount: ", "base=", segment.base, ", size=", segment.size,
                      ", name=", segment.name, ", id=", segment.id,
                      ", client_id=", client_id_);
 
-    auto result = invoke_rpc<&WrappedMasterService::MountSSDSegment, void>(
+    auto result = invoke_rpc<&WrappedMasterService::MountNoFSegment, void>(
         segment, client_id_);
     timer.LogResponseExpected(result);
     return result;
@@ -533,12 +543,35 @@ tl::expected<void, ErrorCode> MasterClient::ReMountSegment(
     return result;
 }
 
+tl::expected<void, ErrorCode> MasterClient::ReMountNoFSegment(
+    const std::vector<NoFSegment>& segments) {
+    ScopedVLogTimer timer(1, "MasterClient::ReMountNofSegment");
+    timer.LogRequest("NoF segment remount: ", "segments_num=", segments.size(),
+                     ", client_id=", client_id_);
+
+    auto result = invoke_rpc<&WrappedMasterService::ReMountNoFSegment, void>(
+        segments, client_id_);
+    timer.LogResponseExpected(result);
+    return result;
+}
+
 tl::expected<void, ErrorCode> MasterClient::UnmountSegment(
     const UUID& segment_id) {
     ScopedVLogTimer timer(1, "MasterClient::UnmountSegment");
     timer.LogRequest("segment_id=", segment_id, ", client_id=", client_id_);
 
     auto result = invoke_rpc<&WrappedMasterService::UnmountSegment, void>(
+        segment_id, client_id_);
+    timer.LogResponseExpected(result);
+    return result;
+}
+
+tl::expected<void, ErrorCode> MasterClient::UnmountNoFSegment(
+    const UUID& segment_id) {
+    ScopedVLogTimer timer(1, "MasterClient::UnmountNoFSegment");
+    timer.LogRequest("NoF segment unmount: ", "segment_id=", segment_id, ", client_id=", client_id_);
+
+    auto result = invoke_rpc<&WrappedMasterService::UnmountNoFSegment, void>(
         segment_id, client_id_);
     timer.LogResponseExpected(result);
     return result;

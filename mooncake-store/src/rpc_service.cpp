@@ -614,18 +614,18 @@ tl::expected<void, ErrorCode> WrappedMasterService::MountSegment(
         [] { MasterMetricManager::instance().inc_mount_segment_failures(); });
 }
 
-tl::expected<void, ErrorCode> WrappedMasterService::MountSSDSegment(
-    const Segment& segment, const UUID& client_id) {
+tl::expected<void, ErrorCode> WrappedMasterService::MountNoFSegment(
+    const NoFSegment& segment, const UUID& client_id) {
     return execute_rpc(
-        "MountSSDSegment",
-        [&] { return master_service_.MountSSDSegment(segment, client_id); },
+        "MountNoFSegment",
+        [&] { return master_service_.MountNoFSegment(segment, client_id); },
         [&](auto& timer) {
-            timer.LogRequest("base=", segment.base, ", size=", segment.size,
+            timer.LogRequest("NoF segment mount: ", "base=", segment.base, ", size=", segment.size,
                              ", segment_name=", segment.name,
                              ", id=", segment.id);
         },
-        [] { nullptr; },
-        [] { nullptr; });
+        [] { MasterMetricManager::instance().inc_mount_nof_segment_requests(); },
+        [] { MasterMetricManager::instance().inc_mount_nof_segment_failures(); });
 }
 
 tl::expected<void, ErrorCode> WrappedMasterService::ReMountSegment(
@@ -641,6 +641,19 @@ tl::expected<void, ErrorCode> WrappedMasterService::ReMountSegment(
         [] { MasterMetricManager::instance().inc_remount_segment_failures(); });
 }
 
+tl::expected<void, ErrorCode> WrappedMasterService::ReMountNoFSegment(
+    const std::vector<NoFSegment>& segments, const UUID& client_id) {
+    return execute_rpc(
+        "ReMountNoFSegment",
+        [&] { return master_service_.ReMountNoFSegment(segments, client_id); },
+        [&](auto& timer) {
+            timer.LogRequest("NoF segment remount: ", "segments_count=", segments.size(),
+                             ", client_id=", client_id);
+        },
+        [] { MasterMetricManager::instance().inc_remount_nof_segment_requests(); },
+        [] { MasterMetricManager::instance().inc_remount_nof_segment_failures(); });
+}
+
 tl::expected<void, ErrorCode> WrappedMasterService::UnmountSegment(
     const UUID& segment_id, const UUID& client_id) {
     return execute_rpc(
@@ -652,6 +665,19 @@ tl::expected<void, ErrorCode> WrappedMasterService::UnmountSegment(
         },
         [] { MasterMetricManager::instance().inc_unmount_segment_requests(); },
         [] { MasterMetricManager::instance().inc_unmount_segment_failures(); });
+}
+
+tl::expected<void, ErrorCode> WrappedMasterService::UnmountNoFSegment(
+    const UUID& segment_id, const UUID& client_id) {
+    return execute_rpc(
+        "UnmountNoFSegment",
+        [&] { return master_service_.UnmountNoFSegment(segment_id, client_id); },
+        [&](auto& timer) {
+            timer.LogRequest("NoF segment unmount: ", "segment_id=", segment_id,
+                             ", client_id=", client_id);
+        },
+        [] { MasterMetricManager::instance().inc_unmount_nof_segment_requests(); },
+        [] { MasterMetricManager::instance().inc_unmount_nof_segment_failures(); });
 }
 
 tl::expected<std::string, ErrorCode> WrappedMasterService::GetFsdir() {
@@ -765,11 +791,15 @@ void RegisterRpcService(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::MountSegment>(
         &wrapped_master_service);
-    server.register_handler<&mooncake::WrappedMasterService::MountSSDSegment>(
+    server.register_handler<&mooncake::WrappedMasterService::MountNoFSegment>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::ReMountSegment>(
         &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::ReMountNoFSegment>(
+        &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::UnmountSegment>(
+        &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::UnmountNoFSegment>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::Ping>(
         &wrapped_master_service);

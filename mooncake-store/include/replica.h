@@ -24,7 +24,8 @@ namespace mooncake {
 enum class ReplicaType {
     MEMORY,     // Memory replica
     DISK,       // Disk replica
-    LOCAL_DISK  // Local disk replica
+    LOCAL_DISK, // Local disk replica
+    NOF_SSD,    // Nvme-oF SSD replica
 };
 
 /**
@@ -82,6 +83,8 @@ struct ReplicateConfig {
         preferred_segments{};         // Preferred segments for allocation
     std::string preferred_segment{};  // Deprecated: Single preferred segment
                                       // for backward compatibility
+    std::vector<std::string>
+        prefered_nof_segments{};      // TODO: Prefered nof segments for allocation (ranhaojia)
     bool prefer_alloc_in_same_node{false};
 
     friend std::ostream& operator<<(std::ostream& os,
@@ -108,6 +111,10 @@ struct MemoryReplicaData {
     std::unique_ptr<AllocatedBuffer> buffer;
 };
 
+struct NoFReplicaData {
+    std::unique_ptr<AllocatedBuffer> buffer;
+};
+
 struct DiskReplicaData {
     std::string file_path;
     uint64_t object_size = 0;
@@ -123,6 +130,12 @@ struct MemoryDescriptor {
     AllocatedBuffer::Descriptor buffer_descriptor;
     YLT_REFL(MemoryDescriptor, buffer_descriptor);
 };
+
+struct NoFDescriptor {
+    AllocatedBuffer::Descriptor buffer_descriptor;
+    YLT_REFL(NoFDescriptor, buffer_descriptor);
+};
+
 
 struct DiskDescriptor {
     std::string file_path{};
@@ -144,6 +157,16 @@ class Replica {
     // memory replica constructor
     Replica(std::unique_ptr<AllocatedBuffer> buffer, ReplicaStatus status)
         : data_(MemoryReplicaData{std::move(buffer)}), status_(status) {}
+
+    // nof ssd replica constructor
+    Replica(std::unique_ptr<AllocatedBuffer> buffer, ReplicaStatus status, ReplicaType replica_type)
+        : status_(status) {
+            if (replica_type == ReplicaType::MEMORY) {
+                data_ = MemoryReplicaData{std::move(buffer)};
+            } else if (replica_type == ReplicaType::NOF_SSD) {
+                data_ = NoFReplicaData{std::move(buffer)};
+            }
+        }
 
     // disk replica constructor
     Replica(std::string file_path, uint64_t object_size, ReplicaStatus status)
@@ -212,6 +235,10 @@ class Replica {
         return std::holds_alternative<MemoryReplicaData>(data_);
     }
 
+    [[nodiscard]] bool is_nof_replica() const {
+        return std::holds_alternative<NoFReplicaData>(data_);
+    }
+
     [[nodiscard]] bool is_disk_replica() const {
         return std::holds_alternative<DiskReplicaData>(data_);
     }
@@ -228,10 +255,28 @@ class Replica {
         return false;  // DiskReplicaData does not have handles
     }
 
+    [[nodiscard]] bool has_invalid_nof_handle() const {
+        if (is_nof_replica()) {
+            const auto& nof_data = std::get<NoFReplicaData>(data_);
+            return !nof_data.buffer->isAllocatorValid();
+        }
+        return false;
+    }
+
     [[nodiscard]] size_t get_memory_buffer_size() const {
         if (is_memory_replica()) {
             const auto& mem_data = std::get<MemoryReplicaData>(data_);
             return mem_data.buffer->size();
+        } else {
+            LOG(ERROR) << "Invalid replica type: " << type();
+            return 0;
+        }
+    }
+
+    [[nodiscard]] size_t get_nof_buffer_size() const {
+        if (is_nof_replica()) {
+            const auto& nof_data = std::get<NoFReplicaData>(data_);
+            return nof_data.buffer->size();
         } else {
             LOG(ERROR) << "Invalid replica type: " << type();
             return 0;
@@ -257,6 +302,9 @@ class Replica {
         ReplicaType operator()(const MemoryReplicaData&) const {
             return ReplicaType::MEMORY;
         }
+        ReplicaType operator()(const NoFReplicaData&) const {
+            return ReplicaType::NOF_SSD;
+        }
         ReplicaType operator()(const DiskReplicaData&) const {
             return ReplicaType::DISK;
         }
@@ -266,7 +314,7 @@ class Replica {
     };
 
     struct Descriptor {
-        std::variant<MemoryDescriptor, DiskDescriptor, LocalDiskDescriptor>
+        std::variant<MemoryDescriptor, NoFDescriptor, DiskDescriptor, LocalDiskDescriptor>
             descriptor_variant;
         ReplicaStatus status;
         YLT_REFL(Descriptor, descriptor_variant, status);
@@ -278,6 +326,14 @@ class Replica {
 
         bool is_memory_replica() const noexcept {
             return std::holds_alternative<MemoryDescriptor>(descriptor_variant);
+        }
+
+        bool is_nof_replica() noexcept {
+            return std::holds_alternative<NoFDescriptor>(descriptor_variant);
+        }
+
+        bool is_nof_replica() const noexcept {
+            return std::holds_alternative<NoFDescriptor>(descriptor_variant);
         }
 
         bool is_disk_replica() noexcept {
@@ -306,6 +362,14 @@ class Replica {
             throw std::runtime_error("Expected MemoryDescriptor");
         }
 
+        NoFDescriptor& get_nof_descriptor() {
+            if (auto* desc =
+                    std::get_if<NoFDescriptor>(&descriptor_variant)) {
+                return *desc;
+            }
+            throw std::runtime_error("Expected NoFDescriptor");
+        }
+
         DiskDescriptor& get_disk_descriptor() {
             if (auto* desc = std::get_if<DiskDescriptor>(&descriptor_variant)) {
                 return *desc;
@@ -329,6 +393,14 @@ class Replica {
             throw std::runtime_error("Expected MemoryDescriptor");
         }
 
+        const NoFDescriptor& get_nof_descriptor() const {
+            if (auto* desc =
+                    std::get_if<NoFDescriptor>(&descriptor_variant)) {
+                return *desc;
+            }
+            throw std::runtime_error("Expected NoFDescriptor");
+        }
+
         const DiskDescriptor& get_disk_descriptor() const {
             if (auto* desc = std::get_if<DiskDescriptor>(&descriptor_variant)) {
                 return *desc;
@@ -346,7 +418,7 @@ class Replica {
     };
 
    private:
-    std::variant<MemoryReplicaData, DiskReplicaData, LocalDiskReplicaData>
+    std::variant<MemoryReplicaData, NoFReplicaData, DiskReplicaData, LocalDiskReplicaData>
         data_;
     ReplicaStatus status_{ReplicaStatus::UNDEFINED};
 };
@@ -367,6 +439,18 @@ inline Replica::Descriptor Replica::get_descriptor() const {
             LOG(ERROR) << "Trying to get invalid memory replica descriptor";
         }
         desc.descriptor_variant = std::move(mem_desc);
+    } else if (is_nof_replica()) {
+        const auto& nof_data = std::get<NoFReplicaData>(data_);
+        NoFDescriptor nof_desc;
+        if (nof_data.buffer) {
+            nof_desc.buffer_descriptor = nof_data.buffer->get_descriptor();
+        } else {
+            nof_desc.buffer_descriptor.size_ = 0;
+            nof_desc.buffer_descriptor.buffer_address_ = 0;
+            nof_desc.buffer_descriptor.transport_endpoint_ = "";
+            LOG(ERROR) << "Trying to get invalid nof replica descriptor";
+        }
+        desc.descriptor_variant = std::move(nof_desc);
     } else if (is_disk_replica()) {
         const auto& disk_data = std::get<DiskReplicaData>(data_);
         DiskDescriptor disk_desc;
@@ -396,6 +480,15 @@ inline std::vector<std::optional<std::string>> Replica::get_segment_names()
             segment_names.push_back(std::nullopt);
         }
         return segment_names;
+    } else if (is_nof_replica()) {
+        const auto& nof_data = std::get<NoFReplicaData>(data_);
+        std::vector<std::optional<std::string>> segment_names;
+        if (nof_data.buffer && nof_data.buffer->isAllocatorValid()) {
+            segment_names.push_back(nof_data.buffer->getSegmentName());
+        } else {
+            segment_names.push_back(std::nullopt);
+        }
+        return segment_names;
     }
     return std::vector<std::optional<std::string>>();
 }
@@ -408,6 +501,13 @@ inline std::ostream& operator<<(std::ostream& os, const Replica& replica) {
         os << "type: MEMORY, buffers: [";
         if (mem_data.buffer) {
             os << *mem_data.buffer;
+        }
+        os << "]";
+    } else if (replica.is_nof_replica()) {
+        const auto& nof_data = std::get<NoFReplicaData>(replica.data_);
+        os << "type: NOF_SSD, buffers: [";
+        if (nof_data.buffer) {
+            os << *nof_data.buffer;
         }
         os << "]";
     } else if (replica.is_disk_replica()) {

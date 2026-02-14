@@ -10,7 +10,7 @@
 #include "spdk/spdk_wrapper.h"
 
 static void nvmf_io_complete(void *ctx, const struct spdk_nvme_cpl *cpl) {
-    if (unlikely(!ctx)) {
+    if (!ctx) {
         LOG(ERROR) << "nvmf_io_complete ctx is null";
         return;
     }
@@ -135,7 +135,6 @@ void FilereadWorkerPool::workerThread() {
 // ============================================================================
 // to fully utilize the available ssd bandwidth, we use a default of 4 worker
 // threads.
-constexpr int kDefaultSpdkNofWorkers = 4;
 
 SpdkNofWorkerPool::SpdkNofWorkerPool() : shutdown_(false) {
     VLOG(1) << "Creating SpdkNofWorkerPool with " << kDefaultSpdkNofWorkers
@@ -143,9 +142,6 @@ SpdkNofWorkerPool::SpdkNofWorkerPool() : shutdown_(false) {
 
     // Start worker threads
     workers_.reserve(kDefaultSpdkNofWorkers);
-    task_queue_.resize(kDefaultSpdkNofWorkers);
-    queue_mutex_.resize(kDefaultSpdkNofWorkers);
-    queue_cv_.resize(kDefaultSpdkNofWorkers);
     for (int i = 0; i < kDefaultSpdkNofWorkers; ++i) {
         workers_.emplace_back(&SpdkNofWorkerPool::workerThread, this, i);
     }
@@ -188,7 +184,7 @@ void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
             seg_to_worker_[seg] = worker_idx;
         }
     }
-    if (unlikely(worker_idx < 0 || worker_idx >= kDefaultSpdkNofWorkers)) {
+    if (worker_idx < 0 || worker_idx >= kDefaultSpdkNofWorkers) {
         LOG(ERROR) << "seg is not bind to invalid worker " << worker_idx;
         task.state->set_completed(ErrorCode::TRANSFER_FAIL);
         return;
@@ -203,7 +199,7 @@ void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
 
 static void task_complete(void *ctx, const struct spdk_nvme_cpl* cpl) {
     SpdkNofTask *task = reinterpret_cast<SpdkNofTask *>(ctx);
-    if (unlikely(spdk_nvme_cpl_is_error(cpl))) {
+    if (spdk_nvme_cpl_is_error(cpl)) {
         LOG(ERROR) << "task_complete: I/O failed" << spdk_nvme_cpl_get_status_string(&cpl->status);
         task->state->set_completed(ErrorCode::TRANSFER_FAIL);
     } else {
@@ -214,15 +210,15 @@ static void task_complete(void *ctx, const struct spdk_nvme_cpl* cpl) {
 void SpdkNofWorkerPool::workerThread(int work_idx) {
     VLOG(2) << "FilereadWorkerPool worker thread started";
 
-    size_t pending_io = 0;
-    set<nof_seg_handle *> seg_set;
+    int64_t pending_io = 0;
+    std::set<nof_seg_handle *> seg_set;
     auto &task_queue = task_queue_[work_idx];
     auto &queue_cv = queue_cv_[work_idx];
     auto &queue_mutex = queue_mutex_[work_idx];
     void *poll_group = SpdkWrapper::GetInstance().NvmePollGroupCreate();
     if (!poll_group) {
         LOG(ERROR) << "nvme poll group create failed, work_idx " << work_idx;
-        return ;
+        return;
     }
 
     while (true) {
@@ -231,7 +227,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
         // Wait for task or shutdown signal
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
-            queue_cv.wait(lock, [this] {
+            queue_cv.wait(lock, [this, &task_queue, &pending_io] {
                 return shutdown_.load() || !task_queue.empty() || pending_io;
             });
 
@@ -256,7 +252,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
 
                 int ret = SpdkWrapper::GetInstance().SubmitRequest(task->seg_handle,
                     task->ptr, task->lba, task->lba_count, task->op, nvmf_io_complete, task);
-                if (unlikely(ret != 0)) {
+                if (ret != 0) {
                     LOG(INFO) << "seg " << task->seg_handle << " submit io fail";
                     task->state->set_completed(ErrorCode::TRANSFER_FAIL);
                     delete task;
@@ -271,8 +267,8 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
         }
 
         if (pending_io > 0) {
-            int ret = SpdkWrapper::GetInstance().NvmePollGroupProcessCompletion(poll_group, 8);
-            if (unlikely(ret < 0 || ret > pending_io)) {
+            int64_t ret = SpdkWrapper::GetInstance().NvmePollGroupProcessCompletion(poll_group, 8);
+            if (ret < 0 || ret > pending_io) {
                 LOG(ERROR) << "poll completion error: ret " << ret << ", pending_io " << pending_io;  // pending io???
             } else {
                 pending_io -= ret;
@@ -831,7 +827,7 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
         return std::nullopt;
     }
 
-    uint32_t block_size = SpdkWrapper::GetInstance.GetBlockSize(seg_handle);
+    uint32_t block_size = SpdkWrapper::GetInstance().GetBlockSize(seg_handle);
     if ((block_size == INVALID_BLOCK_SIZE) || (handle.buffer_address_ % block_size) || (size % block_size)) {
         LOG(ERROR) << "request off " << handle.buffer_address_
                    << ", size " << size << " is not " << block_size << " align";

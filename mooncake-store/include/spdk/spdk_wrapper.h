@@ -53,8 +53,8 @@ public:
 
     uint32_t GetBlockSize(const nof_seg_handle *seg_handle);
 
-    int SubmitRequest(const nof_seg_handle *seg_handle, void *ptr, size_t size, int op, 
-        spdk_nvme_cmd_cb cb_fn, void *cb_ctx);
+    int SubmitRequest(const nof_seg_handle *seg_handle, void *ptr, uint64_t lba, uint32_t lba_count, 
+        int op, spdk_nvme_cmd_cb cb_fn, void *cb_ctx);
 
 private:
     explicit SpdkWrapper();

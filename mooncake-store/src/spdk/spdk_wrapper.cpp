@@ -112,7 +112,6 @@ int64_t SpdkWrapper::NvmePollGroupProcessCompletion(void *group, uint32_t comple
 
 int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
     size_t pos = 0;
-    size_t start = 0;
 
     while (pos < tr_str.size()) {
         size_t space_pos = tr_str.find(' ', pos);
@@ -120,7 +119,7 @@ int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
             space_pos = tr_str.length();
         }
 
-        std::string token = tr_str,substr(pos, space_pos - pos);
+        std::string token = tr_str.substr(pos, space_pos - pos);
         size_t colon_pos = token.find(":");
         if (colon_pos != std::string::npos) {
             std::string key = token.substr(0, colon_pos);
@@ -252,7 +251,7 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
 
 uint32_t SpdkWrapper::GetBlockSize(const nof_seg_handle *seg_handle)
 {
-    if (unlikely(!seg_handle || !seg_handle->ns)) {
+    if (!seg_handle || !seg_handle->ns) {
         return INVALID_BLOCK_SIZE;
     }
 
@@ -261,7 +260,7 @@ uint32_t SpdkWrapper::GetBlockSize(const nof_seg_handle *seg_handle)
 
 int SpdkWrapper::SubmitRequest(const nof_seg_handle *seg_handle, void *ptr, uint64_t lba, uint32_t lba_count, int op, 
         spdk_nvme_cmd_cb cb_fn, void *cb_ctx) {
-    if (unlikely(!seg_handle || !ptr || !lba_count || !seg_handle->qpair || !seg_handle->ns)) {
+    if (!seg_handle || !ptr || !lba_count || !seg_handle->qpair || !seg_handle->ns) {
         return -1;
     }
 

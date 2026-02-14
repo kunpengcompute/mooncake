@@ -18,6 +18,7 @@
 #include "replica.h"
 #include "storage_backend.h"
 #include "client_metric.h"
+#include "spdk/spdk_wrapper.h"
 
 namespace mooncake {
 
@@ -349,7 +350,7 @@ struct SpdkNofTask {
 
     SpdkNofTask(nof_seg_handle *handle, void *buf, uint64_t off, uint32_t len,
         int op_code, std::shared_ptr<SpdkNofOperationState> s) :
-        seg_handle(handle), ptr(buf), lba(off), lba_count(len), , op(op_code),
+        seg_handle(handle), ptr(buf), lba(off), lba_count(len), op(op_code),
         state(std::move(s)), cb_fn(nullptr) {}
 };
 
@@ -359,6 +360,7 @@ struct SpdkNofTask {
  * This class manages multiple worker thread that executes spdk nvmf operations
  * asynchronously.
  */
+constexpr int constkDefaultSpdkNofWorkers = 4;
 class SpdkNofWorkerPool {
     public:
     explicit SpdkNofWorkerPool();
@@ -380,9 +382,9 @@ class SpdkNofWorkerPool {
     void workerThread(int work_idx);
 
     std::vector<std::thread> workers_;
-    std::vector<std::queue<SpdkNofTask *>> task_queue_;
-    std::vector<std::mutex> queue_mutex_;
-    std::vector<std::condition_variable> queue_cv_;
+    std::queue<SpdkNofTask> task_queue_[constkDefaultSpdkNofWorkers];
+    std::mutex queue_mutex_[constkDefaultSpdkNofWorkers];
+    std::condition_variable queue_cv_[constkDefaultSpdkNofWorkers];
     std::atomic<bool> shutdown_;
     std::mutex seg_mutex_;
     int seg_num = 0;

@@ -26,7 +26,6 @@ set(MOONCAKE_STORE_SOURCES
     dummy_client.cpp
     http_metadata_server.cpp
     file_storage.cpp
-    spdk_hello.cpp
     memory_alloc.cpp
     ssd_register_client.cpp
 )
@@ -42,6 +41,9 @@ if(USE_3FS)
   endif()
   set(EXTRA_LIBS ${HF3FS_API_LIB})
 endif()
+
+add_subdirectory(spdk)
+list(APPEND MOONCAKE_STORE_SOURCES  ${SPDK_WRAPPER_SOURCES})
 
 # The cache_allocator library
 include_directories(${Python3_INCLUDE_DIRS})

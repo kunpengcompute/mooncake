@@ -898,6 +898,7 @@ class PutOperation {
     PutOperation(std::string_view k, const std::vector<Slice>& s)
         : key(k), slices(s) {
         value_length = CalculateSliceSize(slices);
+        ptr = ((!s.empty()) ? slices[0].ptr : nullptr);
         // Initialize with a pending error state to ensure result is always set
         result = tl::unexpected(ErrorCode::INTERNAL_ERROR);
     }
@@ -905,6 +906,7 @@ class PutOperation {
     std::string key;
     std::vector<Slice> slices;
     size_t value_length;
+    void *ptr;
     std::vector<std::vector<Slice>> batched_slices;
 
     // Enhanced state tracking
@@ -1049,9 +1051,9 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
         for (size_t replica_idx = 0; replica_idx < op.replicas.size();
              ++replica_idx) {
             const auto& replica = op.replicas[replica_idx];
-            if (replica.is_memory_replica()) {
+            if (replica.is_memory_replica() || replica.is_nof_replica()) {
                 auto submit_result = transfer_submitter_->submit(
-                    replica, op.slices, TransferRequest::WRITE);
+                    replica, op.slices, TransferRequest::WRITE, op.ptr, op.value_length);
 
                 if (!submit_result) {
                     failure_context = "Failed to submit transfer for replica " +
@@ -1062,7 +1064,15 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
 
                 op.pending_transfers.emplace_back(
                     std::move(submit_result.value()));
-            }
+            } 
+            // else if (replica.is_nof_replica()) {
+            //     auto submit_result = transfer_submitter_->submit(
+            //         replica, op.slices, TransferRequest::WRITE, op.ptr, op.value_length);
+                
+            //     if (!submit_result) {
+            //         LOG(ERROR) << "ssd submission failed for replice idx " << replica_idx;
+            //     }
+            // }
         }
 
         if (!all_transfers_submitted) {

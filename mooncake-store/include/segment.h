@@ -280,6 +280,14 @@ class SegmentManager {
             client_by_name_, client_local_disk_segment_, segment_mutex_);
     }
 
+    /**
+     * @brief Get the number of mounted memory segments
+     * @return mounted memory segment count
+     */
+    int getMountedSegmentCount() {
+        return mounted_segments_.size();
+    }
+
    private:
     mutable std::shared_mutex segment_mutex_;
     std::shared_ptr<AllocationStrategy> allocation_strategy_;
@@ -327,6 +335,14 @@ class NoFSegmentManager {
      */
     ScopedAllocatorAccess getAllocatorAccess() {
         return ScopedAllocatorAccess(allocator_manager_, segment_mutex_);
+    }
+
+    /**
+     * @brief Get the number of mounted NoF segments
+     * @return the mounted NoF segment count
+     */
+    int getMountedSegmentCount() {
+        return mounted_segments_.size();
     }
 
 

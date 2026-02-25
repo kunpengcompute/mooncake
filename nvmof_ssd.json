@@ -4,6 +4,8 @@
       "nsid": 1,
       "traddr": "192.168.65.81",
       "trsvcid": 4420,
+      "base": 16777216,
+      "size":274877906944,
       "master_server_address": "192.168.65.81:50051",
       "metadata_server": ""
     },
@@ -12,6 +14,8 @@
       "nsid": 1,
       "traddr": "192.168.65.57",
       "trsvcid": 4420,
+      "base": 16777216,
+      "size":274877906944,
       "master_server_address": "192.168.65.81:50051",
       "metadata_server": ""
     }

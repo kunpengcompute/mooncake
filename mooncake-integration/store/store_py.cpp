@@ -809,11 +809,11 @@ uintptr_t get_free_func_addr()
     return reinterpret_cast<uintptr_t>(&hugepage_memory_free);
 }
 
-class MooncakeDistributedSSDRegisterPyWrapper {
+class MooncakeDistributedNoFRegisterPyWrapper {
    public:
-    std::shared_ptr<SSDRegisterClient> register_{nullptr};
+    std::shared_ptr<NoFRegisterClient> register_{nullptr};
 
-    MooncakeDistributedSSDRegisterPyWrapper() = default;
+    MooncakeDistributedNoFRegisterPyWrapper() = default;
 };
 
 PYBIND11_MODULE(store, m) {
@@ -937,17 +937,19 @@ PYBIND11_MODULE(store, m) {
                  return self.shm_helper_->free(reinterpret_cast<void *>(ptr));
              });
 
-     py::class_<MooncakeDistributedSSDRegisterPyWrapper>(m, "MooncakeDistributedSSDRegister")
+     py::class_<MooncakeDistributedNoFRegisterPyWrapper>(m, "MooncakeDistributedNoFRegister")
         .def(py::init<>())
         .def("real_register",
-             [](MooncakeDistributedSSDRegisterPyWrapper &self, const std::string &nqn = "",
+             [](MooncakeDistributedNoFRegisterPyWrapper &self, const std::string &nqn = "",
                 size_t nsid = 1,
                 const std::string &traddr = "",
                 size_t trsvcid = 4420,
+                uintptr_t base = 0x0,
+                size_t size = 1024,
                 const std::string &master_server_addr = "127.0.0.1:50051") {
-                self.register_ = std::make_shared<SSDRegisterClient>();
+                self.register_ = std::make_shared<NoFRegisterClient>();
                 return self.register_->set_register(
-                    nqn, nsid, traddr, trsvcid, master_server_addr
+                    nqn, nsid, traddr, trsvcid, base, size, master_server_addr
                  );
              });
 

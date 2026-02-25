@@ -168,7 +168,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     this->ipc_socket_path_ = ipc_socket_path;
 
     /* spdk start */
-    spdk_start();
+    // spdk_start();
     /* spdk end*/
 
     // Remove port if hostname already contains one

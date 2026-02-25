@@ -34,8 +34,8 @@ class MooncakeStoreTestService:
             buffer_size = 1024 * 1024 * 16  # 16MB
             self.store = MooncakeDistributedStore()
 
-            ret_code = self.store.setup("localhost", "http://192.168.65.57:8080/metadata", 64 * 1024 * 1024, 0,
-                   "rdma", "mlx5_0", "192.168.65.57:50051")
+            ret_code = self.store.setup("localhost", "http://192.168.65.81:8080/metadata", 64 * 1024 * 1024, 0,
+                   "rdma", "rocep65s0f0", "192.168.65.81:50051")
             if ret_code:
                 logger.error(f"failed to setup mooncake store, error code: {ret_code}")
 

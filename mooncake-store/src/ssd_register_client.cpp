@@ -2,11 +2,11 @@
 
 namespace mooncake {
 
-SSDRegisterClient::SSDRegisterClient(): master_client_(generate_uuid(), nullptr) {}
+NoFRegisterClient::NoFRegisterClient(): master_client_(generate_uuid(), nullptr) {}
 
-SSDRegisterClient::~SSDRegisterClient() = default;
+NoFRegisterClient::~NoFRegisterClient() = default;
 
-int SSDRegisterClient::set_register(
+int NoFRegisterClient::set_register(
     const std::string &nqn,
     size_t nsid,
     const std::string &traddr, 
@@ -19,7 +19,9 @@ int SSDRegisterClient::set_register(
               << ",nsid=" << nsid
               << ",traddr=" << traddr
               << ",trsvcid=" << trsvcid
-              << ",master=" << master_server_addr;
+              << ",master=" << master_server_addr
+              << ",base=" << base
+              << ",size=" << size;
 
     auto err = master_client_.Connect(master_server_addr);
     if (err != ErrorCode::OK) {
@@ -39,11 +41,22 @@ int SSDRegisterClient::set_register(
         return OPERATION_FAILED;
     }
 
-    const std::string key = "sglang_mooncake_warmup_key";
+    const std::string key = "sglang_mooncake_warmup_key" + segment.name;
     std::vector<size_t> slice_lengths = {10, 20 ,30};
     auto start_result = master_client_.PutStart(key, slice_lengths, ReplicateConfig{});
     if (!start_result) {
-        LOG(ERROR) << "putstart_failed  ";
+        ErrorCode err = start_result.error();
+        if (err == ErrorCode::OBJECT_ALREADY_EXISTS) {
+            VLOG(1) << "object_already_exists key=" << key;
+            return {};
+        }
+        if (err == ErrorCode::NO_AVAILABLE_HANDLE) {
+            LOG(WARNING) << "Failed to start put operation for key=" << key
+                         << PUT_NO_SPACE_HELPER_STR;
+        } else {
+            LOG(ERROR) << "Failed to start put operation for key=" << key
+                       << ": " << toString(err);
+        }
         return OPERATION_FAILED;
     }
 

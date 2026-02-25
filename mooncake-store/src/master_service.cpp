@@ -666,6 +666,9 @@ auto MasterService::GetReplicaList(std::string_view key)
                                   default_kv_lease_ttl_);
 }
 
+/*
+ * @brief 已经适配NoF，在写入数据时在Memory和NoF SSD上申请副本
+*/
 auto MasterService::PutStart(const UUID& client_id, const std::string& key,
                              const uint64_t slice_length,
                              const ReplicateConfig& config)
@@ -723,7 +726,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     // Allocate memory replicas
     std::vector<Replica> replicas;
-    {
+    if (segment_manager_.getMountedSegmentCount() > 0) {
         ScopedAllocatorAccess allocator_access =
             segment_manager_.getAllocatorAccess();
         const auto& allocator_manager = allocator_access.getAllocatorManager();
@@ -751,7 +754,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     }
 
     // Allocate nof replicas
-    {
+    if (nof_segment_manager_.getMountedSegmentCount() > 0) {
         ScopedAllocatorAccess allocator_access =
             nof_segment_manager_.getAllocatorAccess();
         const auto& allocator_manager = allocator_access.getAllocatorManager();
@@ -820,6 +823,9 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     return replica_list;
 }
 
+/*
+ * @brief 已经适配NoF，副本申请完成后设置副本完成状态
+*/
 auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
                            ReplicaType replica_type)
     -> tl::expected<void, ErrorCode> {

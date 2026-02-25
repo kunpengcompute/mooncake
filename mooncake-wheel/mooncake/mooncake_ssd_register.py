@@ -7,11 +7,11 @@ import logging
 import time
 from typing import List, Dict, Any
 
-from mooncake.store import MooncakeDistributedSSDRegister
+from mooncake.store import MooncakeDistributedNoFRegister
 from mooncake.mooncake_config import MooncakeConfig
 
 
-class MooncakeSSDRegister:
+class MooncakeNoFRegister:
     """
     Configuration Example (JSON format):
 
@@ -92,15 +92,15 @@ class MooncakeSSDRegister:
             try:
                 logging.info("Registering SSD %d/%d: nqn=%s, traddr=%s", i + 1, total, cfg.get("nqn"), cfg.get("traddr"))
 
-                self.register = MooncakeDistributedSSDRegister()
+                self.register = MooncakeDistributedNoFRegister()
                 ret = self.register.real_register(
                     cfg["nqn"],
                     cfg["nsid"],
                     cfg["traddr"],
                     cfg["trsvcid"],
-                    cfg["master_server_address"],
                     cfg["base"],
-                    cfg["size"]
+                    cfg["size"],
+                    cfg["master_server_address"]
                 )
                 if ret != 0:
                     raise RuntimeError(f"Registration failed with code {ret}")
@@ -141,7 +141,7 @@ if __name__ == "__main__":
         else:
             logging.warning(f"Ignoring invalid CLI config: {item}")
 
-    register = MooncakeSSDRegister(args.config, cli_config)
+    register = MooncakeNoFRegister(args.config, cli_config)
     success = register.start_ssd_service()
     if not success:
         exit(1)

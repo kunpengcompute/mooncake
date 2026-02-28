@@ -871,9 +871,9 @@ tl::expected<void, ErrorCode> StorageBackend::EnsureDiskSpace(
     const size_t kMaxEvictionAttempts = 1000;
     size_t attempts = 0;
 
-    bool space_reserved = CheckDiskSpace(required_size);
+    bool space_reserved = CheckDiskSpace(required_size); // check if there is enough space for required size
 
-    while (!space_reserved && attempts < kMaxEvictionAttempts) {
+    while (!space_reserved && attempts < kMaxEvictionAttempts) { // no enough space and not reach max attempts
         std::string evicted_file = EvictFile();
         if (evicted_file.empty()) {
             LOG(ERROR) << "Failed to evict file to make space.";

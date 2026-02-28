@@ -678,20 +678,21 @@ class MasterService {
 
         DiscardedReplicas(std::vector<Replica>&& replicas,
                           std::chrono::steady_clock::time_point ttl)
-            : replicas_(std::move(replicas)), ttl_(ttl), mem_size_(0) {
+            : replicas_(std::move(replicas)), ttl_(ttl), replica_size_(0) {
             for (auto& replica : replicas_) {
-                mem_size_ += replica.get_memory_buffer_size();
+                if (replica.is_memory_replica()) replica_size_ += replica.get_memory_buffer_size();
+                else if (replica.is_nof_replica()) replica_size_ += replica.get_nof_buffer_size();
             }
             MasterMetricManager::instance().inc_put_start_discard_cnt(
-                1, mem_size_);
+                1, replica_size_);
         }
 
         ~DiscardedReplicas() {
             MasterMetricManager::instance().inc_put_start_release_cnt(
-                1, mem_size_);
+                1, replica_size_);
         }
 
-        uint64_t memSize() const { return mem_size_; }
+        uint64_t replicaSize() const { return replica_size_; }
 
         bool isExpired(const std::chrono::steady_clock::time_point& now) const {
             return ttl_ <= now;
@@ -700,7 +701,7 @@ class MasterService {
        private:
         std::vector<Replica> replicas_;
         std::chrono::steady_clock::time_point ttl_;
-        uint64_t mem_size_;
+        uint64_t replica_size_;
     };
     std::mutex discarded_replicas_mutex_;
     std::list<DiscardedReplicas> discarded_replicas_

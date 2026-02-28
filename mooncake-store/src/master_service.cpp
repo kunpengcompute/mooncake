@@ -30,6 +30,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
       enable_disk_eviction_(config.enable_disk_eviction),
       quota_bytes_(config.quota_bytes),
       segment_manager_(config.memory_allocator),
+      nof_segment_manager_(config.memory_allocator),
       memory_allocator_type_(config.memory_allocator),
       allocation_strategy_(std::make_shared<RandomAllocationStrategy>()),
       put_start_discard_timeout_sec_(config.put_start_discard_timeout_sec),
@@ -703,13 +704,13 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     auto it = metadata_shards_[shard_idx].metadata.find(key);
     if (it != metadata_shards_[shard_idx].metadata.end() && // The key exists and at least one replica is valid
         !CleanupStaleHandles(it->second)) { // Lazy cleanup, delete expired replica
-        auto& metadata = it->second;
+        auto& metadata = it->second; // ObjectMetadata instance
         // If the object's PutStart expired and has not completed any
         // replicas, we can discard it and allow the new PutStart to
         // go.
         if (!metadata.HasCompletedReplicas() &&
             metadata.put_start_time + put_start_discard_timeout_sec_ < now) {
-            auto replicas = metadata.DiscardProcessingReplicas();
+            auto replicas = metadata.DiscardProcessingReplicas(); // replica vector in which the replicas are in processing
             if (!replicas.empty()) {
                 std::lock_guard lock(discarded_replicas_mutex_);
                 discarded_replicas_.emplace_back(
@@ -1343,7 +1344,7 @@ uint64_t MasterService::ReleaseExpiredDiscardedReplicas(
     discarded_replicas_.remove_if(
         [&now, &released_cnt](const DiscardedReplicas& item) {
             const bool expired = item.isExpired(now);
-            if (expired && item.memSize() > 0) {
+            if (expired && item.replicaSize() > 0) {
                 released_cnt++;
             }
             return expired;

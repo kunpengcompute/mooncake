@@ -30,6 +30,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
       enable_disk_eviction_(config.enable_disk_eviction),
       quota_bytes_(config.quota_bytes),
       segment_manager_(config.memory_allocator),
+      nof_segment_manager_(config.memory_allocator),
       memory_allocator_type_(config.memory_allocator),
       allocation_strategy_(std::make_shared<RandomAllocationStrategy>()),
       put_start_discard_timeout_sec_(config.put_start_discard_timeout_sec),
@@ -1343,7 +1344,7 @@ uint64_t MasterService::ReleaseExpiredDiscardedReplicas(
     discarded_replicas_.remove_if(
         [&now, &released_cnt](const DiscardedReplicas& item) {
             const bool expired = item.isExpired(now);
-            if (expired && item.memSize() > 0) {
+            if (expired && item.replicaSize() > 0) {
                 released_cnt++;
             }
             return expired;

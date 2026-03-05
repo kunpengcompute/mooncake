@@ -110,59 +110,45 @@ int64_t SpdkWrapper::NvmePollGroupProcessCompletion(void *group, uint32_t comple
         complete_per_seg, disconnect_cb);
 }
 
+int64_t SpdkWrapper::NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t complete_per_seg) {
+    return spdk_nvme_qpair_process_completions(seg->qpair, complete_per_seg);
+}
+
 int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
-    size_t pos = 0;
-
-    while (pos < tr_str.size()) {
-        size_t space_pos = tr_str.find(' ', pos);
-        if (space_pos == std::string::npos) {
-            space_pos = tr_str.length();
-        }
-
-        std::string token = tr_str.substr(pos, space_pos - pos);
-        size_t colon_pos = token.find(":");
-        if (colon_pos != std::string::npos) {
-            std::string key = token.substr(0, colon_pos);
-            std::string val = token.substr(colon_pos + 1);
-
-            if (key == "traddr") {
-                if (val.size() > SPDK_NVMF_TRADDR_MAX_LEN) {
-                    LOG(ERROR) << "traddr length " << val.size() << " greater than maximum allowed " << SPDK_NVMF_TRADDR_MAX_LEN;
-                    return -1;
-                }
-                strncpy(info->trid.traddr, val.c_str(), val.size());
-                info->trid.traddr[val.size()] = '\0';
-                info->ctrlr_key += val;
-            } else if (key == "trsvcid") {
-                if (val.size() > SPDK_NVMF_TRSVCID_MAX_LEN) {
-                    LOG(ERROR) << "trsvcid length " << val.size() << " greater than maximum allowed " << SPDK_NVMF_TRSVCID_MAX_LEN;
-                    return -1;
-                }
-                strncpy(info->trid.trsvcid, val.c_str(), val.size());
-                info->trid.trsvcid[val.size()] = '\0';
-            } else if (key == "subnqn") {
-                if (val.size() > SPDK_NVMF_NQN_MAX_LEN) {
-                    LOG(ERROR) << "subnqn length " << val.size() << " greater than maximum allowed " << SPDK_NVMF_NQN_MAX_LEN;
-                    return -1;
-                }
-                strncpy(info->trid.subnqn, val.c_str(), val.size());
-                info->trid.subnqn[val.size()] = '\0';
-                info->ctrlr_key += val;
-            } else if (key == "ns") {
-                try {
-                    info->ns = static_cast<uint32_t>(std::stoul(val));
-                } catch (const std::exception& e) {
-                    LOG(ERROR) << "Failed to parse ns " << e.what();
-                    return -1;
-                }
-            }
-        }
-
-        pos = space_pos + 1;
+    if (spdk_nvme_transport_id_parse(&info->trid, tr_str.c_str()) != 0) {
+        LOG(ERROR) << "Error parsing transport address";
+        return -1;
     }
 
-    info->trid.trtype = SPDK_NVME_TRANSPORT_RDMA;
-    info->trid.adrfam = SPDK_NVMF_ADRFAM_IPV4;
+    std::string ns_prefix = "ns:";
+    size_t ns_pos = tr_str.find(ns_prefix);
+    if (ns_pos != std::string::npos) {
+        size_t ns_start = ns_pos + ns_prefix.length();
+        size_t ns_end = tr_str.find_first_of(" \t", ns_start);
+
+        std::string ns_str;
+        if (ns_end == std::string::npos) {
+            ns_str = tr_str.substr(ns_start);
+        } else {
+            ns_str = tr_str.substr(ns_start, ns_end - ns_start);
+        }
+
+        try {
+           info->ns = std::stoul(ns_str);
+        } catch (const std::exception &e) {
+           LOG(ERROR) << "Failed to parse ns value: " << ns_str << ", error: " << e.what();
+           return -1;
+        }
+    } else {
+        LOG(ERROR) << "No ns field found in transport string";
+    }
+
+    LOG(INFO) << "traddr:" << info->trid.traddr
+              << "trsvcid:" << info->trid.trsvcid
+              << "ns:" << info->ns
+              << "subnqn:" << info->trid.subnqn
+              << "trtype:" << info->trid.trtype
+    
     return 0;
 }
 
@@ -225,6 +211,7 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
         if (spdk_nvme_ctrlr_is_active_ns(info->ctrlr, tr.ns)) {
             ns = spdk_nvme_ctrlr_get_ns(info->ctrlr, tr.ns);
         } else {
+            LOG(ERROR) << "spdk_nvme_ctrlr_is_active_ns failed";
             return nullptr;
         }
 
@@ -241,11 +228,11 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
             return nullptr;
         }
 
+        seg_handle->qpair = qpair;
+        seg_handle->ns = ns;
         ns_seg[tr.ns] = seg_handle;
     }
 
-    seg_handle->qpair = qpair;
-    seg_handle->ns = ns;
     return seg_handle;
 }
 

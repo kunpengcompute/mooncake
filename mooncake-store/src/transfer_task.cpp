@@ -18,6 +18,10 @@ static void nvmf_io_complete(void *ctx, const struct spdk_nvme_cpl *cpl) {
     mooncake::SpdkNofTask *task = reinterpret_cast<mooncake::SpdkNofTask *>(ctx);
     task->cb_fn(ctx, cpl);
 
+    if (--(*task->io_count) < 0) {
+        LOG(ERROR) << "pending io < 0";
+    }
+
     delete task;
 }
 
@@ -215,11 +219,6 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
     auto &task_queue = task_queue_[work_idx];
     auto &queue_cv = queue_cv_[work_idx];
     auto &queue_mutex = queue_mutex_[work_idx];
-    void *poll_group = SpdkWrapper::GetInstance().NvmePollGroupCreate();
-    if (!poll_group) {
-        LOG(ERROR) << "nvme poll group create failed, work_idx " << work_idx;
-        return;
-    }
 
     while (true) {
         SpdkNofTask *task = nullptr;
@@ -239,6 +238,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                 task = new SpdkNofTask(std::move(task_queue.front()));
                 task_queue.pop();
                 task->cb_fn = &task_complete;
+                task->io_count = &pending_io;
             }
         }
 
@@ -246,7 +246,6 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
             try {
                 if (seg_set.find(task->seg_handle) == seg_set.end()) {
                     LOG(INFO) << "seg_handle " << task->seg_handle << " bind to worker " << work_idx;
-                    SpdkWrapper::GetInstance().NvmePollGroupAdd(poll_group, task->seg_handle);
                     seg_set.insert(task->seg_handle);
                 }
 
@@ -266,20 +265,16 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
             }
         }
 
-        if (pending_io > 0) {
-            int64_t ret = SpdkWrapper::GetInstance().NvmePollGroupProcessCompletion(poll_group, 8);
-            if (ret < 0 || ret > pending_io) {
-                LOG(ERROR) << "poll completion error: ret " << ret << ", pending_io " << pending_io;  // pending io???
-            } else {
-                pending_io -= ret;
+        while (pending_io >= 1) {
+            int64_t ret = 0;
+            for (auto &seg_handle: seg_set) {
+                ret = SpdkWrapper::GetInstance().NvmePollProcessCompletion(seg_handle, 8);
             }
+            if (ret < 0 ) {
+                LOG(ERROR) << "poll completion error: ret " << ret << ", pending_io " << pending_io;  // pending io???
+            } 
         }
     }
-
-    for (auto &seg : seg_set) {
-        SpdkWrapper::GetInstance().NvmePollGroupRemove(poll_group, seg);
-    }
-    SpdkWrapper::GetInstance().NvmePollGroupDestroy(poll_group);
 
     VLOG(2) << "FilereadWorkerPool worker thread exiting";
 }
@@ -575,6 +570,7 @@ TransferSubmitter::TransferSubmitter(TransferEngine& engine,
                                      TransferMetric* transfer_metric)
     : engine_(engine),
       memcpy_pool_(std::make_unique<MemcpyWorkerPool>()),
+      spdk_nvmf_pool_(std::make_unique<SpdkNofWorkerPool>()),
       fileread_pool_(std::make_unique<FilereadWorkerPool>(backend)),
       transfer_metric_(transfer_metric) {
     // Read MC_STORE_MEMCPY environment variable, default to false (disabled)

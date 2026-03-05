@@ -347,6 +347,7 @@ struct SpdkNofTask {
     int op;
     std::shared_ptr<SpdkNofOperationState> state;
     IoCompleteCallback cb_fn;
+    int64_t *io_count;
 
     SpdkNofTask(nof_seg_handle *handle, void *buf, uint64_t off, uint32_t len,
         int op_code, std::shared_ptr<SpdkNofOperationState> s) :

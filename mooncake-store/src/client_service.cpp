@@ -752,9 +752,16 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             continue;
         }
 
+        const auto &slice = slices_it->second;
+        void *ptr = slice[0].ptr;
+        size_t len = 0;
+        for (const auto &x: slice) {
+            len += x.size;
+        }
+
         // Submit transfer operation asynchronously
         auto future = transfer_submitter_->submit(replica, slices_it->second,
-                                                  TransferRequest::READ);
+                                                  TransferRequest::READ, ptr, len);
         if (!future) {
             LOG(ERROR) << "Failed to submit transfer operation for key: "
                        << key;

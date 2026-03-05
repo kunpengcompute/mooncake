@@ -229,14 +229,32 @@ class MasterMetricManager {
     int64_t get_batch_put_revoke_failed_items();
 
     // Eviction Metrics
+    // total eviction metrics
     void inc_eviction_success(int64_t key_count, int64_t size);
     void inc_eviction_fail();  // not a single object is evicted
+    // mem eviction metrics
+    void inc_mem_eviction_success(int64_t key_count, int64_t size);
+    void inc_mem_eviction_fail();  // not a single object is evicted
+    // nof eviction metrics
+    void inc_nof_eviction_success(int64_t key_count, int64_t size);
+    void inc_nof_eviction_fail();  // not a single object is evicted
 
     // Eviction Metrics Getters
+    // total eviction metrics
     int64_t get_eviction_success();
     int64_t get_eviction_attempts();
     int64_t get_evicted_key_count();
     int64_t get_evicted_size();
+    // mem eviction metrics
+    int64_t get_mem_eviction_success();
+    int64_t get_mem_eviction_attempts();
+    int64_t get_mem_evicted_key_count();
+    int64_t get_mem_evicted_size();
+    // nof eviction metrics
+    int64_t get_nof_eviction_success();
+    int64_t get_nof_eviction_attempts();
+    int64_t get_nof_evicted_key_count();
+    int64_t get_nof_evicted_size();
 
     // PutStart Discard Metrics
     void inc_put_start_discard_cnt(int64_t count, int64_t size);
@@ -397,10 +415,21 @@ class MasterMetricManager {
                        {CacheHitStat::VALID_GET_RATE, "valid_get_rate"}};
 
     // Eviction Metrics
+    // total eviction metrics
     ylt::metric::counter_t eviction_success_;
     ylt::metric::counter_t eviction_attempts_;
     ylt::metric::counter_t evicted_key_count_;
     ylt::metric::counter_t evicted_size_;
+    // mem eviction metrics
+    ylt::metric::counter_t mem_eviction_success_;
+    ylt::metric::counter_t mem_eviction_attempts_;
+    ylt::metric::counter_t mem_evicted_key_count_;
+    ylt::metric::counter_t mem_evicted_size_;
+    // nof eviction metrics
+    ylt::metric::counter_t nof_eviction_success_;
+    ylt::metric::counter_t nof_eviction_attempts_;
+    ylt::metric::counter_t nof_evicted_key_count_;
+    ylt::metric::counter_t nof_evicted_size_;
 
     // PutStart Discard Metrics
     ylt::metric::counter_t put_start_discard_cnt_;

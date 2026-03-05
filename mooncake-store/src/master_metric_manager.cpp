@@ -259,6 +259,7 @@ MasterMetricManager::MasterMetricManager()
       total_get_nums_("total_get_nums_", "Total number of get operations"),
 
       // Initialize Eviction Counters
+      // total eviction
       eviction_success_("master_successful_evictions_total",
                         "Total number of successful eviction operations"),
       eviction_attempts_("master_attempted_evictions_total",
@@ -267,6 +268,24 @@ MasterMetricManager::MasterMetricManager()
                          "Total number of keys evicted"),
       evicted_size_("master_evicted_size_bytes",
                     "Total bytes of evicted objects"),
+      // mem eviction
+      mem_eviction_success_("master_successful_evictions_mem",
+                        "Total number of successful eviction operations in mem"),
+      mem_eviction_attempts_("master_attempted_evictions_mem",
+                         "Total number of attempted eviction operations in mem"),
+      mem_evicted_key_count_("master_evicted_key_count_mem",
+                         "Total number of keys evicted in mem"),
+      mem_evicted_size_("master_evicted_size_bytes_mem",
+                    "Total bytes of evicted objects in mem"),
+      // nof eviction
+      nof_eviction_success_("master_successful_evictions_nof",
+                        "Total number of successful eviction operations in nof"),
+      nof_eviction_attempts_("master_attempted_evictions_nof",
+                         "Total number of attempted eviction operations in nof"),
+      nof_evicted_key_count_("master_evicted_key_count_nof",
+                         "Total number of keys evicted in nof"),
+      nof_evicted_size_("master_evicted_size_bytes_nof",
+                    "Total bytes of evicted objects in nof"),
 
       // Initialize Discarded Replicas Counters
       put_start_discard_cnt_("master_put_start_discard_cnt",
@@ -1079,6 +1098,26 @@ void MasterMetricManager::inc_eviction_success(int64_t key_count,
 
 void MasterMetricManager::inc_eviction_fail() { eviction_attempts_.inc(); }
 
+void MasterMetricManager::inc_mem_eviction_success(int64_t key_count,
+                                               int64_t size) {
+    mem_evicted_key_count_.inc(key_count);
+    mem_evicted_size_.inc(size);
+    mem_eviction_success_.inc();
+    mem_eviction_attempts_.inc();
+}
+
+void MasterMetricManager::inc_mem_eviction_fail() { mem_eviction_attempts_.inc(); }
+
+void MasterMetricManager::inc_nof_eviction_success(int64_t key_count,
+                                               int64_t size) {
+    nof_evicted_key_count_.inc(key_count);
+    nof_evicted_size_.inc(size);
+    nof_eviction_success_.inc();
+    nof_eviction_attempts_.inc();
+}
+
+void MasterMetricManager::inc_nof_eviction_fail() { nof_eviction_attempts_.inc(); }
+
 int64_t MasterMetricManager::get_eviction_success() {
     return eviction_success_.value();
 }
@@ -1093,6 +1132,38 @@ int64_t MasterMetricManager::get_evicted_key_count() {
 
 int64_t MasterMetricManager::get_evicted_size() {
     return evicted_size_.value();
+}
+
+int64_t MasterMetricManager::get_mem_eviction_success() {
+    return mem_eviction_success_.value();
+}
+
+int64_t MasterMetricManager::get_mem_eviction_attempts() {
+    return mem_eviction_attempts_.value();
+}
+
+int64_t MasterMetricManager::get_mem_evicted_key_count() {
+    return mem_evicted_key_count_.value();
+}
+
+int64_t MasterMetricManager::get_mem_evicted_size() {
+    return mem_evicted_size_.value();
+}
+
+int64_t MasterMetricManager::get_nof_eviction_success() {
+    return nof_eviction_success_.value();
+}
+
+int64_t MasterMetricManager::get_nof_eviction_attempts() {
+    return nof_eviction_attempts_.value();
+}
+
+int64_t MasterMetricManager::get_nof_evicted_key_count() {
+    return nof_evicted_key_count_.value();
+}
+
+int64_t MasterMetricManager::get_nof_evicted_size() {
+    return nof_evicted_size_.value();
 }
 
 // PutStart Discard Metrics Getters
@@ -1342,10 +1413,21 @@ std::string MasterMetricManager::get_summary_string() {
         batch_replica_clear_failed_items_.value();
 
     // Eviction counters
+    // Total counters
     int64_t eviction_success = eviction_success_.value();
     int64_t eviction_attempts = eviction_attempts_.value();
     int64_t evicted_key_count = evicted_key_count_.value();
     int64_t evicted_size = evicted_size_.value();
+    // Mem eviction counters
+    int64_t mem_eviction_success = mem_eviction_success_.value();
+    int64_t mem_eviction_attempts = mem_eviction_attempts_.value();
+    int64_t mem_evicted_key_count = mem_evicted_key_count_.value();
+    int64_t mem_evicted_size = mem_evicted_size_.value();
+    // NoF eviction counters
+    int64_t nof_eviction_success = nof_eviction_success_.value();
+    int64_t nof_eviction_attempts = nof_eviction_attempts_.value();
+    int64_t nof_evicted_key_count = nof_evicted_key_count_.value();
+    int64_t nof_evicted_size = nof_evicted_size_.value();
 
     // Ping counters
     int64_t ping = ping_requests_.value();
@@ -1364,7 +1446,7 @@ std::string MasterMetricManager::get_summary_string() {
         ss << " (" << std::fixed << std::setprecision(1)
            << ((double)mem_allocated / (double)mem_capacity * 100.0) << "%)";
     }
-    ss << " | Nvme-oF SSD: " << byte_size_to_string(nof_allocated) << " / "
+    ss << " | NVMe-oF SSD: " << byte_size_to_string(nof_allocated) << " / "
        << byte_size_to_string(nof_capacity);
     if (nof_capacity > 0) {
         ss << " (" << std::fixed << std::setprecision(1)
@@ -1444,9 +1526,17 @@ std::string MasterMetricManager::get_summary_string() {
        << batch_replica_clear_items << "), ";
 
     // Eviction summary
-    ss << " | Eviction: " << "Success/Attempts=" << eviction_success << "/"
+    ss << " | Overall Eviction: " << "Success/Attempts=" << eviction_success << "/"
        << eviction_attempts << ", " << "keys=" << evicted_key_count << ", "
        << "size=" << byte_size_to_string(evicted_size);
+    // mem eviction
+    ss << " | Mem Eviction: " << "Success/Attempts=" << mem_eviction_success << "/"
+       << mem_eviction_attempts << ", " << "keys=" << mem_evicted_key_count << ", "
+       << "size=" << byte_size_to_string(mem_evicted_size);
+    // nof eviction
+    ss << " | NoF Eviction: " << "Success/Attempts=" << nof_eviction_success << "/"
+       << nof_eviction_attempts << ", " << "keys=" << nof_evicted_key_count << ", "
+       << "size=" << byte_size_to_string(nof_evicted_size);
 
     // Discard summary
     ss << " | Discard: " << "Released/Total=" << put_start_release_cnt << "/"

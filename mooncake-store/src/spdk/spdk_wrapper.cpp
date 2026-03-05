@@ -147,7 +147,7 @@ int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
               << "trsvcid:" << info->trid.trsvcid
               << "ns:" << info->ns
               << "subnqn:" << info->trid.subnqn
-              << "trtype:" << info->trid.trtype
+              << "trtype:" << info->trid.trtype;
     
     return 0;
 }

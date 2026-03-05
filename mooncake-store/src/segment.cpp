@@ -308,7 +308,7 @@ ErrorCode ScopedNoFSegmentAccess::MountSegment(const NoFSegment& segment,
                 break;
             case BufferAllocatorType::OFFSET:
                 allocator = std::make_shared<OffsetBufferAllocator>(
-                    segment.name, buffer, size, segment.te_endpoint);
+                    segment.name, buffer, size, segment.te_endpoint, ReplicaType::NOF_SSD);
                 break;
             default:
                 LOG(ERROR) << "NoF segment mount: " << "segment_name=" << segment.name

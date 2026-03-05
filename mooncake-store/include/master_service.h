@@ -560,6 +560,7 @@ class MasterService {
         false};  // Set to trigger eviction when not enough space left
     const double eviction_ratio_;                 // in range [0.0, 1.0]
     const double eviction_high_watermark_ratio_;  // in range [0.0, 1.0]
+    const double nof_eviction_high_watermark_ratio_; // in range [0.0, 1.0]
 
     // Eviction thread related members
     std::thread eviction_thread_;

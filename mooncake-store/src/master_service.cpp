@@ -21,6 +21,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
       allow_evict_soft_pinned_objects_(config.allow_evict_soft_pinned_objects),
       eviction_ratio_(config.eviction_ratio),
       eviction_high_watermark_ratio_(config.eviction_high_watermark_ratio),
+      nof_eviction_high_watermark_ratio_(config.nof_eviction_high_watermark_ratio),
       client_live_ttl_sec_(config.client_live_ttl_sec),
       enable_ha_(config.enable_ha),
       enable_offload_(config.enable_offload),
@@ -653,6 +654,7 @@ auto MasterService::GetReplicaList(std::string_view key)
         return tl::make_unexpected(ErrorCode::REPLICA_IS_NOT_READY);
     }
 
+    // TODO: NoF SSD support (ranhaojia)
     if (replica_list[0].is_memory_replica()) {
         MasterMetricManager::instance().inc_mem_cache_hit_nums();
     } else if (replica_list[0].is_disk_replica()) {
@@ -703,14 +705,14 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     const auto now = std::chrono::steady_clock::now();
     auto it = metadata_shards_[shard_idx].metadata.find(key);
     if (it != metadata_shards_[shard_idx].metadata.end() && // The key exists and at least one replica is valid
-        !CleanupStaleHandles(it->second)) { // Lazy cleanup, delete expired replica
+        !CleanupStaleHandles(it->second)) {
         auto& metadata = it->second; // ObjectMetadata instance
         // If the object's PutStart expired and has not completed any
         // replicas, we can discard it and allow the new PutStart to
         // go.
         if (!metadata.HasCompletedReplicas() &&
             metadata.put_start_time + put_start_discard_timeout_sec_ < now) {
-            auto replicas = metadata.DiscardProcessingReplicas(); // replica vector in which the replicas are in processing
+            auto replicas = metadata.DiscardProcessingReplicas(); // replicas whose PutStart operations timeout
             if (!replicas.empty()) {
                 std::lock_guard lock(discarded_replicas_mutex_);
                 discarded_replicas_.emplace_back(
@@ -862,7 +864,7 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
         MasterMetricManager::instance().inc_mem_cache_nums();
     } else if (replica_type == ReplicaType::DISK) {
         MasterMetricManager::instance().inc_file_cache_nums();
-    }
+    } // TODO: add inc_nof_cache_nums() (ranhaojia)
     // 1. Set lease timeout to now, indicating that the object has no lease
     // at beginning. 2. If this object has soft pin enabled, set it to be soft
     // pinned.
@@ -1261,11 +1263,11 @@ void MasterService::EvictionThreadFunc() {
             MasterMetricManager::instance().get_global_mem_used_ratio();
         if (used_ratio > eviction_high_watermark_ratio_ ||
             (need_eviction_ && eviction_ratio_ > 0.0)) {
-            double evict_ratio_target = std::max(
+            double evict_ratio_target = std::max( // 比应该淘汰的部分再多淘汰0.05（eviction_ratio)
                 eviction_ratio_,
                 used_ratio - eviction_high_watermark_ratio_ + eviction_ratio_);
             double evict_ratio_lowerbound =
-                std::max(evict_ratio_target * 0.5,
+                std::max(evict_ratio_target * 0.5, // 至少要淘汰这么多
                          used_ratio - eviction_high_watermark_ratio_);
             BatchEvict(evict_ratio_target, evict_ratio_lowerbound);
         }
@@ -1296,6 +1298,7 @@ void MasterService::DiscardExpiredProcessingKeys(
         auto& metadata = it->second;
         // If the object is not valid or not in processing state, just
         // remove it from the processing set.
+        // FIXME: maybe a bug? 这里清理invalid metadata只包含key在processing_keys中的那些metadata (ranhaojia)
         if (!metadata.IsValid() || metadata.IsAllReplicasComplete()) {
             if (!metadata.IsValid()) {
                 shard.metadata.erase(it);
@@ -1312,6 +1315,9 @@ void MasterService::DiscardExpiredProcessingKeys(
         const auto ttl =
             metadata.put_start_time + put_start_release_timeout_sec_;
         if (ttl < now) {
+            // only the objects which are in processing will be discarded
+            // which means that the number of objects in the mooncake store
+            // may be less than the configured replica_num
             auto replicas = metadata.DiscardProcessingReplicas();
             if (!replicas.empty()) {
                 discarded_replicas.emplace_back(std::move(replicas), ttl);
@@ -1374,6 +1380,8 @@ void MasterService::BatchEvict(double evict_ratio_target,
     // shards. No need to use expensive random_device here.
     size_t start_idx = rand() % metadata_shards_.size();
 
+    // TODO: 隐含一个假设，即所有shard的数据分布比较均匀
+    // 所以从每个shard中淘汰相同比例的数据（理想状况下）
     // First pass: evict objects without soft pin and lease expired
     for (size_t i = 0; i < metadata_shards_.size(); i++) {
         auto& shard =
@@ -1382,6 +1390,10 @@ void MasterService::BatchEvict(double evict_ratio_target,
 
         // Discard expired processing keys first so that they won't be counted
         // in later evictions.
+        // Three types of objects/replicas are discarded:
+        // 1. objects only in processing_keys but not in shard
+        // 2. objects that are invalid (maybe a bug)
+        // 3. replicas whose PutStart operations are timeout
         DiscardExpiredProcessingKeys(shard, now);
 
         // object_count must be updated at beginning as it will be used later
@@ -1400,7 +1412,7 @@ void MasterService::BatchEvict(double evict_ratio_target,
             // Skip objects that are not expired or have incomplete replicas
             if (!it->second.IsLeaseExpired(now) ||
                 it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
-                                            ReplicaType::MEMORY)) {
+                                            ReplicaType::MEMORY)) { // TODO: NoF SSD? (ranhaojia)
                 continue;
             }
             if (!it->second.IsSoftPinned(now)) {
@@ -1431,12 +1443,16 @@ void MasterService::BatchEvict(double evict_ratio_target,
             auto it = shard.metadata.begin();
             while (it != shard.metadata.end()) {
                 // Skip objects that are not allowed to be evicted in the first
-                // pass
+                // pass, including:
+                // 1. objects whose lease is not expired
+                // 2. objects that are soft pinned
+                // 3. objects that have replicas under processing status
+                // 4. objects that do not have memory replicas
                 if (!it->second.IsLeaseExpired(now) ||
                     it->second.IsSoftPinned(now) ||
                     it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
                                                 ReplicaType::MEMORY) ||
-                    !it->second.HasMemReplica()) {
+                    !it->second.HasMemReplica()) { // TODO: NoF SSD? (ranhaojia)
                     ++it;
                     continue;
                 }
@@ -1500,6 +1516,10 @@ void MasterService::BatchEvict(double evict_ratio_target,
                 MutexLocker lock(&shard.mutex);
                 auto it = shard.metadata.begin();
                 while (it != shard.metadata.end() && target_evict_num > 0) {
+                    // 1. lease timeout
+                    // 2. without soft pin
+                    // 3. do not contain replicas under processing status
+                    // 3. contain mem replcas
                     if (it->second.lease_timeout <= target_timeout &&
                         !it->second.IsSoftPinned(now) &&
                         !it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
@@ -1523,6 +1543,7 @@ void MasterService::BatchEvict(double evict_ratio_target,
                 }
             }
         } else if (!soft_pin_objects.empty()) {
+            // allow_evict_soft_pinned_objects_ is implicitly true if soft_pin_objects is not empty
             // Second pass B: Prioritize evicting objects without soft pin, but
             // also allow to evict soft pinned objects. The following code is
             // error-prone if the soft pin objects are empty.

@@ -1264,6 +1264,8 @@ std::string MasterMetricManager::get_summary_string() {
     // --- Get current values ---
     int64_t mem_allocated = mem_allocated_size_.value();
     int64_t mem_capacity = mem_total_capacity_.value();
+    int64_t nof_allocated = nof_allocated_size_.value();
+    int64_t nof_capacity = nof_total_capacity_.value();
     int64_t file_allocated = file_allocated_size_.value();
     int64_t file_capacity = file_total_capacity_.value();
     int64_t keys = key_count_.value();
@@ -1361,6 +1363,12 @@ std::string MasterMetricManager::get_summary_string() {
     if (mem_capacity > 0) {
         ss << " (" << std::fixed << std::setprecision(1)
            << ((double)mem_allocated / (double)mem_capacity * 100.0) << "%)";
+    }
+    ss << " | Nvme-oF SSD: " << byte_size_to_string(nof_allocated) << " / "
+       << byte_size_to_string(nof_capacity);
+    if (nof_capacity > 0) {
+        ss << " (" << std::fixed << std::setprecision(1)
+           << ((double)nof_allocated / (double)nof_capacity * 100.0) << "%)";
     }
     ss << " | SSD Storage: " << byte_size_to_string(file_allocated) << " / "
        << byte_size_to_string(file_capacity);

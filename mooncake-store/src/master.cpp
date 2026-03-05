@@ -39,6 +39,9 @@ DEFINE_double(eviction_ratio, mooncake::DEFAULT_EVICTION_RATIO,
 DEFINE_double(eviction_high_watermark_ratio,
               mooncake::DEFAULT_EVICTION_HIGH_WATERMARK_RATIO,
               "Ratio of high watermark trigger eviction");
+DEFINE_double(nof_eviction_high_watermark_ratio,
+              mooncake::DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO,
+              "Ratio of high watermark trigger eviction in NoF SSD");
 // RPC server configuration parameters (new, preferred)
 // TODO: deprecate port and max_threads in the future
 DEFINE_int32(rpc_thread_num, 0,

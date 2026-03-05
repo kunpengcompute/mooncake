@@ -1949,6 +1949,11 @@ void MasterService::ClientMonitorFunc() {
             std::vector<size_t> dec_capacities;
             std::vector<UUID> client_ids;
             std::vector<std::string> segment_names;
+
+            std::vector<UUID> unmount_nof_segments;
+            std::vector<size_t> dec_nof_capacities;
+            std::vector<UUID> nof_client_ids;
+            std::vector<std::string> nof_segment_names;
             {
                 // Lock client_mutex and segment_mutex
                 std::unique_lock<std::shared_mutex> lock(client_mutex_);
@@ -1962,7 +1967,10 @@ void MasterService::ClientMonitorFunc() {
 
                 ScopedSegmentAccess segment_access =
                     segment_manager_.getSegmentAccess();
+                ScopedNoFSegmentAccess nof_segment_access =
+                    nof_segment_manager_.getNoFSegmentAccess();
                 for (auto& client_id : expired_clients) {
+                    // mounted mem segemtns of this expired client
                     std::vector<Segment> segments;
                     segment_access.GetClientSegments(client_id, segments);
                     for (auto& seg : segments) {
@@ -1979,7 +1987,31 @@ void MasterService::ClientMonitorFunc() {
                                        << ", segment_name=" << seg.name
                                        << ", "
                                           "error=prepare_unmount_expired_"
-                                          "segment_failed";
+                                          "mem_segment_failed";
+                        }
+                    }
+
+                    // mounted nof segments of this expired client
+                    std::vector<NoFSegment> nof_segments;
+                    nof_segment_access.GetClientSegments(client_id, nof_segments);
+                    for (auto& nof_seg : nof_segments) {
+                        size_t metrics_dec_nof_capacity = 0;
+                        if (nof_segment_access.PrepareUnmountSegment(
+                                nof_seg.id, metrics_dec_nof_capacity) ==
+                            ErrorCode::OK) {
+                            unmount_nof_segments.push_back(nof_seg.id);
+                            dec_nof_capacities.push_back(metrics_dec_nof_capacity);
+                            nof_client_ids.push_back(client_id);
+                            nof_segment_names.push_back(nof_seg.name);
+                            LOG(INFO) << "client_id=" << client_id
+                                      << ", segment_id=" << nof_seg.id
+                                      << ", segment_size=" << metrics_dec_nof_capacity;
+                        } else {
+                            LOG(ERROR) << "client_id=" << client_id
+                                       << ", segment_name=" << nof_seg.name
+                                       << ", "
+                                          "error=prepare_unmount_expired_"
+                                          "nof_segment_failed";
                         }
                     }
                 }
@@ -1996,7 +2028,20 @@ void MasterService::ClientMonitorFunc() {
                         unmount_segments[i], client_ids[i], dec_capacities[i]);
                     LOG(INFO) << "client_id=" << client_ids[i]
                               << ", segment_name=" << segment_names[i]
-                              << ", action=unmount_expired_segment";
+                              << ", action=unmount_expired_mem_segment";
+                }
+            }
+
+            if (!unmount_nof_segments.empty()) {
+                ClearInvalidHandles();
+                ScopedNoFSegmentAccess nof_segment_access =
+                    nof_segment_manager_.getNoFSegmentAccess();
+                for (size_t i = 0; i < unmount_nof_segments.size(); i++) {
+                    nof_segment_access.CommitUnmountSegment(
+                        unmount_nof_segments[i], nof_client_ids[i], dec_nof_capacities[i]);
+                    LOG(INFO) << "client_id=" << nof_client_ids[i]
+                              << ", segment_name=" << nof_segment_names[i]
+                              << ", action=unmount_expired_nof_segment";
                 }
             }
         }

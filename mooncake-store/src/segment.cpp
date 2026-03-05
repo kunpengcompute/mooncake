@@ -335,7 +335,7 @@ ErrorCode ScopedNoFSegmentAccess::MountSegment(const NoFSegment& segment,
         segment, SegmentStatus::OK, std::move(allocator)};
     nof_segment_manager_->client_by_name_[segment.name] = client_id;
     MasterMetricManager::instance().inc_total_nof_capacity(segment.name, size);
-
+    LOG(INFO) << "client_id=" << client_id << ", segment_id=" << nof_segment_manager_->client_segments_[client_id][0];
     return ErrorCode::OK;
 }
 

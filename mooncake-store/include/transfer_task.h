@@ -334,7 +334,8 @@ class MemcpyWorkerPool {
     std::atomic<bool> shutdown_;
 };
 
-typedef void (*IoCompleteCallback)(void *ctx, const struct spdk_nvme_cpl* cpl);
+// struct SpdkNofSubTask;
+struct SpdkNofQos;
 
 /**
  * @brief Spdk nvmf operation descriptor
@@ -344,15 +345,71 @@ struct SpdkNofTask {
     void *ptr;
     uint64_t lba;
     uint32_t lba_count;
-    int op;
+    int remaining_lba;
+    int outstanding_sub_io;
+    int op;                 // READ => 0, WRITE => 1
+    int idx;                // subop idx
+    bool failed;
+    bool on_chain;
     std::shared_ptr<SpdkNofOperationState> state;
-    IoCompleteCallback cb_fn;
     int64_t *io_count;
+    SpdkNofQos *nof_qos;
 
     SpdkNofTask(nof_seg_handle *handle, void *buf, uint64_t off, uint32_t len,
         int op_code, std::shared_ptr<SpdkNofOperationState> s) :
-        seg_handle(handle), ptr(buf), lba(off), lba_count(len), op(op_code),
-        state(std::move(s)), cb_fn(nullptr) {}
+        seg_handle(handle), ptr(buf), 
+        lba(off), lba_count(len), 
+        remaining_lba(lba_count), outstanding_sub_io(0),
+        op(op_code), idx(0), failed(false), on_chain(false);
+        state(std::move(s)){}
+};
+
+struct SpdkNofSubTask {
+    SpdkNofTask *task;
+    int submit_lba_count;
+    std::stack<SpdkNofSubTask> *sub_task_pool;
+};
+
+constexpr int kSpdkNofSubmitChunkBytes = (1 << 17);     // 128k
+constexpr int kSpdkNofInflightBytesLimit = (1 << 25);   // 32M
+constexpr int kSpdkNofOpNum = 2;                        // READ => 0, WRITE => 1
+struct SpdkNofQos {
+    int inflight_blocks[kSpdkNofOpNum];
+    int blocks_per_chunk;
+    int inflight_blocks_limit;
+    SpdkNofTask *head[kSpdkNofOpNum];
+    SpdkNofTask *tail[kSpdkNofOpNum];
+
+    SpdkNofQos(uint32_t block_size) : 
+        blocks_per_chunk(kSpdkNofSubmitChunkBytes / block_size),
+        inflight_blocks_limit(kSpdkNofInflightBytesLimit / block_size){
+        for (int i = 0; i < kSpdkNofOpNum; ++i) {
+            inflight_blocks[i] = 0;
+            head[i] = nullptr;
+            tail[i] = nullptr;
+        }
+    }
+    
+    bool Empty() {
+        return (head[0] == nullptr && head[1] == nullptr); 
+    }
+
+    void PushTask(SpdkNofTask *task) {
+        int op = task->op;
+        if (tail[op] == nullptr) {
+            head[op] = task;
+            tail[op] = task;
+        } else {
+            tail[op]->nxt = task;
+            tail[op] = task;
+        }
+    }
+
+    void PopTask(int op) {
+        if (head[op]) {
+            head[op] = head[op]->nxt;
+        }
+    }
 };
 
 /**

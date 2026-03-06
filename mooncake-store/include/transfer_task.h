@@ -354,20 +354,21 @@ struct SpdkNofTask {
     std::shared_ptr<SpdkNofOperationState> state;
     int64_t *io_count;
     SpdkNofQos *nof_qos;
+    SpdkNofTask *nxt;
 
     SpdkNofTask(nof_seg_handle *handle, void *buf, uint64_t off, uint32_t len,
         int op_code, std::shared_ptr<SpdkNofOperationState> s) :
         seg_handle(handle), ptr(buf), 
         lba(off), lba_count(len), 
         remaining_lba(lba_count), outstanding_sub_io(0),
-        op(op_code), idx(0), failed(false), on_chain(false);
-        state(std::move(s)){}
+        op(op_code), idx(0), failed(false), on_chain(false),
+        state(std::move(s)), nxt(nullptr) {}
 };
 
 struct SpdkNofSubTask {
     SpdkNofTask *task;
     int submit_lba_count;
-    std::stack<SpdkNofSubTask> *sub_task_pool;
+    std::stack<SpdkNofSubTask *> *sub_task_pool;
 };
 
 constexpr int kSpdkNofSubmitChunkBytes = (1 << 17);     // 128k
@@ -396,7 +397,7 @@ struct SpdkNofQos {
 
     void PushTask(SpdkNofTask *task) {
         int op = task->op;
-        if (tail[op] == nullptr) {
+        if (head[op] == nullptr) {
             head[op] = task;
             tail[op] = task;
         } else {

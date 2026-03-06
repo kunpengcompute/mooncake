@@ -38,7 +38,7 @@ static void nvmf_io_complete(void *ctx, const struct spdk_nvme_cpl *cpl) {
         LOG(ERROR) << "task oustanding io < 0";
     }
 
-    nof_qos->inflight_blocks[op] -= sub_task.submit_lba_count;
+    nof_qos->inflight_blocks[op] -= sub_task->submit_lba_count;
     if (nof_qos->inflight_blocks[op] < 0) {
         LOG(ERROR) << "task oustanding io < 0";
     }
@@ -51,18 +51,7 @@ static void nvmf_io_complete(void *ctx, const struct spdk_nvme_cpl *cpl) {
 
     SpdkNofTaskCompletion(task);
 
-    sub_task.sub_task_pool.push(sub_task);
-}
-
-
-static void task_complete(void *ctx, const struct spdk_nvme_cpl* cpl) {
-    SpdkNofTask *task = reinterpret_cast<SpdkNofTask *>(ctx);
-    if (spdk_nvme_cpl_is_error(cpl)) {
-        LOG(ERROR) << "task_complete: I/O failed" << spdk_nvme_cpl_get_status_string(&cpl->status);
-        task->state->set_completed(ErrorCode::TRANSFER_FAIL);
-    } else {
-        task->state->set_completed(ErrorCode::OK);
-    }
+    sub_task->sub_task_pool.push(sub_task);
 }
 namespace mooncake {
 
@@ -240,13 +229,31 @@ void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
     queue_cv_[worker_idx].notify_one();     // only one equal notify one?
 }
 
-static bool HasBufferedTask(const map<nof_seg_handle *, SpdkNofQos *> &set_to_qos) {
+static bool HasBufferedTask(const map<nof_seg_handle *, SpdkNofQos *> &seg_to_qos) {
     for (const auto &[seg_handle, nof_qos]: seg_to_qos) {
         if (!nof_qos->Empty()) {
             return true;
         }
     }
     return false;
+}
+
+static inline bool CheckSubTaskPool(std::stack<SpdkNofSubTask *> &sub_task_pool) {
+    if (!sub_task_pool.empty()) {
+        return true;
+    }
+    SpdkNofSubTask *sub_tasks = new SpdkNofSubTask[4096];
+    if (!sub_tasks) {
+         LOG(ERROR) << "alloc SpdkNofSubTask failed, worker " << work_idx;
+         return false;
+    }
+
+    for (int i = 0; i < 4096; ++i) {
+        sub_tasks[i].sub_task_pool = &sub_task_pool;
+        sub_task_pool.push(&sub_tasks[i]);
+    }
+
+    return true;
 }
 
 void SpdkNofWorkerPool::workerThread(int work_idx) {
@@ -260,17 +267,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
     auto &queue_cv = queue_cv_[work_idx];
     auto &queue_mutex = queue_mutex_[work_idx];
 
-    SpdkNofSubTask *sub_tasks = new SpdkNofSubTask[4096];
-    if (!sub_tasks) {
-         LOG(INFO) << "alloc SpdkNofSubTask failed, worker " << work_idx;
-         return;
-    }
-
-    // qpair_num * kSpdkNofInflightBytesLimit / kSpdkNofSubmitChunkBytes
-    for (int i = 0; i < 4096; ++i) {
-        sub_tasks[i].sub_task_pool = &sub_task_pool;
-        sub_task_pool.push(&sub_tasks[i]);
-    }
+    CheckSubTaskPool(sub_task_pool);
 
     while (true) {
         // Wait for task or shutdown signal
@@ -287,7 +284,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
             while (!task_queue.empty()) {
                 SpdkNofTask *task = new SpdkNofTask(std::move(task_queue.front())); // todo: use task tool for replacement
                 if (task == nullptr) {
-                    LOG(INFO) << "alloc SpdkNofTask failed, worker " << work_idx;
+                    LOG(ERROR) << "alloc SpdkNofTask failed, worker " << work_idx;
                     continue;
                 }
 
@@ -323,10 +320,12 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                     while (task->remaining_lba > 0 && avail_blocks > 0) {
                         int submit_lba_count = std::min(avail_blocks, 
                             std::min(task->remaining_lba, nof_qos->blocks_per_chunk));
-                        int submit_lba = task->lba_count - task->remaining_lba;
+                        int lba_off = task->lba_count - task->remaining_lba;
+                        int submit_lba= task->lba + lba_off;
                         void *submit_ptr = reinterpret_cast<void *>
-                            (reinterpret_cast<char *>(task->ptr) + submit_lba * block_size);
-                        
+                            (reinterpret_cast<char *>(task->ptr) + lba_off * block_size);
+
+                        CheckSubTaskPool(sub_task_pool);
                         sub_task = sub_task_pool.top();
                         sub_task_pool.pop();
                         sub_task->task = task;
@@ -335,7 +334,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                         int ret = SpdkWrapper::GetInstance().SubmitRequest(task->seg_handle,
                             submit_ptr, submit_lba, submit_lba_count, task->op, nvmf_io_complete, sub_task);
                         if (ret != 0) {
-                            LOG(INFO) << "work " << work_idx << ", seg " << task->seg_handle << " submit io fail";
+                            LOG(ERROR) << "work " << work_idx << ", seg " << task->seg_handle << " submit io fail";
                             task->failed = true;
                             task->remaining_lba = 0;
                         } else {

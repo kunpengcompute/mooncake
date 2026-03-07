@@ -3,12 +3,56 @@
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <new>
 #include <set>
 #include "transfer_engine.h"
 #include "transport/transport.h"
 #include "spdk/spdk_wrapper.h"
+
+static bool IsTruthyEnv(const char *value) {
+    if (!value) {
+        return false;
+    }
+    std::string normalized(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return normalized == "1" || normalized == "true" || normalized == "yes" ||
+           normalized == "on";
+}
+
+static bool IsSpdkNofDebugEnabled() {
+    static const bool enabled = IsTruthyEnv(std::getenv("MC_NOF_DEBUG"));
+    return enabled;
+}
+
+static int GetSpdkNofDebugIntervalMs() {
+    static const int interval_ms = []() {
+        const char *raw_value = std::getenv("MC_NOF_DEBUG_INTERVAL_MS");
+        if (!raw_value) {
+            return 1000;
+        }
+        char *end_ptr = nullptr;
+        long parsed = std::strtol(raw_value, &end_ptr, 10);
+        if (end_ptr == raw_value || (end_ptr != nullptr && *end_ptr != '\0') || parsed <= 0) {
+            return 1000;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return interval_ms;
+}
+
+static int CountSpdkNofQueuedTasks(const mooncake::SpdkNofTask *head) {
+    int count = 0;
+    const mooncake::SpdkNofTask *cursor = head;
+    while (cursor != nullptr) {
+        ++count;
+        cursor = cursor->nxt;
+    }
+    return count;
+}
 
 static inline void SpdkNofTaskCompletion(mooncake::SpdkNofTask *task) {
     if (task->remaining_lba == 0 && task->outstanding_sub_io == 0) {
@@ -199,6 +243,11 @@ SpdkNofWorkerPool::~SpdkNofWorkerPool() {
 }
 
 void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
+    if (!task.state) {
+        LOG(ERROR) << "Attempting to submit spdk nof task without state";
+        return;
+    }
+
     if (shutdown_.load()) {
         LOG(WARNING)
             << "Attempting to submit task to shutdown SpdkNofWorkerPool";
@@ -210,11 +259,17 @@ void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
     {
         std::lock_guard<std::mutex> lock(seg_mutex_);
         nof_seg_handle *seg = task.seg_handle;
+        bool new_binding = false;
         if (seg_to_worker_.find(seg) != seg_to_worker_.end()) {
             worker_idx = seg_to_worker_[seg];
         } else {
             worker_idx = (seg_num++ % kDefaultSpdkNofWorkers);
             seg_to_worker_[seg] = worker_idx;
+            new_binding = true;
+        }
+        if (new_binding && IsSpdkNofDebugEnabled()) {
+            LOG(INFO) << "nof_worker_bind seg_handle=" << seg
+                      << " worker_idx=" << worker_idx;
         }
     }
     if (worker_idx < 0 || worker_idx >= kDefaultSpdkNofWorkers) {
@@ -227,12 +282,12 @@ void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
         std::lock_guard<std::mutex> lock(queue_mutex_[worker_idx]);
         task_queue_[worker_idx].push(std::move(task));
     }
-    queue_cv_[worker_idx].notify_one();     // only one equal notify one?
+    queue_cv_[worker_idx].notify_one();
 }
 
 static bool HasBufferedTask(
     const std::map<nof_seg_handle *, SpdkNofQos *> &seg_to_qos) {
-    for (const auto &[seg_handle, nof_qos]: seg_to_qos) {
+    for (const auto &[_, nof_qos]: seg_to_qos) {
         if (!nof_qos->Empty()) {
             return true;
         }
@@ -265,7 +320,7 @@ static inline bool CheckSubTaskPool(
 }
 
 void SpdkNofWorkerPool::workerThread(int work_idx) {
-    VLOG(2) << "FilereadWorkerPool worker thread started";
+    VLOG(2) << "SpdkNofWorkerPool worker thread started";
 
     int64_t total_outstanding_io = 0;
     // std::set<nof_seg_handle *> seg_set;
@@ -275,6 +330,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
     auto &task_queue = task_queue_[work_idx];
     auto &queue_cv = queue_cv_[work_idx];
     auto &queue_mutex = queue_mutex_[work_idx];
+    auto last_debug_snapshot = std::chrono::steady_clock::now();
 
     if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks, work_idx)) {
         return;
@@ -297,7 +353,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
 
             while (!task_queue.empty()) {
                 SpdkNofTask *task = new (std::nothrow)
-                    SpdkNofTask(std::move(task_queue.front())); // todo: use task tool for replacement
+                    SpdkNofTask(std::move(task_queue.front()));
                 if (task == nullptr) {
                     LOG(ERROR) << "alloc SpdkNofTask failed, worker " << work_idx;
                     continue;
@@ -306,8 +362,9 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                 SpdkNofQos *nof_qos = nullptr;
                 auto it = seg_to_qos.find(task->seg_handle);
                 if (it == seg_to_qos.end()) {
-                    SpdkNofQos *qos = new (std::nothrow)
-                        SpdkNofQos(SpdkWrapper::GetInstance().GetBlockSize(task->seg_handle));
+                    SpdkNofQos *qos =
+                        new (std::nothrow) SpdkNofQos(
+                            SpdkWrapper::GetInstance().GetBlockSize(task->seg_handle));
                     if (qos == nullptr) {
                         LOG(ERROR) << "alloc SpdkNofQos failed, worker " << work_idx;
                         delete task;
@@ -315,6 +372,13 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                     }
                     seg_to_qos[task->seg_handle] = qos;
                     nof_qos = qos;
+                    if (IsSpdkNofDebugEnabled()) {
+                        LOG(INFO) << "nof_qos_create worker_idx=" << work_idx
+                                  << " seg_handle=" << task->seg_handle
+                                  << " blocks_per_chunk=" << qos->blocks_per_chunk
+                                  << " inflight_blocks_limit="
+                                  << qos->inflight_blocks_limit;
+                    }
                 } else {
                     nof_qos = it->second;
                 }
@@ -383,15 +447,41 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                 if (ret < 0) {
                     LOG(ERROR) << "poll completion error: ret " << ret;
                 }
-            } 
+            }
+        }
+
+        if (IsSpdkNofDebugEnabled()) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_debug_snapshot);
+            if (elapsed.count() >= GetSpdkNofDebugIntervalMs()) {
+                for (const auto &[seg_handle, nof_qos] : seg_to_qos) {
+                    LOG(INFO) << "nof_qos_state worker_idx=" << work_idx
+                              << " seg_handle=" << seg_handle
+                              << " inflight_read=" << nof_qos->inflight_blocks[0]
+                              << " inflight_write=" << nof_qos->inflight_blocks[1]
+                              << " inflight_limit="
+                              << nof_qos->inflight_blocks_limit
+                              << " queued_read="
+                              << CountSpdkNofQueuedTasks(nof_qos->head[0])
+                              << " queued_write="
+                              << CountSpdkNofQueuedTasks(nof_qos->head[1])
+                              << " total_outstanding_io=" << total_outstanding_io;
+                }
+                last_debug_snapshot = now;
+            }
         }
     }
 
     for (auto *sub_tasks : sub_task_chunks) {
         delete[] sub_tasks;
     }
+    for (auto &[_, nof_qos] : seg_to_qos) {
+        delete nof_qos;
+    }
+    seg_to_qos.clear();
 
-    VLOG(2) << "FilereadWorkerPool worker thread exiting";
+    VLOG(2) << "SpdkNofWorkerPool worker thread exiting";
 }
 
 // ============================================================================

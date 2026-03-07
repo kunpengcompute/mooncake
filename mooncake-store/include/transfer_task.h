@@ -43,8 +43,12 @@ inline std::ostream& operator<<(std::ostream& os,
             return os << "LOCAL_MEMCPY";
         case TransferStrategy::TRANSFER_ENGINE:
             return os << "TRANSFER_ENGINE";
+        case TransferStrategy::SPDK_NVMF:
+            return os << "SPDK_NVMF";
         case TransferStrategy::FILE_READ:
             return os << "FILE_READ";
+        case TransferStrategy::EMPTY:
+            return os << "EMPTY";
         default:
             return os << "UNKNOWN";
     }

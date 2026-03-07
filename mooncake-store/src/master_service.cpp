@@ -924,20 +924,39 @@ auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
         return tl::make_unexpected(ErrorCode::ILLEGAL_CLIENT);
     }
 
-    if (auto status = metadata.HasDiffRepStatus(ReplicaStatus::PROCESSING,
-                                                replica_type)) {
+    auto check_status = [&](ReplicaType type)
+        -> std::optional<ReplicaStatus> {
+        return metadata.HasDiffRepStatus(ReplicaStatus::PROCESSING, type);
+    };
+
+    if (replica_type == ReplicaType::MEMORY) {
+        if (auto status = check_status(ReplicaType::MEMORY)) {
+            LOG(ERROR) << "key=" << key << ", status=" << *status
+                       << ", error=invalid_replica_status";
+            return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+        }
+        if (auto status = check_status(ReplicaType::NOF_SSD)) {
+            LOG(ERROR) << "key=" << key << ", status=" << *status
+                       << ", error=invalid_replica_status";
+            return tl::make_unexpected(ErrorCode::INVALID_WRITE);
+        }
+    } else if (auto status = check_status(replica_type)) {
         LOG(ERROR) << "key=" << key << ", status=" << *status
                    << ", error=invalid_replica_status";
         return tl::make_unexpected(ErrorCode::INVALID_WRITE);
     }
 
     if (replica_type == ReplicaType::MEMORY) {
+        // MEMORY revoke path also rolls back NOF replicas.
         MasterMetricManager::instance().dec_mem_cache_nums();
+        metadata.EraseReplica(ReplicaType::MEMORY);
+        metadata.EraseReplica(ReplicaType::NOF_SSD);
     } else if (replica_type == ReplicaType::DISK) {
         MasterMetricManager::instance().dec_file_cache_nums();
+        metadata.EraseReplica(replica_type);
+    } else {
+        metadata.EraseReplica(replica_type);
     }
-
-    metadata.EraseReplica(replica_type);
 
     // If the object is completed, remove it from the processing set.
     if (metadata.IsAllReplicasComplete() && accessor.InProcessing()) {

@@ -1,6 +1,7 @@
 #include <glog/logging.h>
 
 #include <atomic>
+#include <cstring>
 #include "spdk/spdk_wrapper.h"
 
 static void disconnect_cb(struct spdk_nvme_qpair *qpair, void *ctx) {
@@ -115,6 +116,9 @@ int64_t SpdkWrapper::NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t com
 }
 
 int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
+    std::memset(&info->trid, 0, sizeof(info->trid));
+    info->ns = 1;
+
     if (spdk_nvme_transport_id_parse(&info->trid, tr_str.c_str()) != 0) {
         LOG(ERROR) << "Error parsing transport address";
         return -1;
@@ -142,6 +146,11 @@ int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
     } else {
         LOG(ERROR) << "No ns field found in transport string";
     }
+
+    info->ctrlr_key = std::string(info->trid.traddr) + "|" +
+                      std::string(info->trid.trsvcid) + "|" +
+                      std::string(info->trid.subnqn) + "|" +
+                      std::to_string(static_cast<int>(info->trid.trtype));
 
     LOG(INFO) << "traddr:" << info->trid.traddr
               << "trsvcid:" << info->trid.trsvcid

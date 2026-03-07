@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <new>
 #include <set>
 #include "transfer_engine.h"
 #include "transport/transport.h"
@@ -51,7 +52,7 @@ static void nvmf_io_complete(void *ctx, const struct spdk_nvme_cpl *cpl) {
 
     SpdkNofTaskCompletion(task);
 
-    sub_task->sub_task_pool.push(sub_task);
+    sub_task->sub_task_pool->push(sub_task);
 }
 namespace mooncake {
 
@@ -229,7 +230,8 @@ void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
     queue_cv_[worker_idx].notify_one();     // only one equal notify one?
 }
 
-static bool HasBufferedTask(const map<nof_seg_handle *, SpdkNofQos *> &seg_to_qos) {
+static bool HasBufferedTask(
+    const std::map<nof_seg_handle *, SpdkNofQos *> &seg_to_qos) {
     for (const auto &[seg_handle, nof_qos]: seg_to_qos) {
         if (!nof_qos->Empty()) {
             return true;
@@ -238,17 +240,23 @@ static bool HasBufferedTask(const map<nof_seg_handle *, SpdkNofQos *> &seg_to_qo
     return false;
 }
 
-static inline bool CheckSubTaskPool(std::stack<SpdkNofSubTask *> &sub_task_pool) {
+constexpr int kSpdkNofSubTaskChunkSize = 4096;
+
+static inline bool CheckSubTaskPool(
+    std::stack<SpdkNofSubTask *> &sub_task_pool,
+    std::vector<SpdkNofSubTask *> &sub_task_chunks, int work_idx) {
     if (!sub_task_pool.empty()) {
         return true;
     }
-    SpdkNofSubTask *sub_tasks = new SpdkNofSubTask[4096];
+    SpdkNofSubTask *sub_tasks =
+        new (std::nothrow) SpdkNofSubTask[kSpdkNofSubTaskChunkSize];
     if (!sub_tasks) {
          LOG(ERROR) << "alloc SpdkNofSubTask failed, worker " << work_idx;
          return false;
     }
+    sub_task_chunks.push_back(sub_tasks);
 
-    for (int i = 0; i < 4096; ++i) {
+    for (int i = 0; i < kSpdkNofSubTaskChunkSize; ++i) {
         sub_tasks[i].sub_task_pool = &sub_task_pool;
         sub_task_pool.push(&sub_tasks[i]);
     }
@@ -263,26 +271,33 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
     // std::set<nof_seg_handle *> seg_set;
     std::map<nof_seg_handle *, SpdkNofQos *> seg_to_qos;
     std::stack<SpdkNofSubTask *> sub_task_pool;
+    std::vector<SpdkNofSubTask *> sub_task_chunks;
     auto &task_queue = task_queue_[work_idx];
     auto &queue_cv = queue_cv_[work_idx];
     auto &queue_mutex = queue_mutex_[work_idx];
 
-    CheckSubTaskPool(sub_task_pool);
+    if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks, work_idx)) {
+        return;
+    }
 
     while (true) {
         // Wait for task or shutdown signal
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
-            queue_cv.wait(lock, [this, &task_queue, &total_outstanding_io] {
-                return shutdown_.load() || !task_queue.empty() || total_outstanding_io || HasBufferedTask();
+            queue_cv.wait(lock, [this, &task_queue, &total_outstanding_io,
+                                 &seg_to_qos] {
+                return shutdown_.load() || !task_queue.empty() ||
+                       total_outstanding_io || HasBufferedTask(seg_to_qos);
             });
 
-            if (shutdown_.load() && task_queue.empty() && (total_outstanding_io == 0) && !HasBufferedTask()) {
+            if (shutdown_.load() && task_queue.empty() &&
+                (total_outstanding_io == 0) && !HasBufferedTask(seg_to_qos)) {
                 break;
             }
 
             while (!task_queue.empty()) {
-                SpdkNofTask *task = new SpdkNofTask(std::move(task_queue.front())); // todo: use task tool for replacement
+                SpdkNofTask *task = new (std::nothrow)
+                    SpdkNofTask(std::move(task_queue.front())); // todo: use task tool for replacement
                 if (task == nullptr) {
                     LOG(ERROR) << "alloc SpdkNofTask failed, worker " << work_idx;
                     continue;
@@ -291,9 +306,10 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                 SpdkNofQos *nof_qos = nullptr;
                 auto it = seg_to_qos.find(task->seg_handle);
                 if (it == seg_to_qos.end()) {
-                    SpdkNofQos *qos = new SpdkNofQos(SpdkWrapper::GetInstance().GetBlockSize(task->seg_handle));
+                    SpdkNofQos *qos = new (std::nothrow)
+                        SpdkNofQos(SpdkWrapper::GetInstance().GetBlockSize(task->seg_handle));
                     if (qos == nullptr) {
-                        LOG(INFO) << "alloc SpdkNofQos failed,  worker " << work_idx;
+                        LOG(ERROR) << "alloc SpdkNofQos failed, worker " << work_idx;
                         delete task;
                         continue;
                     }
@@ -325,7 +341,12 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                         void *submit_ptr = reinterpret_cast<void *>
                             (reinterpret_cast<char *>(task->ptr) + lba_off * block_size);
 
-                        CheckSubTaskPool(sub_task_pool);
+                        if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks,
+                                              work_idx)) {
+                            task->failed = true;
+                            task->remaining_lba = 0;
+                            break;
+                        }
                         sub_task = sub_task_pool.top();
                         sub_task_pool.pop();
                         sub_task->task = task;
@@ -366,7 +387,9 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
         }
     }
 
-    delete[] sub_tasks;
+    for (auto *sub_tasks : sub_task_chunks) {
+        delete[] sub_tasks;
+    }
 
     VLOG(2) << "FilereadWorkerPool worker thread exiting";
 }

@@ -362,7 +362,7 @@ struct SpdkNofTask {
         lba(off), lba_count(len), 
         remaining_lba(lba_count), outstanding_sub_io(0),
         op(op_code), idx(0), failed(false), on_chain(false),
-        state(std::move(s)), nxt(nullptr) {}
+        state(std::move(s)), io_count(nullptr), nof_qos(nullptr), nxt(nullptr) {}
 };
 
 struct SpdkNofSubTask {

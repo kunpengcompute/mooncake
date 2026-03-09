@@ -375,8 +375,8 @@ struct SpdkNofSubTask {
     std::stack<SpdkNofSubTask *> *sub_task_pool;
 };
 
-constexpr int kSpdkNofSubmitChunkBytes = (1 << 17);     // 128k
-constexpr int kSpdkNofInflightBytesLimit = (1 << 25);   // 32M
+constexpr int kDefaultSpdkNofSubmitChunkBytes = (1 << 17);     // 128k
+constexpr int kDefaultSpdkNofInflightBytesLimit = (1 << 25);   // 32M
 constexpr int kSpdkNofOpNum = 2;                        // READ => 0, WRITE => 1
 struct SpdkNofQos {
     int inflight_blocks[kSpdkNofOpNum];
@@ -385,15 +385,7 @@ struct SpdkNofQos {
     SpdkNofTask *head[kSpdkNofOpNum];
     SpdkNofTask *tail[kSpdkNofOpNum];
 
-    SpdkNofQos(uint32_t block_size) : 
-        blocks_per_chunk(kSpdkNofSubmitChunkBytes / block_size),
-        inflight_blocks_limit(kSpdkNofInflightBytesLimit / block_size){
-        for (int i = 0; i < kSpdkNofOpNum; ++i) {
-            inflight_blocks[i] = 0;
-            head[i] = nullptr;
-            tail[i] = nullptr;
-        }
-    }
+    explicit SpdkNofQos(uint32_t block_size);
     
     bool Empty() {
         return (head[0] == nullptr && head[1] == nullptr); 
@@ -444,10 +436,11 @@ class SpdkNofWorkerPool {
    private:
     void workerThread(int work_idx);
 
+    int worker_count_;
     std::vector<std::thread> workers_;
-    std::queue<SpdkNofTask> task_queue_[kDefaultSpdkNofWorkers];
-    std::mutex queue_mutex_[kDefaultSpdkNofWorkers];
-    std::condition_variable queue_cv_[kDefaultSpdkNofWorkers];
+    std::unique_ptr<std::queue<SpdkNofTask>[]> task_queue_;
+    std::unique_ptr<std::mutex[]> queue_mutex_;
+    std::unique_ptr<std::condition_variable[]> queue_cv_;
     std::atomic<bool> shutdown_;
     std::mutex seg_mutex_;
     int seg_num = 0;

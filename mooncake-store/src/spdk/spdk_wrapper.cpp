@@ -1,6 +1,9 @@
 #include <glog/logging.h>
 
 #include <atomic>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #include "spdk/spdk_wrapper.h"
 
 static void disconnect_cb(struct spdk_nvme_qpair *qpair, void *ctx) {
@@ -8,6 +11,79 @@ static void disconnect_cb(struct spdk_nvme_qpair *qpair, void *ctx) {
 }
 
 namespace mooncake {
+namespace {
+
+bool ParseEnvU64(const char *name, uint64_t *out) {
+    const char *val = std::getenv(name);
+    if (!val || *val == '\0') {
+        return false;
+    }
+
+    errno = 0;
+    char *end = nullptr;
+    unsigned long long parsed = std::strtoull(val, &end, 10);
+    if (errno != 0 || end == val || (end && *end != '\0')) {
+        LOG(WARNING) << "Invalid value for " << name << ": " << val;
+        return false;
+    }
+
+    *out = static_cast<uint64_t>(parsed);
+    return true;
+}
+
+bool ParseEnvBool(const char *name, bool *out) {
+    uint64_t v = 0;
+    if (!ParseEnvU64(name, &v)) {
+        return false;
+    }
+    *out = (v != 0);
+    return true;
+}
+
+void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
+    uint64_t v = 0;
+    bool bv = false;
+
+    if (ParseEnvU64("MC_NVME_NUM_IO_QUEUES", &v)) {
+        opts->num_io_queues = static_cast<uint32_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_IO_QUEUE_SIZE", &v)) {
+        opts->io_queue_size = static_cast<uint32_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_IO_QUEUE_REQUESTS", &v)) {
+        opts->io_queue_requests = static_cast<uint32_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_KEEP_ALIVE_TIMEOUT_MS", &v)) {
+        opts->keep_alive_timeout_ms = static_cast<uint32_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_TRANSPORT_ACK_TIMEOUT", &v)) {
+        opts->transport_ack_timeout = static_cast<uint8_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_ADMIN_QUEUE_SIZE", &v)) {
+        opts->admin_queue_size = static_cast<uint16_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_FABRICS_CONNECT_TIMEOUT_US", &v)) {
+        opts->fabrics_connect_timeout_us = v;
+    }
+    if (ParseEnvBool("MC_NVME_HEADER_DIGEST", &bv)) {
+        opts->header_digest = bv;
+    }
+    if (ParseEnvBool("MC_NVME_DATA_DIGEST", &bv)) {
+        opts->data_digest = bv;
+    }
+
+    LOG(INFO) << "NVMe ctrlr opts: num_io_queues=" << opts->num_io_queues
+              << ", io_queue_size=" << opts->io_queue_size
+              << ", io_queue_requests=" << opts->io_queue_requests
+              << ", keep_alive_timeout_ms=" << opts->keep_alive_timeout_ms
+              << ", transport_ack_timeout=" << static_cast<int>(opts->transport_ack_timeout)
+              << ", admin_queue_size=" << opts->admin_queue_size
+              << ", fabrics_connect_timeout_us=" << opts->fabrics_connect_timeout_us
+              << ", header_digest=" << opts->header_digest
+              << ", data_digest=" << opts->data_digest;
+}
+
+}  // namespace
 
 struct nof_seg_handle {
     struct spdk_nvme_qpair *qpair;
@@ -115,6 +191,9 @@ int64_t SpdkWrapper::NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t com
 }
 
 int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
+    std::memset(&info->trid, 0, sizeof(info->trid));
+    info->ns = 1;
+
     if (spdk_nvme_transport_id_parse(&info->trid, tr_str.c_str()) != 0) {
         LOG(ERROR) << "Error parsing transport address";
         return -1;
@@ -143,6 +222,11 @@ int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
         LOG(ERROR) << "No ns field found in transport string";
     }
 
+    info->ctrlr_key = std::string(info->trid.traddr) + "|" +
+                      std::string(info->trid.trsvcid) + "|" +
+                      std::string(info->trid.subnqn) + "|" +
+                      std::to_string(static_cast<int>(info->trid.trtype));
+
     LOG(INFO) << "traddr:" << info->trid.traddr
               << "trsvcid:" << info->trid.trsvcid
               << "ns:" << info->ns
@@ -155,6 +239,7 @@ int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
 int SpdkWrapper::ConnectController(const struct spdk_nvme_transport_id *trid, ctrlr_info *info) {
     auto probe_cb = [](void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	    struct spdk_nvme_ctrlr_opts *opts) -> bool {
+        ApplyCtrlrOptsFromEnv(opts);
         LOG(INFO) << "Attaching to " << trid->traddr << " " << trid->subnqn;
 	    return true;
     };

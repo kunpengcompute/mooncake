@@ -857,7 +857,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
     }
 
     for (const auto& replica : start_result.value()) {
-        if (replica.is_memory_replica()) {
+        if (replica.is_memory_replica() || replica.is_nof_replica()) {
             // Transfer data using allocated handles from all replicas
             ErrorCode transfer_err = TransferWrite(replica, slices);
             if (transfer_err != ErrorCode::OK) {
@@ -1707,8 +1707,18 @@ ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,
         return ErrorCode::INVALID_PARAMS;
     }
 
-    auto future =
-        transfer_submitter_->submit(replica_descriptor, slices, op_code);
+    std::optional<TransferFuture> future;
+    if (replica_descriptor.is_nof_replica()) {
+        size_t total_size = CalculateSliceSize(slices);
+        if (slices.empty() || slices[0].ptr == nullptr || total_size == 0) {
+            LOG(ERROR) << "Invalid slices for NoF transfer";
+            return ErrorCode::INVALID_PARAMS;
+        }
+        future = transfer_submitter_->submit(replica_descriptor, slices,
+                                             op_code, slices[0].ptr, total_size);
+    } else {
+        future = transfer_submitter_->submit(replica_descriptor, slices, op_code);
+    }
     if (!future) {
         LOG(ERROR) << "Failed to submit transfer operation";
         return ErrorCode::TRANSFER_FAIL;
@@ -1730,8 +1740,14 @@ ErrorCode Client::TransferRead(const Replica::Descriptor& replica_descriptor,
     if (replica_descriptor.is_memory_replica()) {
         auto& mem_desc = replica_descriptor.get_memory_descriptor();
         total_size = mem_desc.buffer_descriptor.size_;
-    } else {
+    } else if (replica_descriptor.is_nof_replica()) {
+        auto &nof_desc = replica_descriptor.get_nof_descriptor();
+        total_size = nof_desc.buffer_descriptor.size_;
+    } else if (replica_descriptor.is_disk_replica()) {
         auto& disk_desc = replica_descriptor.get_disk_descriptor();
+        total_size = disk_desc.object_size;
+    } else if (replica_descriptor.is_local_disk_replica()) {
+        auto& disk_desc = replica_descriptor.get_local_disk_descriptor();
         total_size = disk_desc.object_size;
     }
 

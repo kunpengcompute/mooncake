@@ -3,11 +3,107 @@
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cerrno>
 #include <cstdlib>
+#include <limits>
+#include <new>
 #include <set>
 #include "transfer_engine.h"
 #include "transport/transport.h"
 #include "spdk/spdk_wrapper.h"
+
+static bool IsTruthyEnv(const char *value) {
+    if (!value) {
+        return false;
+    }
+    std::string normalized(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return normalized == "1" || normalized == "true" || normalized == "yes" ||
+           normalized == "on";
+}
+
+static bool IsSpdkNofDebugEnabled() {
+    static const bool enabled = IsTruthyEnv(std::getenv("MC_NOF_DEBUG"));
+    return enabled;
+}
+
+static int GetSpdkNofDebugIntervalMs() {
+    static const int interval_ms = []() {
+        const char *raw_value = std::getenv("MC_NOF_DEBUG_INTERVAL_MS");
+        if (!raw_value) {
+            return 1000;
+        }
+        char *end_ptr = nullptr;
+        long parsed = std::strtol(raw_value, &end_ptr, 10);
+        if (end_ptr == raw_value || (end_ptr != nullptr && *end_ptr != '\0') || parsed <= 0) {
+            return 1000;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return interval_ms;
+}
+
+static int GetPositiveEnvOrDefault(const char *name, int default_value) {
+    const char *raw_value = std::getenv(name);
+    if (!raw_value || raw_value[0] == '\0') {
+        return default_value;
+    }
+
+    errno = 0;
+    char *end_ptr = nullptr;
+    long parsed = std::strtol(raw_value, &end_ptr, 10);
+    if (errno != 0 || end_ptr == raw_value ||
+        (end_ptr != nullptr && *end_ptr != '\0') || parsed <= 0 ||
+        parsed > std::numeric_limits<int>::max()) {
+        LOG(WARNING) << "Invalid value for " << name << ": " << raw_value
+                     << ", using default " << default_value;
+        return default_value;
+    }
+
+    return static_cast<int>(parsed);
+}
+
+static int GetSpdkNofSubmitChunkBytes() {
+    static const int value = GetPositiveEnvOrDefault(
+        "MC_NOF_SUBMIT_CHUNK_BYTES", mooncake::kDefaultSpdkNofSubmitChunkBytes);
+    return value;
+}
+
+static int GetSpdkNofInflightBytesLimit() {
+    static const int value = GetPositiveEnvOrDefault(
+        "MC_NOF_INFLIGHT_BYTES_LIMIT", mooncake::kDefaultSpdkNofInflightBytesLimit);
+    return value;
+}
+
+static int GetSpdkNofWorkerCount() {
+    static const int value = GetPositiveEnvOrDefault(
+        "MC_NOF_WORKERS", mooncake::kDefaultSpdkNofWorkers);
+    return value;
+}
+
+static int CountSpdkNofQueuedTasks(const mooncake::SpdkNofTask *head) {
+    int count = 0;
+    const mooncake::SpdkNofTask *cursor = head;
+    while (cursor != nullptr) {
+        ++count;
+        cursor = cursor->nxt;
+    }
+    return count;
+}
+
+static inline void SpdkNofTaskCompletion(mooncake::SpdkNofTask *task) {
+    if (task->remaining_lba == 0 && task->outstanding_sub_io == 0) {
+        task->state->set_completed(task->failed ? 
+            mooncake::ErrorCode::TRANSFER_FAIL : 
+            mooncake::ErrorCode::OK);
+        if (!task->on_chain) {
+            delete task;
+        }
+    }
+}
 
 static void nvmf_io_complete(void *ctx, const struct spdk_nvme_cpl *cpl) {
     if (!ctx) {
@@ -15,13 +111,49 @@ static void nvmf_io_complete(void *ctx, const struct spdk_nvme_cpl *cpl) {
         return;
     }
 
-    mooncake::SpdkNofTask *task = reinterpret_cast<mooncake::SpdkNofTask *>(ctx);
-    task->cb_fn(ctx, cpl);
+    mooncake::SpdkNofSubTask *sub_task = reinterpret_cast<mooncake::SpdkNofSubTask *>(ctx);
+    mooncake::SpdkNofTask *task = sub_task->task;
+    mooncake::SpdkNofQos *nof_qos = task->nof_qos;
+    int op = task->op;
+    if (--(*task->io_count) < 0) {
+        LOG(ERROR) << "total oustanding io < 0";
+    }
 
-    delete task;
+    if (--(task->outstanding_sub_io) < 0) {
+        LOG(ERROR) << "task oustanding io < 0";
+    }
+
+    nof_qos->inflight_blocks[op] -= sub_task->submit_lba_count;
+    if (nof_qos->inflight_blocks[op] < 0) {
+        LOG(ERROR) << "task oustanding io < 0";
+    }
+
+    if (spdk_nvme_cpl_is_error(cpl)) {
+        LOG(ERROR) << "task_complete: I/O failed" << spdk_nvme_cpl_get_status_string(&cpl->status);
+        task->remaining_lba = 0;
+        task->failed = true;
+    }
+
+    SpdkNofTaskCompletion(task);
+
+    sub_task->sub_task_pool->push(sub_task);
 }
-
 namespace mooncake {
+
+SpdkNofQos::SpdkNofQos(uint32_t block_size) {
+    int block_size_int = static_cast<int>(block_size);
+    if (block_size_int <= 0) {
+        block_size_int = 1;
+    }
+
+    blocks_per_chunk = std::max(1, GetSpdkNofSubmitChunkBytes() / block_size_int);
+    inflight_blocks_limit = std::max(1, GetSpdkNofInflightBytesLimit() / block_size_int);
+    for (int i = 0; i < kSpdkNofOpNum; ++i) {
+        inflight_blocks[i] = 0;
+        head[i] = nullptr;
+        tail[i] = nullptr;
+    }
+}
 
 // ============================================================================
 // FilereadWorkerPool Implementation
@@ -136,13 +268,18 @@ void FilereadWorkerPool::workerThread() {
 // to fully utilize the available ssd bandwidth, we use a default of 4 worker
 // threads.
 
-SpdkNofWorkerPool::SpdkNofWorkerPool() : shutdown_(false) {
-    VLOG(1) << "Creating SpdkNofWorkerPool with " << kDefaultSpdkNofWorkers
+SpdkNofWorkerPool::SpdkNofWorkerPool()
+    : worker_count_(GetSpdkNofWorkerCount()),
+      task_queue_(std::make_unique<std::queue<SpdkNofTask>[]>(worker_count_)),
+      queue_mutex_(std::make_unique<std::mutex[]>(worker_count_)),
+      queue_cv_(std::make_unique<std::condition_variable[]>(worker_count_)),
+      shutdown_(false) {
+    VLOG(1) << "Creating SpdkNofWorkerPool with " << worker_count_
             << " workers";
 
     // Start worker threads
-    workers_.reserve(kDefaultSpdkNofWorkers);
-    for (int i = 0; i < kDefaultSpdkNofWorkers; ++i) {
+    workers_.reserve(worker_count_);
+    for (int i = 0; i < worker_count_; ++i) {
         workers_.emplace_back(&SpdkNofWorkerPool::workerThread, this, i);
     }
 }
@@ -152,8 +289,8 @@ SpdkNofWorkerPool::~SpdkNofWorkerPool() {
         return;
     }
 
-    for (auto &cv: queue_cv_) {
-        cv.notify_all();
+    for (int i = 0; i < worker_count_; ++i) {
+        queue_cv_[i].notify_all();
     }
 
     for (auto &worker: workers_) {
@@ -166,6 +303,11 @@ SpdkNofWorkerPool::~SpdkNofWorkerPool() {
 }
 
 void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
+    if (!task.state) {
+        LOG(ERROR) << "Attempting to submit spdk nof task without state";
+        return;
+    }
+
     if (shutdown_.load()) {
         LOG(WARNING)
             << "Attempting to submit task to shutdown SpdkNofWorkerPool";
@@ -177,14 +319,20 @@ void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
     {
         std::lock_guard<std::mutex> lock(seg_mutex_);
         nof_seg_handle *seg = task.seg_handle;
+        bool new_binding = false;
         if (seg_to_worker_.find(seg) != seg_to_worker_.end()) {
             worker_idx = seg_to_worker_[seg];
         } else {
-            worker_idx = (seg_num++ % kDefaultSpdkNofWorkers);
+            worker_idx = (seg_num++ % worker_count_);
             seg_to_worker_[seg] = worker_idx;
+            new_binding = true;
+        }
+        if (new_binding && IsSpdkNofDebugEnabled()) {
+            LOG(INFO) << "nof_worker_bind seg_handle=" << seg
+                      << " worker_idx=" << worker_idx;
         }
     }
-    if (worker_idx < 0 || worker_idx >= kDefaultSpdkNofWorkers) {
+    if (worker_idx < 0 || worker_idx >= worker_count_) {
         LOG(ERROR) << "seg is not bind to invalid worker " << worker_idx;
         task.state->set_completed(ErrorCode::TRANSFER_FAIL);
         return;
@@ -194,94 +342,206 @@ void SpdkNofWorkerPool::submitTask(SpdkNofTask task) {
         std::lock_guard<std::mutex> lock(queue_mutex_[worker_idx]);
         task_queue_[worker_idx].push(std::move(task));
     }
-    queue_cv_[worker_idx].notify_one();     // only one equal notify one?
+    queue_cv_[worker_idx].notify_one();
 }
 
-static void task_complete(void *ctx, const struct spdk_nvme_cpl* cpl) {
-    SpdkNofTask *task = reinterpret_cast<SpdkNofTask *>(ctx);
-    if (spdk_nvme_cpl_is_error(cpl)) {
-        LOG(ERROR) << "task_complete: I/O failed" << spdk_nvme_cpl_get_status_string(&cpl->status);
-        task->state->set_completed(ErrorCode::TRANSFER_FAIL);
-    } else {
-        task->state->set_completed(ErrorCode::OK);
+static bool HasBufferedTask(
+    const std::map<nof_seg_handle *, SpdkNofQos *> &seg_to_qos) {
+    for (const auto &[_, nof_qos]: seg_to_qos) {
+        if (!nof_qos->Empty()) {
+            return true;
+        }
     }
+    return false;
+}
+
+constexpr int kSpdkNofSubTaskChunkSize = 4096;
+
+static inline bool CheckSubTaskPool(
+    std::stack<SpdkNofSubTask *> &sub_task_pool,
+    std::vector<SpdkNofSubTask *> &sub_task_chunks, int work_idx) {
+    if (!sub_task_pool.empty()) {
+        return true;
+    }
+    SpdkNofSubTask *sub_tasks =
+        new (std::nothrow) SpdkNofSubTask[kSpdkNofSubTaskChunkSize];
+    if (!sub_tasks) {
+         LOG(ERROR) << "alloc SpdkNofSubTask failed, worker " << work_idx;
+         return false;
+    }
+    sub_task_chunks.push_back(sub_tasks);
+
+    for (int i = 0; i < kSpdkNofSubTaskChunkSize; ++i) {
+        sub_tasks[i].sub_task_pool = &sub_task_pool;
+        sub_task_pool.push(&sub_tasks[i]);
+    }
+
+    return true;
 }
 
 void SpdkNofWorkerPool::workerThread(int work_idx) {
-    VLOG(2) << "FilereadWorkerPool worker thread started";
+    VLOG(2) << "SpdkNofWorkerPool worker thread started";
 
-    int64_t pending_io = 0;
-    std::set<nof_seg_handle *> seg_set;
+    int64_t total_outstanding_io = 0;
+    // std::set<nof_seg_handle *> seg_set;
+    std::map<nof_seg_handle *, SpdkNofQos *> seg_to_qos;
+    std::stack<SpdkNofSubTask *> sub_task_pool;
+    std::vector<SpdkNofSubTask *> sub_task_chunks;
     auto &task_queue = task_queue_[work_idx];
     auto &queue_cv = queue_cv_[work_idx];
     auto &queue_mutex = queue_mutex_[work_idx];
-    void *poll_group = SpdkWrapper::GetInstance().NvmePollGroupCreate();
-    if (!poll_group) {
-        LOG(ERROR) << "nvme poll group create failed, work_idx " << work_idx;
+    auto last_debug_snapshot = std::chrono::steady_clock::now();
+
+    if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks, work_idx)) {
         return;
     }
 
     while (true) {
-        SpdkNofTask *task = nullptr;
-
         // Wait for task or shutdown signal
         {
             std::unique_lock<std::mutex> lock(queue_mutex);
-            queue_cv.wait(lock, [this, &task_queue, &pending_io] {
-                return shutdown_.load() || !task_queue.empty() || pending_io;
+            queue_cv.wait(lock, [this, &task_queue, &total_outstanding_io,
+                                 &seg_to_qos] {
+                return shutdown_.load() || !task_queue.empty() ||
+                       total_outstanding_io || HasBufferedTask(seg_to_qos);
             });
 
-            if (shutdown_.load() && task_queue.empty() && (pending_io == 0)) {
+            if (shutdown_.load() && task_queue.empty() &&
+                (total_outstanding_io == 0) && !HasBufferedTask(seg_to_qos)) {
                 break;
             }
 
-            if (!task_queue.empty()) {
-                task = new SpdkNofTask(std::move(task_queue.front()));
-                task_queue.pop();
-                task->cb_fn = &task_complete;
-            }
-        }
-
-        if (task) {
-            try {
-                if (seg_set.find(task->seg_handle) == seg_set.end()) {
-                    LOG(INFO) << "seg_handle " << task->seg_handle << " bind to worker " << work_idx;
-                    SpdkWrapper::GetInstance().NvmePollGroupAdd(poll_group, task->seg_handle);
-                    seg_set.insert(task->seg_handle);
+            while (!task_queue.empty()) {
+                SpdkNofTask *task = new (std::nothrow)
+                    SpdkNofTask(std::move(task_queue.front()));
+                if (task == nullptr) {
+                    LOG(ERROR) << "alloc SpdkNofTask failed, worker " << work_idx;
+                    continue;
                 }
 
-                int ret = SpdkWrapper::GetInstance().SubmitRequest(task->seg_handle,
-                    task->ptr, task->lba, task->lba_count, task->op, nvmf_io_complete, task);
-                if (ret != 0) {
-                    LOG(INFO) << "seg " << task->seg_handle << " submit io fail";
-                    task->state->set_completed(ErrorCode::TRANSFER_FAIL);
-                    delete task;
+                SpdkNofQos *nof_qos = nullptr;
+                auto it = seg_to_qos.find(task->seg_handle);
+                if (it == seg_to_qos.end()) {
+                    SpdkNofQos *qos =
+                        new (std::nothrow) SpdkNofQos(
+                            SpdkWrapper::GetInstance().GetBlockSize(task->seg_handle));
+                    if (qos == nullptr) {
+                        LOG(ERROR) << "alloc SpdkNofQos failed, worker " << work_idx;
+                        delete task;
+                        continue;
+                    }
+                    seg_to_qos[task->seg_handle] = qos;
+                    nof_qos = qos;
+                    if (IsSpdkNofDebugEnabled()) {
+                        LOG(INFO) << "nof_qos_create worker_idx=" << work_idx
+                                  << " seg_handle=" << task->seg_handle
+                                  << " blocks_per_chunk=" << qos->blocks_per_chunk
+                                  << " inflight_blocks_limit="
+                                  << qos->inflight_blocks_limit;
+                    }
                 } else {
-                    pending_io++;
+                    nof_qos = it->second;
                 }
-            } catch (const std::exception& e) {
-                LOG(ERROR) << "Exception during spdk nvmf submit io: " << e.what();
-                task->state->set_completed(ErrorCode::TRANSFER_FAIL);
-                delete task;
+                task->io_count = &total_outstanding_io;
+                task->nof_qos = nof_qos;
+                task->on_chain = true;
+                nof_qos->PushTask(task);
+                task_queue.pop();
             }
         }
 
-        if (pending_io > 0) {
-            int64_t ret = SpdkWrapper::GetInstance().NvmePollGroupProcessCompletion(poll_group, 8);
-            if (ret < 0 || ret > pending_io) {
-                LOG(ERROR) << "poll completion error: ret " << ret << ", pending_io " << pending_io;  // pending io???
-            } else {
-                pending_io -= ret;
+        for (auto &[seg_handle, nof_qos]: seg_to_qos) {
+            uint32_t block_size = SpdkWrapper::GetInstance().GetBlockSize(seg_handle);
+            for (int i = 0; i < kSpdkNofOpNum; ++i) {
+                int avail_blocks = nof_qos->inflight_blocks_limit - nof_qos->inflight_blocks[i];
+                while (nof_qos->head[i] && avail_blocks > 0) {
+                    SpdkNofTask *task = nof_qos->head[i];
+                    SpdkNofSubTask *sub_task;
+                    while (task->remaining_lba > 0 && avail_blocks > 0) {
+                        int submit_lba_count = std::min(avail_blocks, 
+                            std::min(task->remaining_lba, nof_qos->blocks_per_chunk));
+                        int lba_off = task->lba_count - task->remaining_lba;
+                        int submit_lba= task->lba + lba_off;
+                        void *submit_ptr = reinterpret_cast<void *>
+                            (reinterpret_cast<char *>(task->ptr) + lba_off * block_size);
+
+                        if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks,
+                                              work_idx)) {
+                            task->failed = true;
+                            task->remaining_lba = 0;
+                            break;
+                        }
+                        sub_task = sub_task_pool.top();
+                        sub_task_pool.pop();
+                        sub_task->task = task;
+                        sub_task->submit_lba_count = submit_lba_count;
+                        
+                        int ret = SpdkWrapper::GetInstance().SubmitRequest(task->seg_handle,
+                            submit_ptr, submit_lba, submit_lba_count, task->op, nvmf_io_complete, sub_task);
+                        if (ret != 0) {
+                            LOG(ERROR) << "work " << work_idx << ", seg " << task->seg_handle << " submit io fail";
+                            task->failed = true;
+                            task->remaining_lba = 0;
+                        } else {
+                            task->idx++;
+                            task->remaining_lba -= submit_lba_count;
+                            nof_qos->inflight_blocks[i] += submit_lba_count;
+                            avail_blocks -= submit_lba_count;
+                            task->outstanding_sub_io++;
+                            total_outstanding_io++;
+                        }
+                    }
+                    if (task->remaining_lba == 0) {
+                        nof_qos->PopTask(i);
+                        task->on_chain = false;
+                        SpdkNofTaskCompletion(task);
+                    }
+                }
+            }
+        }
+
+        if (total_outstanding_io > 0) {
+            int64_t ret = 0;
+            for (auto &it: seg_to_qos) {
+                ret = SpdkWrapper::GetInstance().NvmePollProcessCompletion(it.first, 0);
+                if (ret < 0) {
+                    LOG(ERROR) << "poll completion error: ret " << ret;
+                }
+            }
+        }
+
+        if (IsSpdkNofDebugEnabled()) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_debug_snapshot);
+            if (elapsed.count() >= GetSpdkNofDebugIntervalMs()) {
+                for (const auto &[seg_handle, nof_qos] : seg_to_qos) {
+                    LOG(INFO) << "nof_qos_state worker_idx=" << work_idx
+                              << " seg_handle=" << seg_handle
+                              << " inflight_read=" << nof_qos->inflight_blocks[0]
+                              << " inflight_write=" << nof_qos->inflight_blocks[1]
+                              << " inflight_limit="
+                              << nof_qos->inflight_blocks_limit
+                              << " queued_read="
+                              << CountSpdkNofQueuedTasks(nof_qos->head[0])
+                              << " queued_write="
+                              << CountSpdkNofQueuedTasks(nof_qos->head[1])
+                              << " total_outstanding_io=" << total_outstanding_io;
+                }
+                last_debug_snapshot = now;
             }
         }
     }
 
-    for (auto &seg : seg_set) {
-        SpdkWrapper::GetInstance().NvmePollGroupRemove(poll_group, seg);
+    for (auto *sub_tasks : sub_task_chunks) {
+        delete[] sub_tasks;
     }
-    SpdkWrapper::GetInstance().NvmePollGroupDestroy(poll_group);
+    for (auto &[_, nof_qos] : seg_to_qos) {
+        delete nof_qos;
+    }
+    seg_to_qos.clear();
 
-    VLOG(2) << "FilereadWorkerPool worker thread exiting";
+    VLOG(2) << "SpdkNofWorkerPool worker thread exiting";
 }
 
 // ============================================================================
@@ -575,6 +835,7 @@ TransferSubmitter::TransferSubmitter(TransferEngine& engine,
                                      TransferMetric* transfer_metric)
     : engine_(engine),
       memcpy_pool_(std::make_unique<MemcpyWorkerPool>()),
+      spdk_nvmf_pool_(std::make_unique<SpdkNofWorkerPool>()),
       fileread_pool_(std::make_unique<FilereadWorkerPool>(backend)),
       transfer_metric_(transfer_metric) {
     // Read MC_STORE_MEMCPY environment variable, default to false (disabled)

@@ -1,6 +1,9 @@
 #include <glog/logging.h>
 
 #include <atomic>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #include "spdk/spdk_wrapper.h"
 
 static void disconnect_cb(struct spdk_nvme_qpair *qpair, void *ctx) {
@@ -8,6 +11,79 @@ static void disconnect_cb(struct spdk_nvme_qpair *qpair, void *ctx) {
 }
 
 namespace mooncake {
+namespace {
+
+bool ParseEnvU64(const char *name, uint64_t *out) {
+    const char *val = std::getenv(name);
+    if (!val || *val == '\0') {
+        return false;
+    }
+
+    errno = 0;
+    char *end = nullptr;
+    unsigned long long parsed = std::strtoull(val, &end, 10);
+    if (errno != 0 || end == val || (end && *end != '\0')) {
+        LOG(WARNING) << "Invalid value for " << name << ": " << val;
+        return false;
+    }
+
+    *out = static_cast<uint64_t>(parsed);
+    return true;
+}
+
+bool ParseEnvBool(const char *name, bool *out) {
+    uint64_t v = 0;
+    if (!ParseEnvU64(name, &v)) {
+        return false;
+    }
+    *out = (v != 0);
+    return true;
+}
+
+void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
+    uint64_t v = 0;
+    bool bv = false;
+
+    if (ParseEnvU64("MC_NVME_NUM_IO_QUEUES", &v)) {
+        opts->num_io_queues = static_cast<uint32_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_IO_QUEUE_SIZE", &v)) {
+        opts->io_queue_size = static_cast<uint32_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_IO_QUEUE_REQUESTS", &v)) {
+        opts->io_queue_requests = static_cast<uint32_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_KEEP_ALIVE_TIMEOUT_MS", &v)) {
+        opts->keep_alive_timeout_ms = static_cast<uint32_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_TRANSPORT_ACK_TIMEOUT", &v)) {
+        opts->transport_ack_timeout = static_cast<uint8_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_ADMIN_QUEUE_SIZE", &v)) {
+        opts->admin_queue_size = static_cast<uint16_t>(v);
+    }
+    if (ParseEnvU64("MC_NVME_FABRICS_CONNECT_TIMEOUT_US", &v)) {
+        opts->fabrics_connect_timeout_us = v;
+    }
+    if (ParseEnvBool("MC_NVME_HEADER_DIGEST", &bv)) {
+        opts->header_digest = bv;
+    }
+    if (ParseEnvBool("MC_NVME_DATA_DIGEST", &bv)) {
+        opts->data_digest = bv;
+    }
+
+    LOG(INFO) << "NVMe ctrlr opts: num_io_queues=" << opts->num_io_queues
+              << ", io_queue_size=" << opts->io_queue_size
+              << ", io_queue_requests=" << opts->io_queue_requests
+              << ", keep_alive_timeout_ms=" << opts->keep_alive_timeout_ms
+              << ", transport_ack_timeout=" << static_cast<int>(opts->transport_ack_timeout)
+              << ", admin_queue_size=" << opts->admin_queue_size
+              << ", fabrics_connect_timeout_us=" << opts->fabrics_connect_timeout_us
+              << ", header_digest=" << opts->header_digest
+              << ", data_digest=" << opts->data_digest;
+}
+
+}  // namespace
 
 struct nof_seg_handle {
     struct spdk_nvme_qpair *qpair;
@@ -110,65 +186,60 @@ int64_t SpdkWrapper::NvmePollGroupProcessCompletion(void *group, uint32_t comple
         complete_per_seg, disconnect_cb);
 }
 
+int64_t SpdkWrapper::NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t complete_per_seg) {
+    return spdk_nvme_qpair_process_completions(seg->qpair, complete_per_seg);
+}
+
 int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
-    size_t pos = 0;
+    std::memset(&info->trid, 0, sizeof(info->trid));
+    info->ns = 1;
 
-    while (pos < tr_str.size()) {
-        size_t space_pos = tr_str.find(' ', pos);
-        if (space_pos == std::string::npos) {
-            space_pos = tr_str.length();
-        }
-
-        std::string token = tr_str.substr(pos, space_pos - pos);
-        size_t colon_pos = token.find(":");
-        if (colon_pos != std::string::npos) {
-            std::string key = token.substr(0, colon_pos);
-            std::string val = token.substr(colon_pos + 1);
-
-            if (key == "traddr") {
-                if (val.size() > SPDK_NVMF_TRADDR_MAX_LEN) {
-                    LOG(ERROR) << "traddr length " << val.size() << " greater than maximum allowed " << SPDK_NVMF_TRADDR_MAX_LEN;
-                    return -1;
-                }
-                strncpy(info->trid.traddr, val.c_str(), val.size());
-                info->trid.traddr[val.size()] = '\0';
-                info->ctrlr_key += val;
-            } else if (key == "trsvcid") {
-                if (val.size() > SPDK_NVMF_TRSVCID_MAX_LEN) {
-                    LOG(ERROR) << "trsvcid length " << val.size() << " greater than maximum allowed " << SPDK_NVMF_TRSVCID_MAX_LEN;
-                    return -1;
-                }
-                strncpy(info->trid.trsvcid, val.c_str(), val.size());
-                info->trid.trsvcid[val.size()] = '\0';
-            } else if (key == "subnqn") {
-                if (val.size() > SPDK_NVMF_NQN_MAX_LEN) {
-                    LOG(ERROR) << "subnqn length " << val.size() << " greater than maximum allowed " << SPDK_NVMF_NQN_MAX_LEN;
-                    return -1;
-                }
-                strncpy(info->trid.subnqn, val.c_str(), val.size());
-                info->trid.subnqn[val.size()] = '\0';
-                info->ctrlr_key += val;
-            } else if (key == "ns") {
-                try {
-                    info->ns = static_cast<uint32_t>(std::stoul(val));
-                } catch (const std::exception& e) {
-                    LOG(ERROR) << "Failed to parse ns " << e.what();
-                    return -1;
-                }
-            }
-        }
-
-        pos = space_pos + 1;
+    if (spdk_nvme_transport_id_parse(&info->trid, tr_str.c_str()) != 0) {
+        LOG(ERROR) << "Error parsing transport address";
+        return -1;
     }
 
-    info->trid.trtype = SPDK_NVME_TRANSPORT_RDMA;
-    info->trid.adrfam = SPDK_NVMF_ADRFAM_IPV4;
+    std::string ns_prefix = "ns:";
+    size_t ns_pos = tr_str.find(ns_prefix);
+    if (ns_pos != std::string::npos) {
+        size_t ns_start = ns_pos + ns_prefix.length();
+        size_t ns_end = tr_str.find_first_of(" \t", ns_start);
+
+        std::string ns_str;
+        if (ns_end == std::string::npos) {
+            ns_str = tr_str.substr(ns_start);
+        } else {
+            ns_str = tr_str.substr(ns_start, ns_end - ns_start);
+        }
+
+        try {
+           info->ns = std::stoul(ns_str);
+        } catch (const std::exception &e) {
+           LOG(ERROR) << "Failed to parse ns value: " << ns_str << ", error: " << e.what();
+           return -1;
+        }
+    } else {
+        LOG(ERROR) << "No ns field found in transport string";
+    }
+
+    info->ctrlr_key = std::string(info->trid.traddr) + "|" +
+                      std::string(info->trid.trsvcid) + "|" +
+                      std::string(info->trid.subnqn) + "|" +
+                      std::to_string(static_cast<int>(info->trid.trtype));
+
+    LOG(INFO) << "traddr:" << info->trid.traddr
+              << "trsvcid:" << info->trid.trsvcid
+              << "ns:" << info->ns
+              << "subnqn:" << info->trid.subnqn
+              << "trtype:" << info->trid.trtype;
+    
     return 0;
 }
 
 int SpdkWrapper::ConnectController(const struct spdk_nvme_transport_id *trid, ctrlr_info *info) {
     auto probe_cb = [](void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	    struct spdk_nvme_ctrlr_opts *opts) -> bool {
+        ApplyCtrlrOptsFromEnv(opts);
         LOG(INFO) << "Attaching to " << trid->traddr << " " << trid->subnqn;
 	    return true;
     };
@@ -225,6 +296,7 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
         if (spdk_nvme_ctrlr_is_active_ns(info->ctrlr, tr.ns)) {
             ns = spdk_nvme_ctrlr_get_ns(info->ctrlr, tr.ns);
         } else {
+            LOG(ERROR) << "spdk_nvme_ctrlr_is_active_ns failed";
             return nullptr;
         }
 
@@ -241,11 +313,11 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
             return nullptr;
         }
 
+        seg_handle->qpair = qpair;
+        seg_handle->ns = ns;
         ns_seg[tr.ns] = seg_handle;
     }
 
-    seg_handle->qpair = qpair;
-    seg_handle->ns = ns;
     return seg_handle;
 }
 

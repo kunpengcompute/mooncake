@@ -40,6 +40,8 @@ public:
 
     int64_t NvmePollGroupProcessCompletion(void *group, uint32_t complete_per_seg);
 
+    int64_t NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t complete_per_seg);
+
     /**
      * @brief 获取传输通道
      *

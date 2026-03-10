@@ -1,4 +1,7 @@
 #include "ssd_register_client.h"
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 
 namespace mooncake {
 
@@ -29,43 +32,27 @@ int NoFRegisterClient::set_register(
         return OPERATION_FAILED;
     }
 
+    const char *trtype_env = std::getenv("MC_NOF_TRTYPE");
+    std::string trtype = trtype_env ? trtype_env : "RDMA";
+    std::transform(trtype.begin(), trtype.end(), trtype.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    if (trtype != "RDMA" && trtype != "TCP") {
+        LOG(WARNING) << "Invalid MC_NOF_TRTYPE=" << trtype
+                     << ", fallback to RDMA";
+        trtype = "RDMA";
+    }
+
     NoFSegment segment;
     segment.base = base;
     segment.size = size;
     segment.id = generate_uuid();
     segment.name = nqn;
-    segment.te_endpoint = traddr + ":" + std::to_string(trsvcid) + ":" + std::to_string(nsid);
+    segment.te_endpoint = "traddr:" + traddr + " trsvcid:" + std::to_string(trsvcid) +
+                          " subnqn:" + nqn + " trtype:" + trtype +
+                          " adrfam:IPv4 ns:" + std::to_string(nsid);
     auto mount_result = master_client_.MountNoFSegment(segment);
     if (!mount_result) {
         LOG(ERROR) << "mount_segment_to_master_failed ";
-        return OPERATION_FAILED;
-    }
-
-    const std::string key = "sglang_mooncake_warmup_key" + segment.name;
-    std::vector<size_t> slice_lengths = {10, 20 ,30};
-    auto start_result = master_client_.PutStart(key, slice_lengths, ReplicateConfig{});
-    if (!start_result) {
-        ErrorCode err = start_result.error();
-        if (err == ErrorCode::OBJECT_ALREADY_EXISTS) {
-            VLOG(1) << "object_already_exists key=" << key;
-            return {};
-        }
-        if (err == ErrorCode::NO_AVAILABLE_HANDLE) {
-            LOG(WARNING) << "Failed to start put operation for key=" << key
-                         << PUT_NO_SPACE_HELPER_STR;
-        } else {
-            LOG(ERROR) << "Failed to start put operation for key=" << key
-                       << ": " << toString(err);
-        }
-        return OPERATION_FAILED;
-    }
-
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-
-    auto end_result = master_client_.PutEnd(key, ReplicaType::NOF_SSD);
-    if (!end_result) {
-        ErrorCode err = end_result.error();
-        LOG(ERROR) << "Failed to end put operation: " << err;
         return OPERATION_FAILED;
     }
 

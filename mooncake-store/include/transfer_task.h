@@ -43,8 +43,12 @@ inline std::ostream& operator<<(std::ostream& os,
             return os << "LOCAL_MEMCPY";
         case TransferStrategy::TRANSFER_ENGINE:
             return os << "TRANSFER_ENGINE";
+        case TransferStrategy::SPDK_NVMF:
+            return os << "SPDK_NVMF";
         case TransferStrategy::FILE_READ:
             return os << "FILE_READ";
+        case TransferStrategy::EMPTY:
+            return os << "EMPTY";
         default:
             return os << "UNKNOWN";
     }
@@ -334,7 +338,8 @@ class MemcpyWorkerPool {
     std::atomic<bool> shutdown_;
 };
 
-typedef void (*IoCompleteCallback)(void *ctx, const struct spdk_nvme_cpl* cpl);
+// struct SpdkNofSubTask;
+struct SpdkNofQos;
 
 /**
  * @brief Spdk nvmf operation descriptor
@@ -344,14 +349,64 @@ struct SpdkNofTask {
     void *ptr;
     uint64_t lba;
     uint32_t lba_count;
-    int op;
+    int remaining_lba;
+    int outstanding_sub_io;
+    int op;                 // READ => 0, WRITE => 1
+    int idx;                // subop idx
+    bool failed;
+    bool on_chain;
     std::shared_ptr<SpdkNofOperationState> state;
-    IoCompleteCallback cb_fn;
+    int64_t *io_count;
+    SpdkNofQos *nof_qos;
+    SpdkNofTask *nxt;
 
     SpdkNofTask(nof_seg_handle *handle, void *buf, uint64_t off, uint32_t len,
         int op_code, std::shared_ptr<SpdkNofOperationState> s) :
-        seg_handle(handle), ptr(buf), lba(off), lba_count(len), op(op_code),
-        state(std::move(s)), cb_fn(nullptr) {}
+        seg_handle(handle), ptr(buf), 
+        lba(off), lba_count(len), 
+        remaining_lba(lba_count), outstanding_sub_io(0),
+        op(op_code), idx(0), failed(false), on_chain(false),
+        state(std::move(s)), io_count(nullptr), nof_qos(nullptr), nxt(nullptr) {}
+};
+
+struct SpdkNofSubTask {
+    SpdkNofTask *task;
+    int submit_lba_count;
+    std::stack<SpdkNofSubTask *> *sub_task_pool;
+};
+
+constexpr int kDefaultSpdkNofSubmitChunkBytes = (1 << 17);     // 128k
+constexpr int kDefaultSpdkNofInflightBytesLimit = (1 << 25);   // 32M
+constexpr int kSpdkNofOpNum = 2;                        // READ => 0, WRITE => 1
+struct SpdkNofQos {
+    int inflight_blocks[kSpdkNofOpNum];
+    int blocks_per_chunk;
+    int inflight_blocks_limit;
+    SpdkNofTask *head[kSpdkNofOpNum];
+    SpdkNofTask *tail[kSpdkNofOpNum];
+
+    explicit SpdkNofQos(uint32_t block_size);
+    
+    bool Empty() {
+        return (head[0] == nullptr && head[1] == nullptr); 
+    }
+
+    void PushTask(SpdkNofTask *task) {
+        int op = task->op;
+        if (head[op] == nullptr) {
+            head[op] = task;
+            tail[op] = task;
+        } else {
+            tail[op]->nxt = task;
+            tail[op] = task;
+        }
+    }
+
+    void PopTask(int op) {
+        if (head[op]) {
+            head[op] = head[op]->nxt;
+        }
+    }
 };
 
 /**
@@ -381,10 +436,11 @@ class SpdkNofWorkerPool {
    private:
     void workerThread(int work_idx);
 
+    int worker_count_;
     std::vector<std::thread> workers_;
-    std::queue<SpdkNofTask> task_queue_[kDefaultSpdkNofWorkers];
-    std::mutex queue_mutex_[kDefaultSpdkNofWorkers];
-    std::condition_variable queue_cv_[kDefaultSpdkNofWorkers];
+    std::unique_ptr<std::queue<SpdkNofTask>[]> task_queue_;
+    std::unique_ptr<std::mutex[]> queue_mutex_;
+    std::unique_ptr<std::condition_variable[]> queue_cv_;
     std::atomic<bool> shutdown_;
     std::mutex seg_mutex_;
     int seg_num = 0;

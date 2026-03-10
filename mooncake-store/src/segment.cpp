@@ -265,7 +265,7 @@ ErrorCode ScopedNoFSegmentAccess::MountSegment(const NoFSegment& segment,
 
     // Check if parameters are valid before allocating NoF SSD.
     if (size == 0) {
-        LOG(ERROR) << "NoF segment mount: " << "size=" << size
+        LOG(ERROR) << "NoF segment mount: " << "buffer=" << buffer << " or size=" << size
                    << " is invalid";
         return ErrorCode::INVALID_PARAMS;
     }

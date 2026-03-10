@@ -19,16 +19,6 @@
 namespace mooncake {
 
 /**
- * @brief Type of buffer allocator used in the system
- */
-enum class ReplicaType {
-    MEMORY,     // Memory replica
-    DISK,       // Disk replica
-    LOCAL_DISK, // Local disk replica
-    NOF_SSD,    // Nvme-oF SSD replica
-};
-
-/**
  * @brief Stream operator for ReplicaType
  */
 inline std::ostream& operator<<(std::ostream& os,

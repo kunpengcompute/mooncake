@@ -350,6 +350,16 @@ class MasterService {
     // fulfill evict ratio lowerbound.
     void BatchEvict(double evict_ratio_target, double evict_ratio_lowerbound);
 
+    // NoFBatchEvict evicts objects in a near-LRU way, i.e., prioritizes to evict
+    // object with smaller lease timeout. It has two passes. The first pass only
+    // evicts objects without soft pin. The second pass prioritizes objects
+    // without soft pin, but also allows to evict soft pinned objects if
+    // allow_evict_soft_pinned_objects_ is true. The first pass tries fulfill
+    // evict ratio target. If the actual evicted ratio is less than
+    // evict_ratio_lowerbound, the second pass will be triggered and try to
+    // fulfill evict ratio lowerbound.
+    void NoFBatchEvict(double evict_ratio_target, double evict_ratio_lowerbound);
+
     // Clear invalid handles in all shards
     void ClearInvalidHandles();
 
@@ -446,11 +456,27 @@ class MasterService {
                                });
         }
 
+        // Check if there is a nof replica
+        bool HasNoFReplica() const {
+            return std::any_of(replicas.begin(), replicas.end(),
+                               [](const Replica& replica) {
+                                   return replica.type() == ReplicaType::NOF_SSD;
+                               });
+        }
+
         // Get the count of memory replicas
         int GetMemReplicaCount() const {
             return std::count_if(
                 replicas.begin(), replicas.end(), [](const Replica& replica) {
                     return replica.type() == ReplicaType::MEMORY;
+                });
+        }
+
+        // Get the count of nof replicas
+        int GetNoFReplicaCount() const {
+            return std::count_if(
+                replicas.begin(), replicas.end(), [](const Replica& replica) {
+                    return replica.type() == ReplicaType::NOF_SSD;
                 });
         }
 
@@ -542,7 +568,8 @@ class MasterService {
      * @return Number of released objects that have memory replicas
      */
     uint64_t ReleaseExpiredDiscardedReplicas(
-        const std::chrono::steady_clock::time_point& now);
+        const std::chrono::steady_clock::time_point& now,
+        ReplicaType replica_type);
 
     // Eviction thread function
     void EvictionThreadFunc();
@@ -560,6 +587,8 @@ class MasterService {
         false};  // Set to trigger eviction when not enough space left
     const double eviction_ratio_;                 // in range [0.0, 1.0]
     const double eviction_high_watermark_ratio_;  // in range [0.0, 1.0]
+    const double nof_eviction_ratio_;                // in range [0.0, 1.0]
+    const double nof_eviction_high_watermark_ratio_; // in range [0.0, 1.0]
 
     // Eviction thread related members
     std::thread eviction_thread_;
@@ -696,6 +725,14 @@ class MasterService {
 
         bool isExpired(const std::chrono::steady_clock::time_point& now) const {
             return ttl_ <= now;
+        }
+
+        // check if there is a replica of a dedicated type
+        bool hasTargetReplica(ReplicaType replica_type) const {
+            return std::any_of(replicas_.begin(), replicas_.end(),
+                               [replica_type](const Replica& replica) {
+                                    return replica.type() == replica_type;
+                               });
         }
 
        private:

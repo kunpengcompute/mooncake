@@ -21,6 +21,8 @@ MasterService::MasterService(const MasterServiceConfig& config)
       allow_evict_soft_pinned_objects_(config.allow_evict_soft_pinned_objects),
       eviction_ratio_(config.eviction_ratio),
       eviction_high_watermark_ratio_(config.eviction_high_watermark_ratio),
+      nof_eviction_ratio_(config.nof_eviction_ratio),
+      nof_eviction_high_watermark_ratio_(config.nof_eviction_high_watermark_ratio),
       client_live_ttl_sec_(config.client_live_ttl_sec),
       enable_ha_(config.enable_ha),
       enable_offload_(config.enable_offload),
@@ -30,6 +32,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
       enable_disk_eviction_(config.enable_disk_eviction),
       quota_bytes_(config.quota_bytes),
       segment_manager_(config.memory_allocator),
+      nof_segment_manager_(config.memory_allocator),
       nof_segment_manager_(config.memory_allocator),
       memory_allocator_type_(config.memory_allocator),
       allocation_strategy_(std::make_shared<RandomAllocationStrategy>()),
@@ -653,6 +656,7 @@ auto MasterService::GetReplicaList(std::string_view key)
         return tl::make_unexpected(ErrorCode::REPLICA_IS_NOT_READY);
     }
 
+    // TODO: NoF SSD support (ranhaojia)
     if (replica_list[0].is_memory_replica()) {
         MasterMetricManager::instance().inc_mem_cache_hit_nums();
     } else if (replica_list[0].is_disk_replica()) {
@@ -703,14 +707,14 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     const auto now = std::chrono::steady_clock::now();
     auto it = metadata_shards_[shard_idx].metadata.find(key);
     if (it != metadata_shards_[shard_idx].metadata.end() && // The key exists and at least one replica is valid
-        !CleanupStaleHandles(it->second)) { // Lazy cleanup, delete expired replica
-        auto& metadata = it->second;
+        !CleanupStaleHandles(it->second)) {
+        auto& metadata = it->second; // ObjectMetadata instance
         // If the object's PutStart expired and has not completed any
         // replicas, we can discard it and allow the new PutStart to
         // go.
         if (!metadata.HasCompletedReplicas() &&
             metadata.put_start_time + put_start_discard_timeout_sec_ < now) {
-            auto replicas = metadata.DiscardProcessingReplicas();
+            auto replicas = metadata.DiscardProcessingReplicas(); // replicas whose PutStart operations timeout
             if (!replicas.empty()) {
                 std::lock_guard lock(discarded_replicas_mutex_);
                 discarded_replicas_.emplace_back(
@@ -862,7 +866,7 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
         MasterMetricManager::instance().inc_mem_cache_nums();
     } else if (replica_type == ReplicaType::DISK) {
         MasterMetricManager::instance().inc_file_cache_nums();
-    }
+    } // TODO: add inc_nof_cache_nums() (ranhaojia)
     // 1. Set lease timeout to now, indicating that the object has no lease
     // at beginning. 2. If this object has soft pin enabled, set it to be soft
     // pinned.
@@ -1280,14 +1284,27 @@ void MasterService::EvictionThreadFunc() {
             MasterMetricManager::instance().get_global_mem_used_ratio();
         if (used_ratio > eviction_high_watermark_ratio_ ||
             (need_eviction_ && eviction_ratio_ > 0.0)) {
-            double evict_ratio_target = std::max(
+            double evict_ratio_target = std::max( // 比应该淘汰的部分再多淘汰0.05（eviction_ratio)
                 eviction_ratio_,
                 used_ratio - eviction_high_watermark_ratio_ + eviction_ratio_);
             double evict_ratio_lowerbound =
-                std::max(evict_ratio_target * 0.5,
+                std::max(evict_ratio_target * 0.5, // 至少要淘汰这么多
                          used_ratio - eviction_high_watermark_ratio_);
             BatchEvict(evict_ratio_target, evict_ratio_lowerbound);
         }
+
+        double nof_used_ratio = 
+            MasterMetricManager::instance().get_global_nof_used_ratio();
+        if (nof_used_ratio > nof_eviction_high_watermark_ratio_ ||
+            (need_eviction_ && nof_eviction_ratio_ > 0.0)) {
+                double nof_evict_ratio_target = std::max(
+                    nof_eviction_ratio_,
+                    nof_used_ratio - nof_eviction_high_watermark_ratio_ + nof_eviction_ratio_);
+                double nof_evict_ratio_lowerbound = 
+                    std::max(nof_evict_ratio_target * 0.5,
+                             nof_used_ratio - nof_eviction_high_watermark_ratio_);
+                NoFBatchEvict(nof_evict_ratio_target, nof_evict_ratio_lowerbound);
+            }
 
         std::this_thread::sleep_for(
             std::chrono::milliseconds(kEvictionThreadSleepMs));
@@ -1315,6 +1332,7 @@ void MasterService::DiscardExpiredProcessingKeys(
         auto& metadata = it->second;
         // If the object is not valid or not in processing state, just
         // remove it from the processing set.
+        // FIXME: maybe a bug? 这里清理invalid metadata只包含key在processing_keys中的那些metadata (ranhaojia)
         if (!metadata.IsValid() || metadata.IsAllReplicasComplete()) {
             if (!metadata.IsValid()) {
                 shard.metadata.erase(it);
@@ -1331,6 +1349,9 @@ void MasterService::DiscardExpiredProcessingKeys(
         const auto ttl =
             metadata.put_start_time + put_start_release_timeout_sec_;
         if (ttl < now) {
+            // only the objects which are in processing will be discarded
+            // which means that the number of objects in the mooncake store
+            // may be less than the configured replica_num
             auto replicas = metadata.DiscardProcessingReplicas();
             if (!replicas.empty()) {
                 discarded_replicas.emplace_back(std::move(replicas), ttl);
@@ -1357,13 +1378,14 @@ void MasterService::DiscardExpiredProcessingKeys(
 }
 
 uint64_t MasterService::ReleaseExpiredDiscardedReplicas(
-    const std::chrono::steady_clock::time_point& now) {
+    const std::chrono::steady_clock::time_point& now,
+    ReplicaType replica_type) {
     uint64_t released_cnt = 0;
     std::lock_guard lock(discarded_replicas_mutex_);
     discarded_replicas_.remove_if(
-        [&now, &released_cnt](const DiscardedReplicas& item) {
+        [&now, &released_cnt, replica_type](const DiscardedReplicas& item) {
             const bool expired = item.isExpired(now);
-            if (expired && item.replicaSize() > 0) {
+            if (expired && item.replicaSize() > 0 && item.hasTargetReplica(replica_type)) {
                 released_cnt++;
             }
             return expired;
@@ -1393,6 +1415,8 @@ void MasterService::BatchEvict(double evict_ratio_target,
     // shards. No need to use expensive random_device here.
     size_t start_idx = rand() % metadata_shards_.size();
 
+    // TODO: 隐含一个假设，即所有shard的数据分布比较均匀
+    // 所以从每个shard中淘汰相同比例的数据（理想状况下）
     // First pass: evict objects without soft pin and lease expired
     for (size_t i = 0; i < metadata_shards_.size(); i++) {
         auto& shard =
@@ -1401,6 +1425,10 @@ void MasterService::BatchEvict(double evict_ratio_target,
 
         // Discard expired processing keys first so that they won't be counted
         // in later evictions.
+        // Three types of objects/replicas are discarded:
+        // 1. objects only in processing_keys but not in shard
+        // 2. objects that are invalid (maybe a bug)
+        // 3. replicas whose PutStart operations are timeout
         DiscardExpiredProcessingKeys(shard, now);
 
         // object_count must be updated at beginning as it will be used later
@@ -1450,7 +1478,11 @@ void MasterService::BatchEvict(double evict_ratio_target,
             auto it = shard.metadata.begin();
             while (it != shard.metadata.end()) {
                 // Skip objects that are not allowed to be evicted in the first
-                // pass
+                // pass, including:
+                // 1. objects whose lease is not expired
+                // 2. objects that are soft pinned
+                // 3. objects that have replicas under processing status
+                // 4. objects that do not have memory replicas
                 if (!it->second.IsLeaseExpired(now) ||
                     it->second.IsSoftPinned(now) ||
                     it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
@@ -1483,7 +1515,7 @@ void MasterService::BatchEvict(double evict_ratio_target,
 
     // Try releasing discarded replicas before we decide whether to do the
     // second pass.
-    uint64_t released_discarded_cnt = ReleaseExpiredDiscardedReplicas(now);
+    uint64_t released_discarded_cnt = ReleaseExpiredDiscardedReplicas(now, ReplicaType::MEMORY);
 
     // The ideal number of objects to evict in the second pass
     long target_evict_num = std::ceil(object_count * evict_ratio_lowerbound) -
@@ -1519,6 +1551,10 @@ void MasterService::BatchEvict(double evict_ratio_target,
                 MutexLocker lock(&shard.mutex);
                 auto it = shard.metadata.begin();
                 while (it != shard.metadata.end() && target_evict_num > 0) {
+                    // 1. lease timeout
+                    // 2. without soft pin
+                    // 3. do not contain replicas under processing status
+                    // 3. contain mem replcas
                     if (it->second.lease_timeout <= target_timeout &&
                         !it->second.IsSoftPinned(now) &&
                         !it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
@@ -1542,6 +1578,7 @@ void MasterService::BatchEvict(double evict_ratio_target,
                 }
             }
         } else if (!soft_pin_objects.empty()) {
+            // allow_evict_soft_pinned_objects_ is implicitly true if soft_pin_objects is not empty
             // Second pass B: Prioritize evicting objects without soft pin, but
             // also allow to evict soft pinned objects. The following code is
             // error-prone if the soft pin objects are empty.
@@ -1612,14 +1649,287 @@ void MasterService::BatchEvict(double evict_ratio_target,
         need_eviction_ = false;
         MasterMetricManager::instance().inc_eviction_success(evicted_count,
                                                              total_freed_size);
+        MasterMetricManager::instance().inc_mem_eviction_success(evicted_count,
+                                                             total_freed_size);
     } else {
         if (object_count == 0) {
             // No objects to evict, no need to check again
             need_eviction_ = false;
         }
         MasterMetricManager::instance().inc_eviction_fail();
+        MasterMetricManager::instance().inc_mem_eviction_fail();
     }
-    VLOG(1) << "action=evict_objects" << ", evicted_count=" << evicted_count
+    VLOG(1) << "action=evict_mem_replicas" << ", evicted_count=" << evicted_count
+            << ", total_freed_size=" << total_freed_size;
+}
+
+void MasterService::NoFBatchEvict(double nof_evict_ratio_target,
+                               double nof_evict_ratio_lowerbound) {
+    if (nof_evict_ratio_target < nof_evict_ratio_lowerbound) {
+        LOG(ERROR) << "nof_evict_ratio_target=" << nof_evict_ratio_target
+                   << ", nof_evict_ratio_lowerbound=" << nof_evict_ratio_lowerbound
+                   << ", error=invalid_params";
+        nof_evict_ratio_lowerbound = nof_evict_ratio_target;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    long evicted_count = 0;
+    long object_count = 0;
+    uint64_t total_freed_size = 0;
+
+    // Candidates for second pass eviction
+    std::vector<std::chrono::steady_clock::time_point> no_pin_objects;
+    std::vector<std::chrono::steady_clock::time_point> soft_pin_objects;
+
+    // Randomly select a starting shard to avoid imbalance eviction between
+    // shards. No need to use expensive random_device here.
+    size_t start_idx = rand() % metadata_shards_.size();
+
+    // TODO: 隐含一个假设，即所有shard的数据分布比较均匀
+    // 所以从每个shard中淘汰相同比例的数据（理想状况下）
+    // First pass: evict objects without soft pin and lease expired
+    for (size_t i = 0; i < metadata_shards_.size(); i++) {
+        auto& shard =
+            metadata_shards_[(start_idx + i) % metadata_shards_.size()];
+        MutexLocker lock(&shard.mutex);
+
+        // Discard expired processing keys first so that they won't be counted
+        // in later evictions.
+        // Three types of objects/replicas are discarded:
+        // 1. objects only in processing_keys but not in shard
+        // 2. objects that are invalid (maybe a bug)
+        // 3. replicas whose PutStart operations are timeout
+        DiscardExpiredProcessingKeys(shard, now);
+
+        // object_count must be updated at beginning as it will be used later
+        // to compute ideal_evict_num
+        object_count += shard.metadata.size();
+
+        // To achieve evicted_count / object_count = evict_ratio_target,
+        // ideally how many object should be evicted in this shard
+        const long ideal_evict_num =
+            std::ceil(object_count * nof_evict_ratio_target) - evicted_count;
+
+        std::vector<std::chrono::steady_clock::time_point>
+            candidates;  // can be removed
+        for (auto it = shard.metadata.begin(); it != shard.metadata.end();
+             it++) {
+            // Skip objects that are not expired or have incomplete replicas
+            if (!it->second.IsLeaseExpired(now) ||
+                it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
+                                            ReplicaType::NOF_SSD)) {
+                continue;
+            }
+            if (!it->second.IsSoftPinned(now)) {
+                if (ideal_evict_num > 0) {
+                    // first pass candidates
+                    candidates.push_back(it->second.lease_timeout);
+                } else {
+                    // No need to evict any object in this shard, put to
+                    // second pass candidates
+                    no_pin_objects.push_back(it->second.lease_timeout);
+                }
+            } else if (allow_evict_soft_pinned_objects_) {
+                // second pass candidates, only if
+                // allow_evict_soft_pinned_objects_ is true
+                soft_pin_objects.push_back(it->second.lease_timeout);
+            }
+        }
+
+        if (ideal_evict_num > 0 && !candidates.empty()) {
+            long evict_num = std::min(ideal_evict_num, (long)candidates.size());
+            long shard_evicted_count =
+                0;  // number of objects evicted from this shard
+            std::nth_element(candidates.begin(),
+                             candidates.begin() + (evict_num - 1),
+                             candidates.end());
+            auto target_timeout = candidates[evict_num - 1];
+            // Evict objects with lease timeout less than or equal to target.
+            auto it = shard.metadata.begin();
+            while (it != shard.metadata.end()) {
+                // Skip objects that are not allowed to be evicted in the first
+                // pass, including:
+                // 1. objects whose lease is not expired
+                // 2. objects that are soft pinned
+                // 3. objects that have replicas under processing status
+                // 4. objects that do not have memory replicas
+                if (!it->second.IsLeaseExpired(now) ||
+                    it->second.IsSoftPinned(now) ||
+                    it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
+                                                ReplicaType::NOF_SSD) ||
+                    !it->second.HasNoFReplica()) {
+                    ++it;
+                    continue;
+                }
+                if (it->second.lease_timeout <= target_timeout) {
+                    // Evict this object
+                    total_freed_size +=
+                        it->second.size * it->second.GetNoFReplicaCount();
+                    it->second.EraseReplica(
+                        ReplicaType::NOF_SSD);  // Erase nof replicas
+                    if (it->second.IsValid() == false) {
+                        it = shard.metadata.erase(it);
+                    } else {
+                        ++it;
+                    }
+                    shard_evicted_count++;
+                } else {
+                    // second pass candidates
+                    no_pin_objects.push_back(it->second.lease_timeout);
+                    ++it;
+                }
+            }
+            evicted_count += shard_evicted_count;
+        }
+    }
+
+    // Try releasing discarded replicas before we decide whether to do the
+    // second pass.
+    uint64_t released_discarded_cnt = ReleaseExpiredDiscardedReplicas(now, ReplicaType::NOF_SSD);
+
+    // The ideal number of objects to evict in the second pass
+    long target_evict_num = std::ceil(object_count * nof_evict_ratio_lowerbound) -
+                            evicted_count - released_discarded_cnt;
+    // The actual number of objects we can evict in the second pass
+    target_evict_num =
+        std::min(target_evict_num,
+                 (long)no_pin_objects.size() + (long)soft_pin_objects.size());
+
+    // Do second pass eviction only if 1). there are candidates that can be
+    // evicted AND 2). The evicted number in the first pass is less than
+    // evict_ratio_lowerbound.
+    if (target_evict_num > 0) {
+        // If 1). there are enough candidates without soft pin OR 2). soft pin
+        // candidates are empty, then do second pass A. Otherwise, do second
+        // pass B. Note that the second condition is ensured implicitly by the
+        // calculation of target_evict_num.
+        if (target_evict_num <= static_cast<long>(no_pin_objects.size())) {
+            // Second pass A: only evict objects without soft pin. The following
+            // code is error-prone if target_evict_num > no_pin_objects.size().
+
+            std::nth_element(no_pin_objects.begin(),
+                             no_pin_objects.begin() + (target_evict_num - 1),
+                             no_pin_objects.end());
+            auto target_timeout = no_pin_objects[target_evict_num - 1];
+
+            // Evict objects with lease timeout less than or equal to target.
+            // Stop when the target is reached.
+            for (size_t i = 0;
+                 i < metadata_shards_.size() && target_evict_num > 0; i++) {
+                auto& shard =
+                    metadata_shards_[(start_idx + i) % metadata_shards_.size()];
+                MutexLocker lock(&shard.mutex);
+                auto it = shard.metadata.begin();
+                while (it != shard.metadata.end() && target_evict_num > 0) {
+                    // 1. lease timeout
+                    // 2. without soft pin
+                    // 3. do not contain replicas under processing status
+                    // 3. contain mem replcas
+                    if (it->second.lease_timeout <= target_timeout &&
+                        !it->second.IsSoftPinned(now) &&
+                        !it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
+                                                     ReplicaType::NOF_SSD) &&
+                        it->second.HasNoFReplica()) {
+                        // Evict this object
+                        total_freed_size +=
+                            it->second.size * it->second.GetNoFReplicaCount();
+                        it->second.EraseReplica(
+                            ReplicaType::NOF_SSD);  // Erase memory replicas
+                        if (it->second.IsValid() == false) {
+                            it = shard.metadata.erase(it);
+                        } else {
+                            ++it;
+                        }
+                        evicted_count++;
+                        target_evict_num--;
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+        } else if (!soft_pin_objects.empty()) {
+            // allow_evict_soft_pinned_objects_ is implicitly true if soft_pin_objects is not empty
+            // Second pass B: Prioritize evicting objects without soft pin, but
+            // also allow to evict soft pinned objects. The following code is
+            // error-prone if the soft pin objects are empty.
+
+            const long soft_pin_evict_num =
+                target_evict_num - static_cast<long>(no_pin_objects.size());
+            // For soft pin objects, prioritize to evict the ones with smaller
+            // lease timeout.
+            std::nth_element(
+                soft_pin_objects.begin(),
+                soft_pin_objects.begin() + (soft_pin_evict_num - 1),
+                soft_pin_objects.end());
+            auto soft_target_timeout = soft_pin_objects[soft_pin_evict_num - 1];
+
+            // Stop when the target is reached.
+            for (size_t i = 0;
+                 i < metadata_shards_.size() && target_evict_num > 0; i++) {
+                auto& shard =
+                    metadata_shards_[(start_idx + i) % metadata_shards_.size()];
+                MutexLocker lock(&shard.mutex);
+
+                auto it = shard.metadata.begin();
+                while (it != shard.metadata.end() && target_evict_num > 0) {
+                    // Skip objects that are not expired or have incomplete
+                    // replicas
+                    if (!it->second.IsLeaseExpired(now) ||
+                        it->second.HasDiffRepStatus(ReplicaStatus::COMPLETE,
+                                                    ReplicaType::NOF_SSD) ||
+                        !it->second.HasNoFReplica()) {
+                        ++it;
+                        continue;
+                    }
+                    // Evict objects with 1). no soft pin OR 2). with soft pin
+                    // and lease timeout less than or equal to target.
+                    if (!it->second.IsSoftPinned(now) ||
+                        it->second.lease_timeout <= soft_target_timeout) {
+                        total_freed_size +=
+                            it->second.size * it->second.GetNoFReplicaCount();
+                        it->second.EraseReplica(
+                            ReplicaType::NOF_SSD);  // Erase nof replicas
+                        if (it->second.IsValid() == false) {
+                            it = shard.metadata.erase(it);
+                        } else {
+                            ++it;
+                        }
+                        evicted_count++;
+                        target_evict_num--;
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+        } else {
+            // This should not happen.
+            LOG(ERROR) << "Error in second pass eviction: target_evict_num="
+                       << target_evict_num
+                       << ", no_pin_objects.size()=" << no_pin_objects.size()
+                       << ", soft_pin_objects.size()="
+                       << soft_pin_objects.size()
+                       << ", evicted_count=" << evicted_count
+                       << ", object_count=" << object_count
+                       << ", evict_ratio_target=" << nof_evict_ratio_target
+                       << ", evict_ratio_lowerbound=" << nof_evict_ratio_lowerbound;
+        }
+    }
+
+    if (evicted_count > 0 || released_discarded_cnt > 0) {
+        need_eviction_ = false;
+        MasterMetricManager::instance().inc_eviction_success(evicted_count,
+                                                             total_freed_size);
+        MasterMetricManager::instance().inc_nof_eviction_success(evicted_count,
+                                                             total_freed_size);
+    } else {
+        if (object_count == 0) {
+            // No objects to evict, no need to check again
+            need_eviction_ = false;
+        }
+        MasterMetricManager::instance().inc_eviction_fail();
+        MasterMetricManager::instance().inc_nof_eviction_fail();
+    }
+    VLOG(1) << "action=evict_nof_replicas" << ", evicted_count=" << evicted_count
             << ", total_freed_size=" << total_freed_size;
 }
 
@@ -1659,6 +1969,11 @@ void MasterService::ClientMonitorFunc() {
             std::vector<size_t> dec_capacities;
             std::vector<UUID> client_ids;
             std::vector<std::string> segment_names;
+
+            std::vector<UUID> unmount_nof_segments;
+            std::vector<size_t> dec_nof_capacities;
+            std::vector<UUID> nof_client_ids;
+            std::vector<std::string> nof_segment_names;
             {
                 // Lock client_mutex and segment_mutex
                 std::unique_lock<std::shared_mutex> lock(client_mutex_);
@@ -1672,7 +1987,10 @@ void MasterService::ClientMonitorFunc() {
 
                 ScopedSegmentAccess segment_access =
                     segment_manager_.getSegmentAccess();
+                ScopedNoFSegmentAccess nof_segment_access =
+                    nof_segment_manager_.getNoFSegmentAccess();
                 for (auto& client_id : expired_clients) {
+                    // mounted mem segemtns of this expired client
                     std::vector<Segment> segments;
                     segment_access.GetClientSegments(client_id, segments);
                     for (auto& seg : segments) {
@@ -1689,7 +2007,31 @@ void MasterService::ClientMonitorFunc() {
                                        << ", segment_name=" << seg.name
                                        << ", "
                                           "error=prepare_unmount_expired_"
-                                          "segment_failed";
+                                          "mem_segment_failed";
+                        }
+                    }
+
+                    // mounted nof segments of this expired client
+                    std::vector<NoFSegment> nof_segments;
+                    nof_segment_access.GetClientSegments(client_id, nof_segments);
+                    for (auto& nof_seg : nof_segments) {
+                        size_t metrics_dec_nof_capacity = 0;
+                        if (nof_segment_access.PrepareUnmountSegment(
+                                nof_seg.id, metrics_dec_nof_capacity) ==
+                            ErrorCode::OK) {
+                            unmount_nof_segments.push_back(nof_seg.id);
+                            dec_nof_capacities.push_back(metrics_dec_nof_capacity);
+                            nof_client_ids.push_back(client_id);
+                            nof_segment_names.push_back(nof_seg.name);
+                            LOG(INFO) << "client_id=" << client_id
+                                      << ", segment_id=" << nof_seg.id
+                                      << ", segment_size=" << metrics_dec_nof_capacity;
+                        } else {
+                            LOG(ERROR) << "client_id=" << client_id
+                                       << ", segment_name=" << nof_seg.name
+                                       << ", "
+                                          "error=prepare_unmount_expired_"
+                                          "nof_segment_failed";
                         }
                     }
                 }
@@ -1706,7 +2048,20 @@ void MasterService::ClientMonitorFunc() {
                         unmount_segments[i], client_ids[i], dec_capacities[i]);
                     LOG(INFO) << "client_id=" << client_ids[i]
                               << ", segment_name=" << segment_names[i]
-                              << ", action=unmount_expired_segment";
+                              << ", action=unmount_expired_mem_segment";
+                }
+            }
+
+            if (!unmount_nof_segments.empty()) {
+                ClearInvalidHandles();
+                ScopedNoFSegmentAccess nof_segment_access =
+                    nof_segment_manager_.getNoFSegmentAccess();
+                for (size_t i = 0; i < unmount_nof_segments.size(); i++) {
+                    nof_segment_access.CommitUnmountSegment(
+                        unmount_nof_segments[i], nof_client_ids[i], dec_nof_capacities[i]);
+                    LOG(INFO) << "client_id=" << nof_client_ids[i]
+                              << ", segment_name=" << nof_segment_names[i]
+                              << ", action=unmount_expired_nof_segment";
                 }
             }
         }

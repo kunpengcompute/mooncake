@@ -332,7 +332,7 @@ ErrorCode ScopedNoFSegmentAccess::MountSegment(const NoFSegment& segment,
     nof_segment_manager_->allocator_manager_.addAllocator(segment.name, allocator);
     nof_segment_manager_->client_segments_[client_id].push_back(segment.id);
     nof_segment_manager_->mounted_segments_[segment.id] = {
-        segment, SegmentStatus::OK, std::move(allocator)};
+        segment, client_id, SegmentStatus::OK, std::move(allocator)};
     nof_segment_manager_->client_by_name_[segment.name] = client_id;
     MasterMetricManager::instance().inc_total_nof_capacity(segment.name, size);
     
@@ -463,6 +463,21 @@ ErrorCode ScopedNoFSegmentAccess::GetClientSegments(
     return ErrorCode::OK;
 }
 
+ErrorCode ScopedNoFSegmentAccess::GetMountedSegments(
+    std::vector<MountedNoFSegmentSnapshot>& segments) const {
+    segments.clear();
+    segments.reserve(nof_segment_manager_->mounted_segments_.size());
+    for (const auto& it : nof_segment_manager_->mounted_segments_) {
+        segments.push_back(MountedNoFSegmentSnapshot{
+            .segment_id = it.first,
+            .client_id = it.second.client_id,
+            .segment = it.second.segment,
+            .status = it.second.status,
+        });
+    }
+    return ErrorCode::OK;
+}
+
 ErrorCode ScopedNoFSegmentAccess::GetAllSegments(
     std::vector<std::string>& all_segments) {
     all_segments.clear();
@@ -496,6 +511,18 @@ ErrorCode ScopedNoFSegmentAccess::QuerySegments(const std::string& segment,
     capacity = total_capacity;
 
     return ErrorCode::OK;
+}
+
+void NoFSegmentManager::GetMountedSegmentsSnapshot(
+    std::vector<MountedNoFSegmentSnapshot>& segments) const {
+    std::shared_lock<std::shared_mutex> lock(segment_mutex_);
+    segments.clear();
+    segments.reserve(mounted_segments_.size());
+    for (const auto& [segment_id, mounted_segment] : mounted_segments_) {
+        segments.push_back(MountedNoFSegmentSnapshot{
+            segment_id, mounted_segment.client_id, mounted_segment.segment,
+            mounted_segment.status});
+    }
 }
 
 }  // namespace mooncake

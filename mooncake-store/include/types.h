@@ -34,6 +34,9 @@ static constexpr double DEFAULT_NOF_EVICTION_RATIO = 0.05;
 static constexpr double DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO = 0.95;
 static constexpr int64_t ETCD_MASTER_VIEW_LEASE_TTL = 5;    // in seconds
 static constexpr int64_t DEFAULT_CLIENT_LIVE_TTL_SEC = 10;  // in seconds
+static constexpr int64_t DEFAULT_NOF_HEARTBEAT_INTERVAL_SEC = 10;
+static constexpr uint32_t DEFAULT_NOF_HEARTBEAT_PROBE_TIMEOUT_MS = 1000;
+static constexpr uint32_t DEFAULT_NOF_HEARTBEAT_FAILURES_THRESHOLD = 3;
 static const std::string DEFAULT_CLUSTER_ID = "mooncake_cluster";
 static const std::string DEFAULT_ROOT_FS_DIR = "";
 // default do not limit DFS usage, and use

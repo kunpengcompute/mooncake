@@ -5,6 +5,7 @@
 #include <boost/lockfree/queue.hpp>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <optional>
@@ -40,6 +41,9 @@ class EvictionStrategy;
  */
 class MasterService {
    public:
+    using NoFProbeFn =
+        std::function<bool(const std::string&, uint32_t, std::string*)>;
+
     MasterService();
     MasterService(const MasterServiceConfig& config);
     ~MasterService();
@@ -335,6 +339,13 @@ class MasterService {
         const std::vector<StorageObjectMetadata>& metadatas)
         -> tl::expected<void, ErrorCode>;
 
+    // Testing helpers for deterministic NoF heartbeat validation.
+    void SetNoFProbeFnForTesting(NoFProbeFn fn);
+    size_t GetMountedNoFSegmentCountForTesting();
+    bool IsNoFSegmentMountedForTesting(const UUID& segment_id);
+    std::optional<uint32_t> GetNoFHeartbeatFailureCountForTesting(
+        const UUID& segment_id);
+
    private:
     // Resolve the key to a sanitized format for storage
     std::string SanitizeKey(const std::string& key) const;
@@ -573,6 +584,12 @@ class MasterService {
 
     // Eviction thread function
     void EvictionThreadFunc();
+    void NofHeartbeatThreadFunc();
+    bool TryUnmountNoFSegmentByHeartbeat(
+        const MountedNoFSegmentSnapshot& snapshot,
+        const std::string& error_reason);
+    bool ProbeNoFSegment(const std::string& te_endpoint,
+                         std::string* error_reason);
 
     tl::expected<void, ErrorCode> PushOffloadingQueue(const std::string& key,
                                                       const Replica& replica);
@@ -674,6 +691,27 @@ class MasterService {
         128 * 1024;  // Size of the client ping queue
     boost::lockfree::queue<PodUUID> client_ping_queue_{kClientPingQueueSize};
     const int64_t client_live_ttl_sec_;
+    const std::chrono::seconds nof_heartbeat_interval_sec_;
+    const std::chrono::milliseconds nof_heartbeat_probe_timeout_ms_;
+    const uint32_t nof_heartbeat_failures_threshold_;
+
+    struct NoFHeartbeatState {
+        UUID owner_client_id{0, 0};
+        std::string segment_name;
+        std::string te_endpoint;
+        std::chrono::steady_clock::time_point next_probe_at{};
+        std::chrono::steady_clock::time_point last_success_at{};
+        uint32_t consecutive_failures{0};
+        std::string last_error_reason;
+    };
+    std::mutex nof_heartbeat_mutex_;
+    std::unordered_map<UUID, NoFHeartbeatState, boost::hash<UUID>>
+        nof_heartbeat_states_;
+    std::thread nof_heartbeat_thread_;
+    std::atomic<bool> nof_heartbeat_running_{false};
+    static constexpr uint64_t kNoFHeartbeatThreadSleepMs = 100;
+    mutable std::mutex nof_probe_fn_mutex_;
+    NoFProbeFn nof_probe_fn_;
 
     // if high availability features enabled
     const bool enable_ha_;

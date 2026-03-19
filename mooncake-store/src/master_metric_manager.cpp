@@ -140,6 +140,22 @@ MasterMetricManager::MasterMetricManager()
                      "Total number of ping requests received"),
       ping_failures_("master_ping_failures_total",
                      "Total number of failed ping requests"),
+      nof_heartbeat_success_total_(
+          "master_nof_heartbeat_success_total",
+          "Total number of successful NoF heartbeat probes"),
+      nof_heartbeat_failure_total_(
+          "master_nof_heartbeat_failure_total",
+          "Total number of failed NoF heartbeat probes"),
+      nof_heartbeat_timeout_total_(
+          "master_nof_heartbeat_timeout_total",
+          "Total number of timed out NoF heartbeat probes"),
+      nof_segments_unmounted_by_heartbeat_total_(
+          "master_nof_segments_unmounted_by_heartbeat_total",
+          "Total number of NoF segments unmounted due to heartbeat failures"),
+      nof_heartbeat_probe_latency_ms_(
+          "master_nof_heartbeat_probe_latency_ms",
+          "Latency distribution of NoF heartbeat probes in milliseconds",
+          {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000}),
 
       // Initialize Batch Request Counters
       batch_exist_key_requests_(
@@ -342,6 +358,10 @@ void MasterMetricManager::update_metrics_for_zero_output() {
     remount_segment_failures_.inc(0);
     ping_requests_.inc(0);
     ping_failures_.inc(0);
+    nof_heartbeat_success_total_.inc(0);
+    nof_heartbeat_failure_total_.inc(0);
+    nof_heartbeat_timeout_total_.inc(0);
+    nof_segments_unmounted_by_heartbeat_total_.inc(0);
 
     // Update Batch Request Counters
     batch_exist_key_requests_.inc(0);
@@ -398,6 +418,7 @@ void MasterMetricManager::update_metrics_for_zero_output() {
 
     // Update Histogram (use observe(0) to mark as changed)
     value_size_distribution_.observe(0);
+    nof_heartbeat_probe_latency_ms_.observe(0);
 
     // Note: dynamic_gauge_1t (mem_allocated_size_per_segment_ and
     // mem_total_capacity_per_segment_) are not initialized here because they
@@ -733,6 +754,28 @@ void MasterMetricManager::inc_ping_requests(int64_t val) {
 }
 void MasterMetricManager::inc_ping_failures(int64_t val) {
     ping_failures_.inc(val);
+}
+
+void MasterMetricManager::inc_nof_heartbeat_success_total(int64_t val) {
+    nof_heartbeat_success_total_.inc(val);
+}
+
+void MasterMetricManager::inc_nof_heartbeat_failure_total(int64_t val) {
+    nof_heartbeat_failure_total_.inc(val);
+}
+
+void MasterMetricManager::inc_nof_heartbeat_timeout_total(int64_t val) {
+    nof_heartbeat_timeout_total_.inc(val);
+}
+
+void MasterMetricManager::inc_nof_segments_unmounted_by_heartbeat_total(
+    int64_t val) {
+    nof_segments_unmounted_by_heartbeat_total_.inc(val);
+}
+
+void MasterMetricManager::observe_nof_heartbeat_probe_latency_ms(
+    int64_t latency_ms) {
+    nof_heartbeat_probe_latency_ms_.observe(latency_ms);
 }
 
 // Batch Operation Statistics (Counters)
@@ -1234,6 +1277,11 @@ std::string MasterMetricManager::serialize_metrics() {
     serialize_metric(remount_segment_failures_);
     serialize_metric(ping_requests_);
     serialize_metric(ping_failures_);
+    serialize_metric(nof_heartbeat_success_total_);
+    serialize_metric(nof_heartbeat_failure_total_);
+    serialize_metric(nof_heartbeat_timeout_total_);
+    serialize_metric(nof_segments_unmounted_by_heartbeat_total_);
+    serialize_metric(nof_heartbeat_probe_latency_ms_);
 
     // Serialize Batch Request Counters
     serialize_metric(batch_exist_key_requests_);

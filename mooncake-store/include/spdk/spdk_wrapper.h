@@ -1,8 +1,10 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
-#include <map>
 #include <spdk/env.h>
 #include <spdk/nvme.h>
 
@@ -30,16 +32,6 @@ public:
 
     void Free(void *ptr);
 
-    void* NvmePollGroupCreate();
-
-    int NvmePollGroupDestroy(void *group);
-
-    int NvmePollGroupAdd(void *group, nof_seg_handle *seg);
-
-    int NvmePollGroupRemove(void *group, nof_seg_handle *seg);
-
-    int64_t NvmePollGroupProcessCompletion(void *group, uint32_t complete_per_seg);
-
     int64_t NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t complete_per_seg);
 
     /**
@@ -58,17 +50,36 @@ public:
     int SubmitRequest(const nof_seg_handle *seg_handle, void *ptr, uint64_t lba, uint32_t lba_count, 
         int op, spdk_nvme_cmd_cb cb_fn, void *cb_ctx);
 
+    bool ProbeNofSegment(const std::string &tr_str, uint32_t timeout_ms,
+                         std::string *error_reason = nullptr);
+
 private:
+    struct ProbeBuffer {
+        void *ptr{nullptr};
+        uint32_t size{0};
+
+        ProbeBuffer() = default;
+        ProbeBuffer(const ProbeBuffer&) = delete;
+        ProbeBuffer& operator=(const ProbeBuffer&) = delete;
+        ProbeBuffer(ProbeBuffer&&) = delete;
+        ProbeBuffer& operator=(ProbeBuffer&&) = delete;
+    };
+
     explicit SpdkWrapper();
     ~SpdkWrapper();
 
     int ParseTransPortStr(const std::string &tr_str, tr_info *info);
     int ConnectController(const struct spdk_nvme_transport_id *trid, ctrlr_info *info);
+    ProbeBuffer *GetOrCreateProbeBuffer(const std::string &tr_str,
+                                        uint32_t block_size,
+                                        std::string *error_reason);
 
     bool initialized;
     std::mutex init_mutex;
     std::map<std::string, ctrlr_info*> connected_ctrlrs;
     std::mutex ctrlrs_mutex;
+    std::map<std::string, std::unique_ptr<ProbeBuffer>> probe_buffers_;
+    std::mutex probe_buffers_mutex_;
 };
 
 }

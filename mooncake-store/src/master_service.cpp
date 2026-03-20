@@ -9,6 +9,7 @@
 
 #include "master_metric_manager.h"
 #include "segment.h"
+#include "spdk/spdk_wrapper.h"
 #include "types.h"
 
 namespace mooncake {
@@ -24,6 +25,12 @@ MasterService::MasterService(const MasterServiceConfig& config)
       nof_eviction_ratio_(config.nof_eviction_ratio),
       nof_eviction_high_watermark_ratio_(config.nof_eviction_high_watermark_ratio),
       client_live_ttl_sec_(config.client_live_ttl_sec),
+      nof_heartbeat_interval_sec_(
+          std::chrono::seconds(config.nof_heartbeat_interval_sec)),
+      nof_heartbeat_probe_timeout_ms_(
+          std::chrono::milliseconds(config.nof_heartbeat_probe_timeout_ms)),
+      nof_heartbeat_failures_threshold_(
+          config.nof_heartbeat_failures_threshold),
       enable_ha_(config.enable_ha),
       enable_offload_(config.enable_offload),
       cluster_id_(config.cluster_id),
@@ -32,7 +39,6 @@ MasterService::MasterService(const MasterServiceConfig& config)
       enable_disk_eviction_(config.enable_disk_eviction),
       quota_bytes_(config.quota_bytes),
       segment_manager_(config.memory_allocator),
-      nof_segment_manager_(config.memory_allocator),
       nof_segment_manager_(config.memory_allocator),
       memory_allocator_type_(config.memory_allocator),
       allocation_strategy_(std::make_shared<RandomAllocationStrategy>()),
@@ -61,6 +67,27 @@ MasterService::MasterService(const MasterServiceConfig& config)
             "put_start_discard_timeout_sec");
     }
 
+    if (nof_heartbeat_interval_sec_.count() <= 0) {
+        LOG(ERROR) << "nof_heartbeat_interval_sec must be positive, current "
+                   << nof_heartbeat_interval_sec_.count();
+        throw std::invalid_argument("Invalid nof heartbeat interval");
+    }
+    if (nof_heartbeat_probe_timeout_ms_.count() <= 0) {
+        LOG(ERROR) << "nof_heartbeat_probe_timeout_ms must be positive, "
+                   << "current " << nof_heartbeat_probe_timeout_ms_.count();
+        throw std::invalid_argument("Invalid nof heartbeat probe timeout");
+    }
+    if (nof_heartbeat_failures_threshold_ == 0) {
+        LOG(ERROR) << "nof_heartbeat_failures_threshold must be positive";
+        throw std::invalid_argument("Invalid nof heartbeat failure threshold");
+    }
+
+    nof_probe_fn_ = [](const std::string& te_endpoint, uint32_t timeout_ms,
+                       std::string* error_reason) {
+        return SpdkWrapper::GetInstance().ProbeNofSegment(
+            te_endpoint, timeout_ms, error_reason);
+    };
+
     eviction_running_ = true;
     eviction_thread_ = std::thread(&MasterService::EvictionThreadFunc, this);
     VLOG(1) << "action=start_eviction_thread";
@@ -70,6 +97,11 @@ MasterService::MasterService(const MasterServiceConfig& config)
     client_monitor_thread_ =
         std::thread(&MasterService::ClientMonitorFunc, this);
     VLOG(1) << "action=start_client_monitor_thread";
+
+    nof_heartbeat_running_ = true;
+    nof_heartbeat_thread_ =
+        std::thread(&MasterService::NofHeartbeatThreadFunc, this);
+    VLOG(1) << "action=start_nof_heartbeat_thread";
 
     if (!root_fs_dir_.empty()) {
         use_disk_replica_ = true;
@@ -82,12 +114,56 @@ MasterService::~MasterService() {
     // Stop and join the threads
     eviction_running_ = false;
     client_monitor_running_ = false;
+    nof_heartbeat_running_ = false;
     if (eviction_thread_.joinable()) {
         eviction_thread_.join();
     }
     if (client_monitor_thread_.joinable()) {
         client_monitor_thread_.join();
     }
+    if (nof_heartbeat_thread_.joinable()) {
+        nof_heartbeat_thread_.join();
+    }
+}
+
+void MasterService::SetNoFProbeFnForTesting(NoFProbeFn fn) {
+    std::lock_guard<std::mutex> lock(nof_probe_fn_mutex_);
+    if (fn) {
+        nof_probe_fn_ = std::move(fn);
+        return;
+    }
+    nof_probe_fn_ = [](const std::string& te_endpoint, uint32_t timeout_ms,
+                       std::string* error_reason) {
+        return SpdkWrapper::GetInstance().ProbeNofSegment(
+            te_endpoint, timeout_ms, error_reason);
+    };
+}
+
+size_t MasterService::GetMountedNoFSegmentCountForTesting() {
+    std::vector<MountedNoFSegmentSnapshot> mounted_segments;
+    nof_segment_manager_.GetMountedSegmentsSnapshot(mounted_segments);
+    return mounted_segments.size();
+}
+
+bool MasterService::IsNoFSegmentMountedForTesting(const UUID& segment_id) {
+    std::vector<MountedNoFSegmentSnapshot> mounted_segments;
+    nof_segment_manager_.GetMountedSegmentsSnapshot(mounted_segments);
+    return std::any_of(
+        mounted_segments.begin(), mounted_segments.end(),
+        [&segment_id](const MountedNoFSegmentSnapshot& snapshot) {
+            return snapshot.segment_id == segment_id &&
+                   snapshot.status == SegmentStatus::OK;
+        });
+}
+
+std::optional<uint32_t> MasterService::GetNoFHeartbeatFailureCountForTesting(
+    const UUID& segment_id) {
+    std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+    auto it = nof_heartbeat_states_.find(segment_id);
+    if (it == nof_heartbeat_states_.end()) {
+        return std::nullopt;
+    }
+    return it->second.consecutive_failures;
 }
 
 auto MasterService::MountSegment(const Segment& segment, const UUID& client_id)
@@ -284,6 +360,10 @@ auto MasterService::UnmountSegment(const UUID& segment_id,
             segment_id, metrics_dec_capacity);
         if (err == ErrorCode::SEGMENT_NOT_FOUND) {
             // Return OK because this is an idempotent operation
+            {
+                std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+                nof_heartbeat_states_.erase(segment_id);
+            }
             return {};
         }
         if (err != ErrorCode::OK) {
@@ -327,14 +407,16 @@ auto MasterService::UnmountNoFSegment(const UUID& segment_id,
        // deadlocks
 
     // 2. Remove the metadata of the related objects
-    // ClearInvalidHandles(); FIXME: remove the shard metadata (ranhaojia)
-
     // 3. Commit the unmount operation
     ScopedNoFSegmentAccess segment_access = nof_segment_manager_.getNoFSegmentAccess();
     auto err = segment_access.CommitUnmountSegment(segment_id, client_id,
                                                    metrics_dec_capacity);
     if (err != ErrorCode::OK) {
         return tl::make_unexpected(err);
+    }
+    {
+        std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+        nof_heartbeat_states_.erase(segment_id);
     }
     return {};
 }
@@ -758,7 +840,6 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         replicas = std::move(allocation_result.value());
     }
 
-    // Allocate nof replicas
     if (nof_segment_manager_.getMountedSegmentCount() > 0) {
         ScopedAllocatorAccess allocator_access =
             nof_segment_manager_.getAllocatorAccess();
@@ -849,7 +930,8 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
 
     for (auto& replica : metadata.replicas) {
         // FIXME: replica_type is deprecated temporarily
-        if (replica.type() == ReplicaType::MEMORY || replica.type() == ReplicaType::NOF_SSD) {
+        if (replica.type() == ReplicaType::MEMORY ||
+            replica.type() == ReplicaType::NOF_SSD) {
             replica.mark_complete();
         }
         if (enable_offload_) {
@@ -2059,6 +2141,10 @@ void MasterService::ClientMonitorFunc() {
                 for (size_t i = 0; i < unmount_nof_segments.size(); i++) {
                     nof_segment_access.CommitUnmountSegment(
                         unmount_nof_segments[i], nof_client_ids[i], dec_nof_capacities[i]);
+                    {
+                        std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+                        nof_heartbeat_states_.erase(unmount_nof_segments[i]);
+                    }
                     LOG(INFO) << "client_id=" << nof_client_ids[i]
                               << ", segment_name=" << nof_segment_names[i]
                               << ", action=unmount_expired_nof_segment";
@@ -2068,6 +2154,225 @@ void MasterService::ClientMonitorFunc() {
 
         std::this_thread::sleep_for(
             std::chrono::milliseconds(kClientMonitorSleepMs));
+    }
+}
+
+bool MasterService::ProbeNoFSegment(const std::string& te_endpoint,
+                                    std::string* error_reason) {
+    NoFProbeFn probe_fn;
+    {
+        std::lock_guard<std::mutex> lock(nof_probe_fn_mutex_);
+        probe_fn = nof_probe_fn_;
+    }
+    if (!probe_fn) {
+        if (error_reason) {
+            *error_reason = "probe_not_configured";
+        }
+        return false;
+    }
+    return probe_fn(te_endpoint,
+                    static_cast<uint32_t>(nof_heartbeat_probe_timeout_ms_.count()),
+                    error_reason);
+}
+
+bool MasterService::TryUnmountNoFSegmentByHeartbeat(
+    const MountedNoFSegmentSnapshot& snapshot, const std::string& error_reason) {
+    size_t metrics_dec_capacity = 0;
+    {
+        auto nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
+        ErrorCode err = nof_segment_access.PrepareUnmountSegment(
+            snapshot.segment_id, metrics_dec_capacity);
+        if (err == ErrorCode::SEGMENT_NOT_FOUND ||
+            err == ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS) {
+            std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+            nof_heartbeat_states_.erase(snapshot.segment_id);
+            VLOG(1) << "segment_id=" << snapshot.segment_id
+                    << ", action=skip_nof_heartbeat_unmount"
+                    << ", reason=" << toString(err);
+            return false;
+        }
+        if (err != ErrorCode::OK) {
+            LOG(ERROR) << "segment_id=" << snapshot.segment_id
+                       << ", segment_name=" << snapshot.segment.name
+                       << ", error=prepare_unmount_nof_segment_by_heartbeat_failed"
+                       << ", reason=" << err;
+            return false;
+        }
+    }
+
+    ClearInvalidHandles();
+
+    {
+        auto nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
+        ErrorCode err = nof_segment_access.CommitUnmountSegment(
+            snapshot.segment_id, snapshot.client_id, metrics_dec_capacity);
+        if (err != ErrorCode::OK && err != ErrorCode::SEGMENT_NOT_FOUND) {
+            LOG(ERROR) << "segment_id=" << snapshot.segment_id
+                       << ", segment_name=" << snapshot.segment.name
+                       << ", error=commit_unmount_nof_segment_by_heartbeat_failed"
+                       << ", reason=" << err;
+            return false;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+        nof_heartbeat_states_.erase(snapshot.segment_id);
+    }
+    MasterMetricManager::instance()
+        .inc_nof_segments_unmounted_by_heartbeat_total();
+    LOG(INFO) << "segment_id=" << snapshot.segment_id
+              << ", client_id=" << snapshot.client_id
+              << ", segment_name=" << snapshot.segment.name
+              << ", endpoint=" << snapshot.segment.te_endpoint
+              << ", action=unmount_nof_segment_by_heartbeat"
+              << ", last_error_reason=" << error_reason;
+    return true;
+}
+
+void MasterService::NofHeartbeatThreadFunc() {
+    size_t next_probe_index = 0;
+    while (nof_heartbeat_running_) {
+        auto now = std::chrono::steady_clock::now();
+        std::vector<MountedNoFSegmentSnapshot> mounted_segments;
+        nof_segment_manager_.GetMountedSegmentsSnapshot(mounted_segments);
+
+        std::vector<MountedNoFSegmentSnapshot> ok_segments;
+        ok_segments.reserve(mounted_segments.size());
+        for (const auto& snapshot : mounted_segments) {
+            if (snapshot.status == SegmentStatus::OK) {
+                ok_segments.push_back(snapshot);
+            }
+        }
+
+        std::optional<MountedNoFSegmentSnapshot> probe_target;
+        {
+            std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+            std::unordered_set<UUID, boost::hash<UUID>> live_segment_ids;
+            live_segment_ids.reserve(ok_segments.size());
+
+            const auto interval_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    nof_heartbeat_interval_sec_);
+            for (size_t i = 0; i < ok_segments.size(); ++i) {
+                const auto& snapshot = ok_segments[i];
+                live_segment_ids.insert(snapshot.segment_id);
+                auto [it, inserted] = nof_heartbeat_states_.try_emplace(
+                    snapshot.segment_id);
+                auto& state = it->second;
+                state.owner_client_id = snapshot.client_id;
+                state.segment_name = snapshot.segment.name;
+                state.te_endpoint = snapshot.segment.te_endpoint;
+                if (inserted) {
+                    int64_t spread_ms = 0;
+                    if (!ok_segments.empty()) {
+                        spread_ms = static_cast<int64_t>(
+                            (interval_ms.count() * i) / ok_segments.size());
+                    }
+                    state.next_probe_at =
+                        now + std::chrono::milliseconds(spread_ms);
+                }
+            }
+
+            for (auto it = nof_heartbeat_states_.begin();
+                 it != nof_heartbeat_states_.end();) {
+                if (!live_segment_ids.contains(it->first)) {
+                    it = nof_heartbeat_states_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
+            if (!ok_segments.empty()) {
+                next_probe_index %= ok_segments.size();
+                for (size_t offset = 0; offset < ok_segments.size(); ++offset) {
+                    const auto& candidate =
+                        ok_segments[(next_probe_index + offset) % ok_segments.size()];
+                    auto state_it =
+                        nof_heartbeat_states_.find(candidate.segment_id);
+                    if (state_it == nof_heartbeat_states_.end()) {
+                        continue;
+                    }
+                    if (state_it->second.next_probe_at <= now) {
+                        probe_target = candidate;
+                        next_probe_index =
+                            (next_probe_index + offset + 1) % ok_segments.size();
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!probe_target.has_value()) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(kNoFHeartbeatThreadSleepMs));
+            continue;
+        }
+
+        auto probe_start = std::chrono::steady_clock::now();
+        std::string error_reason;
+        bool probe_success =
+            ProbeNoFSegment(probe_target->segment.te_endpoint, &error_reason);
+        auto latency_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - probe_start)
+                              .count();
+        MasterMetricManager::instance().observe_nof_heartbeat_probe_latency_ms(
+            latency_ms);
+
+        if (probe_success) {
+            MasterMetricManager::instance().inc_nof_heartbeat_success_total();
+            {
+                std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+                auto it = nof_heartbeat_states_.find(probe_target->segment_id);
+                if (it != nof_heartbeat_states_.end()) {
+                    it->second.consecutive_failures = 0;
+                    it->second.last_success_at = std::chrono::steady_clock::now();
+                    it->second.last_error_reason.clear();
+                    it->second.next_probe_at =
+                        std::chrono::steady_clock::now() +
+                        nof_heartbeat_interval_sec_;
+                }
+            }
+            VLOG(1) << "segment_id=" << probe_target->segment_id
+                    << ", segment_name=" << probe_target->segment.name
+                    << ", endpoint=" << probe_target->segment.te_endpoint
+                    << ", action=nof_heartbeat_success"
+                    << ", latency_ms=" << latency_ms;
+            continue;
+        }
+
+        MasterMetricManager::instance().inc_nof_heartbeat_failure_total();
+        if (error_reason == "completion_timeout") {
+            MasterMetricManager::instance().inc_nof_heartbeat_timeout_total();
+        }
+
+        bool should_unmount = false;
+        uint32_t failure_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+            auto it = nof_heartbeat_states_.find(probe_target->segment_id);
+            if (it != nof_heartbeat_states_.end()) {
+                it->second.consecutive_failures++;
+                failure_count = it->second.consecutive_failures;
+                it->second.last_error_reason = error_reason;
+                it->second.next_probe_at =
+                    std::chrono::steady_clock::now() + nof_heartbeat_interval_sec_;
+                should_unmount =
+                    failure_count >= nof_heartbeat_failures_threshold_;
+            }
+        }
+
+        LOG(WARNING) << "segment_id=" << probe_target->segment_id
+                     << ", segment_name=" << probe_target->segment.name
+                     << ", endpoint=" << probe_target->segment.te_endpoint
+                     << ", action=nof_heartbeat_failure"
+                     << ", failure_count=" << failure_count
+                     << ", latency_ms=" << latency_ms
+                     << ", reason=" << error_reason;
+
+        if (should_unmount) {
+            TryUnmountNoFSegmentByHeartbeat(*probe_target, error_reason);
+        }
     }
 }
 

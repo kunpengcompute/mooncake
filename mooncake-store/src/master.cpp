@@ -81,6 +81,18 @@ DEFINE_string(
 DEFINE_int64(client_ttl, mooncake::DEFAULT_CLIENT_LIVE_TTL_SEC,
              "How long a client is considered alive after the last ping, only "
              "used in HA mode");
+DEFINE_int64(nof_heartbeat_interval_sec,
+             mooncake::DEFAULT_NOF_HEARTBEAT_INTERVAL_SEC,
+             "How often master probes each mounted NoF segment");
+DEFINE_uint32(
+    nof_heartbeat_probe_timeout_ms,
+    mooncake::DEFAULT_NOF_HEARTBEAT_PROBE_TIMEOUT_MS,
+    "Timeout in milliseconds for a single NoF heartbeat probe");
+DEFINE_uint32(
+    nof_heartbeat_failures_threshold,
+    mooncake::DEFAULT_NOF_HEARTBEAT_FAILURES_THRESHOLD,
+    "Consecutive NoF heartbeat failures required before unmounting a NoF "
+    "segment");
 
 DEFINE_string(root_fs_dir, mooncake::DEFAULT_ROOT_FS_DIR,
               "Root directory for storage backend, used in HA mode");
@@ -155,6 +167,15 @@ void InitMasterConf(const mooncake::DefaultConfig& default_config,
     default_config.GetInt64("client_live_ttl_sec",
                             &master_config.client_live_ttl_sec,
                             FLAGS_client_ttl);
+    default_config.GetInt64("nof_heartbeat_interval_sec",
+                            &master_config.nof_heartbeat_interval_sec,
+                            FLAGS_nof_heartbeat_interval_sec);
+    default_config.GetUInt32("nof_heartbeat_probe_timeout_ms",
+                             &master_config.nof_heartbeat_probe_timeout_ms,
+                             FLAGS_nof_heartbeat_probe_timeout_ms);
+    default_config.GetUInt32("nof_heartbeat_failures_threshold",
+                             &master_config.nof_heartbeat_failures_threshold,
+                             FLAGS_nof_heartbeat_failures_threshold);
 
     default_config.GetBool("enable_ha", &master_config.enable_ha,
                            FLAGS_enable_ha);
@@ -322,10 +343,30 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         !conf_set) {
         master_config.etcd_endpoints = FLAGS_etcd_endpoints;
     }
-    if ((google::GetCommandLineFlagInfo("client_live_ttl_sec", &info) &&
+    if ((google::GetCommandLineFlagInfo("client_ttl", &info) &&
          !info.is_default) ||
         !conf_set) {
         master_config.client_live_ttl_sec = FLAGS_client_ttl;
+    }
+    if ((google::GetCommandLineFlagInfo("nof_heartbeat_interval_sec", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.nof_heartbeat_interval_sec =
+            FLAGS_nof_heartbeat_interval_sec;
+    }
+    if ((google::GetCommandLineFlagInfo("nof_heartbeat_probe_timeout_ms",
+                                        &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.nof_heartbeat_probe_timeout_ms =
+            FLAGS_nof_heartbeat_probe_timeout_ms;
+    }
+    if ((google::GetCommandLineFlagInfo("nof_heartbeat_failures_threshold",
+                                        &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.nof_heartbeat_failures_threshold =
+            FLAGS_nof_heartbeat_failures_threshold;
     }
     if ((google::GetCommandLineFlagInfo("cluster_id", &info) &&
          !info.is_default) ||
@@ -481,6 +522,12 @@ int main(int argc, char* argv[]) {
               << ", enable_offload=" << master_config.enable_offload
               << ", etcd_endpoints=" << master_config.etcd_endpoints
               << ", client_ttl=" << master_config.client_live_ttl_sec
+              << ", nof_heartbeat_interval_sec="
+              << master_config.nof_heartbeat_interval_sec
+              << ", nof_heartbeat_probe_timeout_ms="
+              << master_config.nof_heartbeat_probe_timeout_ms
+              << ", nof_heartbeat_failures_threshold="
+              << master_config.nof_heartbeat_failures_threshold
               << ", rpc_thread_num=" << master_config.rpc_thread_num
               << ", rpc_port=" << master_config.rpc_port
               << ", rpc_address=" << master_config.rpc_address

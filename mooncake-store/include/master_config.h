@@ -26,6 +26,9 @@ struct MasterConfig {
     double nof_eviction_ratio;
     double nof_eviction_high_watermark_ratio;
     int64_t client_live_ttl_sec;
+    int64_t nof_heartbeat_interval_sec;
+    uint32_t nof_heartbeat_probe_timeout_ms;
+    uint32_t nof_heartbeat_failures_threshold;
 
     bool enable_ha;
     bool enable_offload;
@@ -66,6 +69,15 @@ class MasterServiceSupervisorConfig {
         "nof_eviction_high_watermark_ratio"
     };
     RequiredParam<int64_t> client_live_ttl_sec{"client_live_ttl_sec"};
+    RequiredParam<int64_t> nof_heartbeat_interval_sec{
+        "nof_heartbeat_interval_sec"
+    };
+    RequiredParam<uint32_t> nof_heartbeat_probe_timeout_ms{
+        "nof_heartbeat_probe_timeout_ms"
+    };
+    RequiredParam<uint32_t> nof_heartbeat_failures_threshold{
+        "nof_heartbeat_failures_threshold"
+    };
     RequiredParam<bool> enable_offload{"enable_offload"};
     RequiredParam<int> rpc_port{"rpc_port"};
     RequiredParam<size_t> rpc_thread_num{"rpc_thread_num"};
@@ -102,6 +114,11 @@ class MasterServiceSupervisorConfig {
         nof_eviction_ratio = config.nof_eviction_ratio;
         nof_eviction_high_watermark_ratio = config.nof_eviction_high_watermark_ratio;
         client_live_ttl_sec = config.client_live_ttl_sec;
+        nof_heartbeat_interval_sec = config.nof_heartbeat_interval_sec;
+        nof_heartbeat_probe_timeout_ms =
+            config.nof_heartbeat_probe_timeout_ms;
+        nof_heartbeat_failures_threshold =
+            config.nof_heartbeat_failures_threshold;
         enable_offload = config.enable_offload;
         rpc_port = static_cast<int>(config.rpc_port);
         rpc_thread_num = static_cast<size_t>(config.rpc_thread_num);
@@ -171,6 +188,17 @@ class MasterServiceSupervisorConfig {
         if (!client_live_ttl_sec.IsSet()) {
             throw std::runtime_error("client_live_ttl_sec is not set");
         }
+        if (!nof_heartbeat_interval_sec.IsSet()) {
+            throw std::runtime_error("nof_heartbeat_interval_sec is not set");
+        }
+        if (!nof_heartbeat_probe_timeout_ms.IsSet()) {
+            throw std::runtime_error(
+                "nof_heartbeat_probe_timeout_ms is not set");
+        }
+        if (!nof_heartbeat_failures_threshold.IsSet()) {
+            throw std::runtime_error(
+                "nof_heartbeat_failures_threshold is not set");
+        }
         if (!rpc_port.IsSet()) {
             throw std::runtime_error("rpc_port is not set");
         }
@@ -199,6 +227,11 @@ class WrappedMasterServiceConfig {
         DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO;
     ViewVersionId view_version = 0;
     int64_t client_live_ttl_sec = DEFAULT_CLIENT_LIVE_TTL_SEC;
+    int64_t nof_heartbeat_interval_sec = DEFAULT_NOF_HEARTBEAT_INTERVAL_SEC;
+    uint32_t nof_heartbeat_probe_timeout_ms =
+        DEFAULT_NOF_HEARTBEAT_PROBE_TIMEOUT_MS;
+    uint32_t nof_heartbeat_failures_threshold =
+        DEFAULT_NOF_HEARTBEAT_FAILURES_THRESHOLD;
     bool enable_ha = false;
     bool enable_offload = false;
     std::string cluster_id = DEFAULT_CLUSTER_ID;
@@ -230,6 +263,11 @@ class WrappedMasterServiceConfig {
         nof_eviction_high_watermark_ratio = config.nof_eviction_high_watermark_ratio;
         view_version = view_version_param;
         client_live_ttl_sec = config.client_live_ttl_sec;
+        nof_heartbeat_interval_sec = config.nof_heartbeat_interval_sec;
+        nof_heartbeat_probe_timeout_ms =
+            config.nof_heartbeat_probe_timeout_ms;
+        nof_heartbeat_failures_threshold =
+            config.nof_heartbeat_failures_threshold;
         enable_ha = config.enable_ha;
         enable_offload = config.enable_offload;
         cluster_id = config.cluster_id;
@@ -300,6 +338,11 @@ class MasterServiceConfigBuilder {
         DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO;
     ViewVersionId view_version_ = 0;
     int64_t client_live_ttl_sec_ = DEFAULT_CLIENT_LIVE_TTL_SEC;
+    int64_t nof_heartbeat_interval_sec_ = DEFAULT_NOF_HEARTBEAT_INTERVAL_SEC;
+    uint32_t nof_heartbeat_probe_timeout_ms_ =
+        DEFAULT_NOF_HEARTBEAT_PROBE_TIMEOUT_MS;
+    uint32_t nof_heartbeat_failures_threshold_ =
+        DEFAULT_NOF_HEARTBEAT_FAILURES_THRESHOLD;
     bool enable_ha_ = false;
     bool enable_offload_ = false;
     std::string cluster_id_ = DEFAULT_CLUSTER_ID;
@@ -360,6 +403,23 @@ class MasterServiceConfigBuilder {
 
     MasterServiceConfigBuilder& set_client_live_ttl_sec(int64_t ttl) {
         client_live_ttl_sec_ = ttl;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_nof_heartbeat_interval_sec(int64_t ttl) {
+        nof_heartbeat_interval_sec_ = ttl;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_nof_heartbeat_probe_timeout_ms(
+        uint32_t timeout_ms) {
+        nof_heartbeat_probe_timeout_ms_ = timeout_ms;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_nof_heartbeat_failures_threshold(
+        uint32_t threshold) {
+        nof_heartbeat_failures_threshold_ = threshold;
         return *this;
     }
 
@@ -424,6 +484,11 @@ class MasterServiceConfig {
         DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO;
     ViewVersionId view_version = 0;
     int64_t client_live_ttl_sec = DEFAULT_CLIENT_LIVE_TTL_SEC;
+    int64_t nof_heartbeat_interval_sec = DEFAULT_NOF_HEARTBEAT_INTERVAL_SEC;
+    uint32_t nof_heartbeat_probe_timeout_ms =
+        DEFAULT_NOF_HEARTBEAT_PROBE_TIMEOUT_MS;
+    uint32_t nof_heartbeat_failures_threshold =
+        DEFAULT_NOF_HEARTBEAT_FAILURES_THRESHOLD;
     bool enable_ha = false;
     bool enable_offload = false;
     std::string cluster_id = DEFAULT_CLUSTER_ID;
@@ -449,6 +514,11 @@ class MasterServiceConfig {
         nof_eviction_high_watermark_ratio = config.nof_eviction_high_watermark_ratio;
         view_version = config.view_version;
         client_live_ttl_sec = config.client_live_ttl_sec;
+        nof_heartbeat_interval_sec = config.nof_heartbeat_interval_sec;
+        nof_heartbeat_probe_timeout_ms =
+            config.nof_heartbeat_probe_timeout_ms;
+        nof_heartbeat_failures_threshold =
+            config.nof_heartbeat_failures_threshold;
         enable_ha = config.enable_ha;
         enable_offload = config.enable_offload;
         cluster_id = config.cluster_id;
@@ -477,6 +547,10 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.nof_eviction_high_watermark_ratio = nof_eviction_high_watermark_ratio_;
     config.view_version = view_version_;
     config.client_live_ttl_sec = client_live_ttl_sec_;
+    config.nof_heartbeat_interval_sec = nof_heartbeat_interval_sec_;
+    config.nof_heartbeat_probe_timeout_ms = nof_heartbeat_probe_timeout_ms_;
+    config.nof_heartbeat_failures_threshold =
+        nof_heartbeat_failures_threshold_;
     config.enable_ha = enable_ha_;
     config.enable_offload = enable_offload_;
     config.cluster_id = cluster_id_;

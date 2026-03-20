@@ -139,6 +139,11 @@ class MasterMetricManager {
     void inc_remount_nof_segment_failures(int64_t val = 1);
     void inc_ping_requests(int64_t val = 1);
     void inc_ping_failures(int64_t val = 1);
+    void inc_nof_heartbeat_success_total(int64_t val = 1);
+    void inc_nof_heartbeat_failure_total(int64_t val = 1);
+    void inc_nof_heartbeat_timeout_total(int64_t val = 1);
+    void inc_nof_segments_unmounted_by_heartbeat_total(int64_t val = 1);
+    void observe_nof_heartbeat_probe_latency_ms(int64_t latency_ms);
 
     // Batch Operation Statistics (Counters)
     void inc_batch_exist_key_requests(int64_t items);
@@ -357,6 +362,11 @@ class MasterMetricManager {
     ylt::metric::counter_t remount_nof_segment_failures_;
     ylt::metric::counter_t ping_requests_;
     ylt::metric::counter_t ping_failures_;
+    ylt::metric::counter_t nof_heartbeat_success_total_;
+    ylt::metric::counter_t nof_heartbeat_failure_total_;
+    ylt::metric::counter_t nof_heartbeat_timeout_total_;
+    ylt::metric::counter_t nof_segments_unmounted_by_heartbeat_total_;
+    ylt::metric::histogram_t nof_heartbeat_probe_latency_ms_;
 
     // Batch Operation Statistics
     ylt::metric::counter_t batch_exist_key_requests_;

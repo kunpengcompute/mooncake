@@ -45,8 +45,16 @@ struct MountedSegment {
 
 struct MountedNoFSegment {
     NoFSegment segment;
+    UUID client_id;
     SegmentStatus status;
     std::shared_ptr<BufferAllocatorBase> buf_allocator;
+};
+
+struct MountedNoFSegmentSnapshot {
+    UUID segment_id;
+    UUID client_id;
+    NoFSegment segment;
+    SegmentStatus status;
 };
 
 struct LocalDiskSegment {
@@ -181,6 +189,12 @@ class ScopedNoFSegmentAccess {
      */
     ErrorCode GetClientSegments(const UUID& client_id,
                                 std::vector<NoFSegment>& segments) const;
+
+    /**
+     * @brief Get all mounted NoF segments with owner information
+     */
+    ErrorCode GetMountedSegments(
+        std::vector<MountedNoFSegmentSnapshot>& segments) const;
 
     /**
      * @brief Get the names of all the segments
@@ -345,6 +359,9 @@ class NoFSegmentManager {
         return mounted_segments_.size();
     }
 
+    void GetMountedSegmentsSnapshot(
+        std::vector<MountedNoFSegmentSnapshot>& segments) const;
+
 
    private:
     mutable std::shared_mutex segment_mutex_;
@@ -362,6 +379,7 @@ class NoFSegmentManager {
         client_by_name_;  // segment name -> client_id
 
     friend class ScopedNoFSegmentAccess;
+    friend class SegmentTest;
 };
 
 }  // namespace mooncake

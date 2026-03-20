@@ -2,13 +2,11 @@
 
 #include <atomic>
 #include <cerrno>
-#include <cstdlib>
+#include <chrono>
 #include <cstring>
+#include <cstdlib>
+#include <thread>
 #include "spdk/spdk_wrapper.h"
-
-static void disconnect_cb(struct spdk_nvme_qpair *qpair, void *ctx) {
-
-}
 
 namespace mooncake {
 namespace {
@@ -71,16 +69,41 @@ void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
     if (ParseEnvBool("MC_NVME_DATA_DIGEST", &bv)) {
         opts->data_digest = bv;
     }
-
     LOG(INFO) << "NVMe ctrlr opts: num_io_queues=" << opts->num_io_queues
               << ", io_queue_size=" << opts->io_queue_size
-              << ", io_queue_requests=" << opts->io_queue_requests
+              << ", io_queue_requests="
+              << opts->io_queue_requests
               << ", keep_alive_timeout_ms=" << opts->keep_alive_timeout_ms
-              << ", transport_ack_timeout=" << static_cast<int>(opts->transport_ack_timeout)
+              << ", transport_ack_timeout="
+              << static_cast<int>(opts->transport_ack_timeout)
               << ", admin_queue_size=" << opts->admin_queue_size
-              << ", fabrics_connect_timeout_us=" << opts->fabrics_connect_timeout_us
+              << ", fabrics_connect_timeout_us="
+              << opts->fabrics_connect_timeout_us
               << ", header_digest=" << opts->header_digest
               << ", data_digest=" << opts->data_digest;
+}
+
+struct ProbeRequestContext {
+    std::atomic<bool> done{false};
+    std::atomic<bool> success{false};
+    std::mutex error_mutex;
+    std::string error_reason;
+};
+
+void ProbeReadComplete(void *ctx, const struct spdk_nvme_cpl *cpl) {
+    auto *probe_ctx = reinterpret_cast<ProbeRequestContext *>(ctx);
+    if (spdk_nvme_cpl_is_error(cpl)) {
+        {
+            std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
+            probe_ctx->error_reason =
+                std::string("completion_error:") +
+                spdk_nvme_cpl_get_status_string(&cpl->status);
+        }
+        probe_ctx->success.store(false, std::memory_order_release);
+    } else {
+        probe_ctx->success.store(true, std::memory_order_release);
+    }
+    probe_ctx->done.store(true, std::memory_order_release);
 }
 
 }  // namespace
@@ -142,6 +165,17 @@ bool SpdkWrapper::InitializeEnv() {
 
 void SpdkWrapper::Cleanup() {
     if (initialized) {
+        {
+            std::lock_guard<std::mutex> lock(probe_buffers_mutex_);
+            for (auto &[_, probe_buffer] : probe_buffers_) {
+                if (probe_buffer && probe_buffer->ptr) {
+                    spdk_free(probe_buffer->ptr);
+                    probe_buffer->ptr = nullptr;
+                    probe_buffer->size = 0;
+                }
+            }
+            probe_buffers_.clear();
+        }
         spdk_env_fini();
         initialized = false;
     }
@@ -162,28 +196,6 @@ void SpdkWrapper::Free(void *ptr) {
     if (ptr) {
         spdk_free(ptr);
     }
-}
-
-void* SpdkWrapper::NvmePollGroupCreate() {
-    return spdk_nvme_poll_group_create(NULL, NULL);
-}
-
-int SpdkWrapper::NvmePollGroupDestroy(void *group) {
-    return spdk_nvme_poll_group_destroy(reinterpret_cast<spdk_nvme_poll_group *>(group));
-}
-
-int SpdkWrapper::NvmePollGroupAdd(void *group, nof_seg_handle *seg) {
-
-    return spdk_nvme_poll_group_add(reinterpret_cast<spdk_nvme_poll_group *>(group), seg->qpair);
-}
-
-int SpdkWrapper::NvmePollGroupRemove(void *group, nof_seg_handle *seg) {
-    return spdk_nvme_poll_group_remove(reinterpret_cast<spdk_nvme_poll_group *>(group), seg->qpair);
-}
-
-int64_t SpdkWrapper::NvmePollGroupProcessCompletion(void *group, uint32_t complete_per_seg) {
-    return spdk_nvme_poll_group_process_completions(reinterpret_cast<spdk_nvme_poll_group *>(group),
-        complete_per_seg, disconnect_cb);
 }
 
 int64_t SpdkWrapper::NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t complete_per_seg) {
@@ -345,4 +357,101 @@ int SpdkWrapper::SubmitRequest(const nof_seg_handle *seg_handle, void *ptr, uint
     }
 }
 
+SpdkWrapper::ProbeBuffer *SpdkWrapper::GetOrCreateProbeBuffer(
+    const std::string &tr_str, uint32_t block_size, std::string *error_reason) {
+    std::lock_guard<std::mutex> lock(probe_buffers_mutex_);
+    auto &probe_buffer = probe_buffers_[tr_str];
+    if (!probe_buffer) {
+        probe_buffer = std::make_unique<ProbeBuffer>();
+    }
+
+    if (probe_buffer->ptr != nullptr && probe_buffer->size == block_size) {
+        return probe_buffer.get();
+    }
+
+    if (probe_buffer->ptr != nullptr) {
+        spdk_free(probe_buffer->ptr);
+        probe_buffer->ptr = nullptr;
+        probe_buffer->size = 0;
+    }
+
+    probe_buffer->ptr = spdk_zmalloc(block_size, 0x1000, nullptr, -1,
+                                     SPDK_MALLOC_DMA);
+    if (!probe_buffer->ptr) {
+        if (error_reason) {
+            *error_reason = "alloc_fail";
+        }
+        return nullptr;
+    }
+    probe_buffer->size = block_size;
+    return probe_buffer.get();
 }
+
+bool SpdkWrapper::ProbeNofSegment(const std::string &tr_str,
+                                  uint32_t timeout_ms,
+                                  std::string *error_reason) {
+    if (!InitializeEnv()) {
+        if (error_reason) {
+            *error_reason = "spdk_env_init_fail";
+        }
+        return false;
+    }
+
+    nof_seg_handle *seg_handle = OpenNofSegment(tr_str);
+    if (!seg_handle) {
+        if (error_reason) {
+            *error_reason = "open_fail";
+        }
+        return false;
+    }
+
+    uint32_t block_size = GetBlockSize(seg_handle);
+    if (block_size == INVALID_BLOCK_SIZE || block_size == 0) {
+        if (error_reason) {
+            *error_reason = "invalid_block_size";
+        }
+        return false;
+    }
+
+    ProbeBuffer *probe_buffer =
+        GetOrCreateProbeBuffer(tr_str, block_size, error_reason);
+    if (!probe_buffer || !probe_buffer->ptr) {
+        return false;
+    }
+
+    ProbeRequestContext probe_ctx;
+    int ret = SubmitRequest(seg_handle, probe_buffer->ptr, 0, 1, 0,
+                            ProbeReadComplete,
+                            &probe_ctx);
+    if (ret != 0) {
+        if (error_reason) {
+            *error_reason = "submit_fail";
+        }
+        return false;
+    }
+
+    auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!probe_ctx.done.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        NvmePollProcessCompletion(seg_handle, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    bool ok = probe_ctx.done.load(std::memory_order_acquire) &&
+              probe_ctx.success.load(std::memory_order_acquire);
+    if (!ok && error_reason) {
+        if (!probe_ctx.done.load(std::memory_order_acquire)) {
+            *error_reason = "completion_timeout";
+        } else {
+            std::lock_guard<std::mutex> lock(probe_ctx.error_mutex);
+            *error_reason = probe_ctx.error_reason.empty()
+                                ? "completion_error"
+                                : probe_ctx.error_reason;
+        }
+    }
+
+    return ok;
+}
+
+}  // namespace mooncake

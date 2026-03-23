@@ -418,7 +418,7 @@ struct SpdkNofQos {
 constexpr int kDefaultSpdkNofWorkers = 4;
 class SpdkNofWorkerPool {
     public:
-    explicit SpdkNofWorkerPool();
+    explicit SpdkNofWorkerPool(int numa_socket_id = 0);
     ~SpdkNofWorkerPool();
 
     // Non-copyable, non-movable
@@ -437,6 +437,7 @@ class SpdkNofWorkerPool {
     void workerThread(int work_idx);
 
     int worker_count_;
+    int numa_socket_id_;
     std::vector<std::thread> workers_;
     std::unique_ptr<std::queue<SpdkNofTask>[]> task_queue_;
     std::unique_ptr<std::mutex[]> queue_mutex_;
@@ -510,7 +511,8 @@ class TransferSubmitter {
    public:
     explicit TransferSubmitter(TransferEngine& engine,
                                std::shared_ptr<StorageBackend>& backend,
-                               TransferMetric* transfer_metric = nullptr);
+                               TransferMetric* transfer_metric = nullptr,
+                               int numa_socket_id = 0);
 
     /**
      * @brief Submit an asynchronous transfer operation

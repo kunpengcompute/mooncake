@@ -4,11 +4,15 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <numa.h>
 #include <optional>
 #include <ranges>
+#include <sched.h>
 #include <thread>
 
 #include "transfer_engine.h"
@@ -17,6 +21,42 @@
 #include "types.h"
 
 namespace mooncake {
+
+namespace {
+
+std::optional<int> GetConfiguredNumaSocketId() {
+    const char* raw_value = std::getenv("MC_STORE_NUMA_SOCKET_ID");
+    if (!raw_value || raw_value[0] == '\0') {
+        return std::nullopt;
+    }
+
+    char* end_ptr = nullptr;
+    errno = 0;
+    long parsed = std::strtol(raw_value, &end_ptr, 10);
+    if (errno != 0 || end_ptr == raw_value ||
+        (end_ptr != nullptr && *end_ptr != '\0') || parsed < 0 ||
+        parsed > std::numeric_limits<int>::max()) {
+        LOG(WARNING) << "Invalid MC_STORE_NUMA_SOCKET_ID=" << raw_value
+                     << ", falling back to auto-detect";
+        return std::nullopt;
+    }
+
+    return static_cast<int>(parsed);
+}
+
+int GetCurrentNumaSocketId() {
+    if (numa_available() < 0) {
+        return 0;
+    }
+    int cpu = sched_getcpu();
+    if (cpu < 0) {
+        return 0;
+    }
+    int node = numa_node_of_cpu(cpu);
+    return node < 0 ? 0 : node;
+}
+
+}  // namespace
 
 [[nodiscard]] size_t CalculateSliceSize(const std::vector<Slice>& slices) {
     size_t slice_size = 0;
@@ -352,9 +392,11 @@ void Client::InitTransferSubmitter() {
     // Initialize TransferSubmitter after transfer engine is ready
     // Keep using logical local_hostname for name-based behaviors; endpoint is
     // used separately where needed.
+    int numa_socket_id =
+        GetConfiguredNumaSocketId().value_or(GetCurrentNumaSocketId());
     transfer_submitter_ = std::make_unique<TransferSubmitter>(
         *transfer_engine_, storage_backend_,
-        metrics_ ? &metrics_->transfer_metric : nullptr);
+        metrics_ ? &metrics_->transfer_metric : nullptr, numa_socket_id);
 }
 
 std::optional<std::shared_ptr<Client>> Client::Create(

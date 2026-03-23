@@ -120,6 +120,7 @@ struct Slot {
     std::shared_ptr<mooncake::SpdkNofOperationState> state;
     std::unique_ptr<mooncake::TransferFuture> future;
     uint64_t io_bytes{0};
+    size_t endpoint_index{0};
     bool active{false};
 };
 
@@ -170,9 +171,10 @@ void FillPattern(void *buffer, size_t size, uint64_t seq) {
     }
 }
 
-void SubmitSlot(Slot &slot, EndpointContext &endpoint, mooncake::SpdkNofWorkerPool &pool,
-                BenchOp op_mode, std::mt19937_64 &rng, uint64_t submit_seq,
-                BenchStats &stats) {
+void SubmitSlot(Slot &slot, EndpointContext &endpoint, size_t endpoint_index,
+                mooncake::SpdkNofWorkerPool &pool, BenchOp op_mode,
+                std::mt19937_64 &rng, uint64_t submit_seq, BenchStats &stats,
+                BenchStats &endpoint_stats) {
     int op = PickTaskOp(op_mode, rng);
     if (op == 1 && FLAGS_fill_on_write) {
         FillPattern(slot.buffer, slot.buffer_size, submit_seq);
@@ -180,6 +182,7 @@ void SubmitSlot(Slot &slot, EndpointContext &endpoint, mooncake::SpdkNofWorkerPo
 
     uint64_t lba = NextLba(endpoint, FLAGS_random_lba);
     slot.io_bytes = slot.buffer_size;
+    slot.endpoint_index = endpoint_index;
     slot.state = std::make_shared<mooncake::SpdkNofOperationState>();
     slot.future = std::make_unique<mooncake::TransferFuture>(slot.state);
     mooncake::SpdkNofTask task(endpoint.seg_handle, slot.buffer, lba,
@@ -188,6 +191,7 @@ void SubmitSlot(Slot &slot, EndpointContext &endpoint, mooncake::SpdkNofWorkerPo
     pool.submitTask(std::move(task));
     slot.active = true;
     ++stats.submitted_ops;
+    ++endpoint_stats.submitted_ops;
 }
 
 }  // namespace
@@ -307,14 +311,18 @@ int main(int argc, char **argv) {
 
         BenchStats total_stats;
         BenchStats warmup_base;
+        std::vector<BenchStats> endpoint_stats(endpoints.size());
+        std::vector<BenchStats> endpoint_warmup_base(endpoints.size());
         std::mt19937_64 op_rng(FLAGS_seed);
         uint64_t submit_seq = 0;
 
         for (size_t i = 0; i < slots.size(); ++i) {
             auto &slot = slots[i];
-            auto &endpoint = endpoints[i % endpoints.size()];
-            SubmitSlot(slot, endpoint, pool, op_mode, op_rng, submit_seq++,
-                       total_stats);
+            size_t endpoint_index = i % endpoints.size();
+            auto &endpoint = endpoints[endpoint_index];
+            SubmitSlot(slot, endpoint, endpoint_index, pool, op_mode, op_rng,
+                       submit_seq++, total_stats,
+                       endpoint_stats[endpoint_index]);
         }
 
         auto start = std::chrono::steady_clock::now();
@@ -324,9 +332,11 @@ int main(int argc, char **argv) {
             std::chrono::steady_clock::now() +
             std::chrono::milliseconds(FLAGS_report_interval_ms);
         BenchStats last_report_stats = total_stats;
+        std::vector<BenchStats> endpoint_last_report_stats = endpoint_stats;
         bool warmup_recorded = (FLAGS_warmup_sec == 0);
         if (warmup_recorded) {
             warmup_base = total_stats;
+            endpoint_warmup_base = endpoint_stats;
         }
 
         while (true) {
@@ -347,17 +357,22 @@ int main(int argc, char **argv) {
                 mooncake::ErrorCode result = slot.future->get();
                 slot.active = false;
                 slot.future.reset();
+                auto &endpoint_stat = endpoint_stats[slot.endpoint_index];
                 if (result == mooncake::ErrorCode::OK) {
                     ++total_stats.completed_ops;
                     total_stats.bytes += slot.io_bytes;
+                    ++endpoint_stat.completed_ops;
+                    endpoint_stat.bytes += slot.io_bytes;
                 } else {
                     ++total_stats.failed_ops;
+                    ++endpoint_stat.failed_ops;
                 }
 
                 if (before_end) {
-                    auto &endpoint = endpoints[i % endpoints.size()];
-                    SubmitSlot(slot, endpoint, pool, op_mode, op_rng, submit_seq++,
-                               total_stats);
+                    auto &endpoint = endpoints[slot.endpoint_index];
+                    SubmitSlot(slot, endpoint, slot.endpoint_index, pool, op_mode,
+                               op_rng, submit_seq++, total_stats,
+                               endpoint_stat);
                     any_active = true;
                 }
             }
@@ -366,6 +381,8 @@ int main(int argc, char **argv) {
             if (!warmup_recorded && now >= warmup_end) {
                 warmup_base = total_stats;
                 last_report_stats = total_stats;
+                endpoint_warmup_base = endpoint_stats;
+                endpoint_last_report_stats = endpoint_stats;
                 warmup_recorded = true;
                 LOG(INFO) << "Warmup finished, starting measurement window";
             }
@@ -386,7 +403,27 @@ int main(int argc, char **argv) {
                           << ", submitted=" << total_stats.submitted_ops
                           << ", completed=" << total_stats.completed_ops
                           << ", failed=" << total_stats.failed_ops;
+                for (size_t endpoint_index = 0; endpoint_index < endpoints.size();
+                     ++endpoint_index) {
+                    uint64_t endpoint_delta_bytes =
+                        endpoint_stats[endpoint_index].bytes -
+                        endpoint_last_report_stats[endpoint_index].bytes;
+                    uint64_t endpoint_delta_ops =
+                        endpoint_stats[endpoint_index].completed_ops -
+                        endpoint_last_report_stats[endpoint_index].completed_ops;
+                    uint64_t endpoint_delta_fail =
+                        endpoint_stats[endpoint_index].failed_ops -
+                        endpoint_last_report_stats[endpoint_index].failed_ops;
+                    LOG(INFO) << "interval endpoint[" << endpoint_index
+                              << "] throughput="
+                              << FormatBytesPerSecond(endpoint_delta_bytes / sec)
+                              << ", iops=" << std::fixed << std::setprecision(2)
+                              << (endpoint_delta_ops / sec) << ", fail_iops="
+                              << (endpoint_delta_fail / sec)
+                              << ", endpoint=" << endpoints[endpoint_index].endpoint;
+                }
                 last_report_stats = total_stats;
+                endpoint_last_report_stats = endpoint_stats;
                 next_report =
                     now + std::chrono::milliseconds(FLAGS_report_interval_ms);
             }
@@ -410,6 +447,22 @@ int main(int argc, char **argv) {
         measured.completed_ops = total_stats.completed_ops - warmup_base.completed_ops;
         measured.failed_ops = total_stats.failed_ops - warmup_base.failed_ops;
         measured.bytes = total_stats.bytes - warmup_base.bytes;
+        std::vector<BenchStats> endpoint_measured(endpoint_stats.size());
+        for (size_t endpoint_index = 0; endpoint_index < endpoint_stats.size();
+             ++endpoint_index) {
+            endpoint_measured[endpoint_index].submitted_ops =
+                endpoint_stats[endpoint_index].submitted_ops -
+                endpoint_warmup_base[endpoint_index].submitted_ops;
+            endpoint_measured[endpoint_index].completed_ops =
+                endpoint_stats[endpoint_index].completed_ops -
+                endpoint_warmup_base[endpoint_index].completed_ops;
+            endpoint_measured[endpoint_index].failed_ops =
+                endpoint_stats[endpoint_index].failed_ops -
+                endpoint_warmup_base[endpoint_index].failed_ops;
+            endpoint_measured[endpoint_index].bytes =
+                endpoint_stats[endpoint_index].bytes -
+                endpoint_warmup_base[endpoint_index].bytes;
+        }
 
         double duration = static_cast<double>(FLAGS_duration_sec);
         double bw = measured.bytes / duration;
@@ -438,6 +491,29 @@ int main(int argc, char **argv) {
         std::cout << "bandwidth=" << FormatBytesPerSecond(bw) << "\n";
         std::cout << "iops=" << iops << "\n";
         std::cout << "fail_iops=" << fail_iops << "\n";
+        for (size_t endpoint_index = 0; endpoint_index < endpoints.size();
+             ++endpoint_index) {
+            double endpoint_bw = endpoint_measured[endpoint_index].bytes / duration;
+            double endpoint_iops =
+                endpoint_measured[endpoint_index].completed_ops / duration;
+            double endpoint_fail_iops =
+                endpoint_measured[endpoint_index].failed_ops / duration;
+            std::cout << "endpoint[" << endpoint_index << "]="
+                      << endpoints[endpoint_index].endpoint << "\n";
+            std::cout << "endpoint[" << endpoint_index
+                      << "].completed_ops="
+                      << endpoint_measured[endpoint_index].completed_ops << "\n";
+            std::cout << "endpoint[" << endpoint_index
+                      << "].failed_ops="
+                      << endpoint_measured[endpoint_index].failed_ops << "\n";
+            std::cout << "endpoint[" << endpoint_index
+                      << "].bandwidth="
+                      << FormatBytesPerSecond(endpoint_bw) << "\n";
+            std::cout << "endpoint[" << endpoint_index
+                      << "].iops=" << endpoint_iops << "\n";
+            std::cout << "endpoint[" << endpoint_index
+                      << "].fail_iops=" << endpoint_fail_iops << "\n";
+        }
         std::cout << "==========================================\n";
 
         google::ShutdownGoogleLogging();

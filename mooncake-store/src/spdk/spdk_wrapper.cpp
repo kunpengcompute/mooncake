@@ -41,6 +41,7 @@ bool ParseEnvBool(const char *name, bool *out) {
 void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
     uint64_t v = 0;
     bool bv = false;
+    opts->keep_alive_timeout_ms = 0;
 
     if (ParseEnvU64("MC_NVME_NUM_IO_QUEUES", &v)) {
         opts->num_io_queues = static_cast<uint32_t>(v);
@@ -50,9 +51,6 @@ void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
     }
     if (ParseEnvU64("MC_NVME_IO_QUEUE_REQUESTS", &v)) {
         opts->io_queue_requests = static_cast<uint32_t>(v);
-    }
-    if (ParseEnvU64("MC_NVME_KEEP_ALIVE_TIMEOUT_MS", &v)) {
-        opts->keep_alive_timeout_ms = static_cast<uint32_t>(v);
     }
     if (ParseEnvU64("MC_NVME_TRANSPORT_ACK_TIMEOUT", &v)) {
         opts->transport_ack_timeout = static_cast<uint8_t>(v);

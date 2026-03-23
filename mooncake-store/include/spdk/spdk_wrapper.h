@@ -1,10 +1,13 @@
 #pragma once
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stack>
 #include <string>
+#include <vector>
 #include <spdk/env.h>
 #include <spdk/nvme.h>
 
@@ -65,6 +68,22 @@ private:
         ProbeBuffer& operator=(ProbeBuffer&&) = delete;
     };
 
+    struct ProbeRequestContext {
+        std::atomic<bool> done{false};
+        std::atomic<bool> success{false};
+        std::mutex error_mutex;
+        std::string error_reason;
+        SpdkWrapper *owner{nullptr};
+
+        void Reset(SpdkWrapper *wrapper) {
+            owner = wrapper;
+            done.store(false, std::memory_order_release);
+            success.store(false, std::memory_order_release);
+            std::lock_guard<std::mutex> lock(error_mutex);
+            error_reason.clear();
+        }
+    };
+
     explicit SpdkWrapper();
     ~SpdkWrapper();
 
@@ -73,6 +92,10 @@ private:
     ProbeBuffer *GetOrCreateProbeBuffer(const std::string &tr_str,
                                         uint32_t block_size,
                                         std::string *error_reason);
+    ProbeRequestContext *AcquireProbeRequestContext();
+    void RecycleProbeRequestContext(ProbeRequestContext *ctx);
+    void ReplenishProbeRequestContextPoolLocked(size_t count);
+    static void ProbeReadComplete(void *ctx, const struct spdk_nvme_cpl *cpl);
 
     bool initialized;
     std::mutex init_mutex;
@@ -80,6 +103,9 @@ private:
     std::mutex ctrlrs_mutex;
     std::map<std::string, std::unique_ptr<ProbeBuffer>> probe_buffers_;
     std::mutex probe_buffers_mutex_;
+    std::vector<std::unique_ptr<ProbeRequestContext>> probe_request_contexts_;
+    std::stack<ProbeRequestContext *> probe_request_context_pool_;
+    std::mutex probe_request_context_pool_mutex_;
 };
 
 }

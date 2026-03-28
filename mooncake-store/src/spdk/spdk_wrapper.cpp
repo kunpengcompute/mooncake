@@ -41,6 +41,7 @@ bool ParseEnvBool(const char *name, bool *out) {
 void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
     uint64_t v = 0;
     bool bv = false;
+    opts->keep_alive_timeout_ms = 0;
 
     if (ParseEnvU64("MC_NVME_NUM_IO_QUEUES", &v)) {
         opts->num_io_queues = static_cast<uint32_t>(v);
@@ -50,9 +51,6 @@ void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
     }
     if (ParseEnvU64("MC_NVME_IO_QUEUE_REQUESTS", &v)) {
         opts->io_queue_requests = static_cast<uint32_t>(v);
-    }
-    if (ParseEnvU64("MC_NVME_KEEP_ALIVE_TIMEOUT_MS", &v)) {
-        opts->keep_alive_timeout_ms = static_cast<uint32_t>(v);
     }
     if (ParseEnvU64("MC_NVME_TRANSPORT_ACK_TIMEOUT", &v)) {
         opts->transport_ack_timeout = static_cast<uint8_t>(v);
@@ -81,29 +79,6 @@ void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
               << opts->fabrics_connect_timeout_us
               << ", header_digest=" << opts->header_digest
               << ", data_digest=" << opts->data_digest;
-}
-
-struct ProbeRequestContext {
-    std::atomic<bool> done{false};
-    std::atomic<bool> success{false};
-    std::mutex error_mutex;
-    std::string error_reason;
-};
-
-void ProbeReadComplete(void *ctx, const struct spdk_nvme_cpl *cpl) {
-    auto *probe_ctx = reinterpret_cast<ProbeRequestContext *>(ctx);
-    if (spdk_nvme_cpl_is_error(cpl)) {
-        {
-            std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
-            probe_ctx->error_reason =
-                std::string("completion_error:") +
-                spdk_nvme_cpl_get_status_string(&cpl->status);
-        }
-        probe_ctx->success.store(false, std::memory_order_release);
-    } else {
-        probe_ctx->success.store(true, std::memory_order_release);
-    }
-    probe_ctx->done.store(true, std::memory_order_release);
 }
 
 }  // namespace
@@ -196,6 +171,53 @@ void SpdkWrapper::Free(void *ptr) {
     if (ptr) {
         spdk_free(ptr);
     }
+}
+
+void SpdkWrapper::ProbeReadComplete(void *ctx,
+                                    const struct spdk_nvme_cpl *cpl) {
+    auto *probe_ctx = reinterpret_cast<ProbeRequestContext *>(ctx);
+    if (spdk_nvme_cpl_is_error(cpl)) {
+        {
+            std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
+            probe_ctx->error_reason =
+                std::string("completion_error:") +
+                spdk_nvme_cpl_get_status_string(&cpl->status);
+        }
+        probe_ctx->success.store(false, std::memory_order_release);
+    } else {
+        probe_ctx->success.store(true, std::memory_order_release);
+    }
+    probe_ctx->done.store(true, std::memory_order_release);
+    if (probe_ctx->owner != nullptr) {
+        probe_ctx->owner->RecycleProbeRequestContext(probe_ctx);
+    }
+}
+
+void SpdkWrapper::ReplenishProbeRequestContextPoolLocked(size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        auto probe_ctx = std::make_unique<ProbeRequestContext>();
+        probe_request_context_pool_.push(probe_ctx.get());
+        probe_request_contexts_.push_back(std::move(probe_ctx));
+    }
+}
+
+SpdkWrapper::ProbeRequestContext *SpdkWrapper::AcquireProbeRequestContext() {
+    std::lock_guard<std::mutex> lock(probe_request_context_pool_mutex_);
+    if (probe_request_context_pool_.empty()) {
+        ReplenishProbeRequestContextPoolLocked(8);
+    }
+    auto *probe_ctx = probe_request_context_pool_.top();
+    probe_request_context_pool_.pop();
+    probe_ctx->Reset(this);
+    return probe_ctx;
+}
+
+void SpdkWrapper::RecycleProbeRequestContext(ProbeRequestContext *ctx) {
+    if (ctx == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(probe_request_context_pool_mutex_);
+    probe_request_context_pool_.push(ctx);
 }
 
 int64_t SpdkWrapper::NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t complete_per_seg) {
@@ -419,11 +441,11 @@ bool SpdkWrapper::ProbeNofSegment(const std::string &tr_str,
         return false;
     }
 
-    ProbeRequestContext probe_ctx;
+    ProbeRequestContext *probe_ctx = AcquireProbeRequestContext();
     int ret = SubmitRequest(seg_handle, probe_buffer->ptr, 0, 1, 0,
-                            ProbeReadComplete,
-                            &probe_ctx);
+                            ProbeReadComplete, probe_ctx);
     if (ret != 0) {
+        RecycleProbeRequestContext(probe_ctx);
         if (error_reason) {
             *error_reason = "submit_fail";
         }
@@ -432,22 +454,22 @@ bool SpdkWrapper::ProbeNofSegment(const std::string &tr_str,
 
     auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (!probe_ctx.done.load(std::memory_order_acquire) &&
+    while (!probe_ctx->done.load(std::memory_order_acquire) &&
            std::chrono::steady_clock::now() < deadline) {
         NvmePollProcessCompletion(seg_handle, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    bool ok = probe_ctx.done.load(std::memory_order_acquire) &&
-              probe_ctx.success.load(std::memory_order_acquire);
+    bool ok = probe_ctx->done.load(std::memory_order_acquire) &&
+              probe_ctx->success.load(std::memory_order_acquire);
     if (!ok && error_reason) {
-        if (!probe_ctx.done.load(std::memory_order_acquire)) {
+        if (!probe_ctx->done.load(std::memory_order_acquire)) {
             *error_reason = "completion_timeout";
         } else {
-            std::lock_guard<std::mutex> lock(probe_ctx.error_mutex);
-            *error_reason = probe_ctx.error_reason.empty()
+            std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
+            *error_reason = probe_ctx->error_reason.empty()
                                 ? "completion_error"
-                                : probe_ctx.error_reason;
+                                : probe_ctx->error_reason;
         }
     }
 

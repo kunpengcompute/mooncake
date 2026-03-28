@@ -1,6 +1,7 @@
 #pragma once
 
 #include <boost/functional/hash.hpp>
+#include <chrono>
 #include <ostream>
 #include <shared_mutex>
 #include <string>
@@ -48,6 +49,7 @@ struct MountedNoFSegment {
     UUID client_id;
     SegmentStatus status;
     std::shared_ptr<BufferAllocatorBase> buf_allocator;
+    std::chrono::steady_clock::time_point last_alive_time;
 };
 
 struct MountedNoFSegmentSnapshot {
@@ -55,6 +57,7 @@ struct MountedNoFSegmentSnapshot {
     UUID client_id;
     NoFSegment segment;
     SegmentStatus status;
+    std::chrono::steady_clock::time_point last_alive_time;
 };
 
 struct LocalDiskSegment {
@@ -195,6 +198,13 @@ class ScopedNoFSegmentAccess {
      */
     ErrorCode GetMountedSegments(
         std::vector<MountedNoFSegmentSnapshot>& segments) const;
+
+    /**
+     * @brief Refresh the last alive time of a mounted NoF segment
+     */
+    ErrorCode RefreshAliveTime(
+        const UUID& segment_id,
+        std::chrono::steady_clock::time_point alive_time);
 
     /**
      * @brief Get the names of all the segments

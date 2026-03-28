@@ -331,8 +331,9 @@ ErrorCode ScopedNoFSegmentAccess::MountSegment(const NoFSegment& segment,
 
     nof_segment_manager_->allocator_manager_.addAllocator(segment.name, allocator);
     nof_segment_manager_->client_segments_[client_id].push_back(segment.id);
+    auto now = std::chrono::steady_clock::now();
     nof_segment_manager_->mounted_segments_[segment.id] = {
-        segment, client_id, SegmentStatus::OK, std::move(allocator)};
+        segment, client_id, SegmentStatus::OK, std::move(allocator), now};
     nof_segment_manager_->client_by_name_[segment.name] = client_id;
     MasterMetricManager::instance().inc_total_nof_capacity(segment.name, size);
     
@@ -473,8 +474,22 @@ ErrorCode ScopedNoFSegmentAccess::GetMountedSegments(
             .client_id = it.second.client_id,
             .segment = it.second.segment,
             .status = it.second.status,
+            .last_alive_time = it.second.last_alive_time,
         });
     }
+    return ErrorCode::OK;
+}
+
+ErrorCode ScopedNoFSegmentAccess::RefreshAliveTime(
+    const UUID& segment_id, std::chrono::steady_clock::time_point alive_time) {
+    auto it = nof_segment_manager_->mounted_segments_.find(segment_id);
+    if (it == nof_segment_manager_->mounted_segments_.end()) {
+        return ErrorCode::SEGMENT_NOT_FOUND;
+    }
+    if (it->second.status != SegmentStatus::OK) {
+        return ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS;
+    }
+    it->second.last_alive_time = alive_time;
     return ErrorCode::OK;
 }
 
@@ -521,7 +536,7 @@ void NoFSegmentManager::GetMountedSegmentsSnapshot(
     for (const auto& [segment_id, mounted_segment] : mounted_segments_) {
         segments.push_back(MountedNoFSegmentSnapshot{
             segment_id, mounted_segment.client_id, mounted_segment.segment,
-            mounted_segment.status});
+            mounted_segment.status, mounted_segment.last_alive_time});
     }
 }
 

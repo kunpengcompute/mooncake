@@ -10,6 +10,7 @@
 #include <limits>
 #include <new>
 #include <set>
+#include "common.h"
 #include "transfer_engine.h"
 #include "transport/transport.h"
 #include "spdk/spdk_wrapper.h"
@@ -268,8 +269,9 @@ void FilereadWorkerPool::workerThread() {
 // to fully utilize the available ssd bandwidth, we use a default of 4 worker
 // threads.
 
-SpdkNofWorkerPool::SpdkNofWorkerPool()
+SpdkNofWorkerPool::SpdkNofWorkerPool(int numa_socket_id)
     : worker_count_(GetSpdkNofWorkerCount()),
+      numa_socket_id_(numa_socket_id),
       task_queue_(std::make_unique<std::queue<SpdkNofTask>[]>(worker_count_)),
       queue_mutex_(std::make_unique<std::mutex[]>(worker_count_)),
       queue_cv_(std::make_unique<std::condition_variable[]>(worker_count_)),
@@ -380,6 +382,7 @@ static inline bool CheckSubTaskPool(
 }
 
 void SpdkNofWorkerPool::workerThread(int work_idx) {
+    bindToSocket(numa_socket_id_);
     VLOG(2) << "SpdkNofWorkerPool worker thread started";
 
     int64_t total_outstanding_io = 0;
@@ -832,10 +835,11 @@ TransferStrategy TransferFuture::strategy() const {
 
 TransferSubmitter::TransferSubmitter(TransferEngine& engine,
                                      std::shared_ptr<StorageBackend>& backend,
-                                     TransferMetric* transfer_metric)
+                                     TransferMetric* transfer_metric,
+                                     int numa_socket_id)
     : engine_(engine),
       memcpy_pool_(std::make_unique<MemcpyWorkerPool>()),
-      spdk_nvmf_pool_(std::make_unique<SpdkNofWorkerPool>()),
+      spdk_nvmf_pool_(std::make_unique<SpdkNofWorkerPool>(numa_socket_id)),
       fileread_pool_(std::make_unique<FilereadWorkerPool>(backend)),
       transfer_metric_(transfer_metric) {
     // Read MC_STORE_MEMCPY environment variable, default to false (disabled)

@@ -96,6 +96,34 @@ TEST_F(NoFHeartbeatTest, HealthyNoFSegmentDoesNotUnmount) {
     EXPECT_EQ(*failure_count, 0u);
 }
 
+TEST_F(NoFHeartbeatTest, NewlyMountedNoFSegmentHasInitialGracePeriod) {
+    auto service = CreateService(/*heartbeat_interval_sec=*/2,
+                                 /*probe_timeout_ms=*/50,
+                                 /*failure_threshold=*/1);
+    std::atomic<int> probe_calls{0};
+    service->SetNoFProbeFnForTesting(
+        [&probe_calls](const std::string&, uint32_t, std::string* reason) {
+            probe_calls.fetch_add(1, std::memory_order_relaxed);
+            if (reason) {
+                *reason = "submit_fail";
+            }
+            return false;
+        });
+
+    UUID client_id = generate_uuid();
+    NoFSegment segment = MakeNoFSegment("nof_seg_grace", "nof_grace");
+    ASSERT_TRUE(service->MountNoFSegment(segment, client_id).has_value());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+
+    EXPECT_EQ(probe_calls.load(), 0);
+    EXPECT_TRUE(service->IsNoFSegmentMountedForTesting(segment.id));
+    auto failure_count =
+        service->GetNoFHeartbeatFailureCountForTesting(segment.id);
+    ASSERT_TRUE(failure_count.has_value());
+    EXPECT_EQ(*failure_count, 0u);
+}
+
 TEST_F(NoFHeartbeatTest, FailedNoFSegmentUnmountsAfterThreshold) {
     auto service = CreateService(/*heartbeat_interval_sec=*/1,
                                  /*probe_timeout_ms=*/50,
@@ -198,8 +226,8 @@ TEST_F(NoFHeartbeatTest, OnlyFailedSegmentIsUnmounted) {
     EXPECT_GE(bad_probe_calls.load(), 2);
 }
 
-TEST_F(NoFHeartbeatTest, HeartbeatAndClientExpiryDoNotDoubleUnmount) {
-    auto service = CreateService(/*heartbeat_interval_sec=*/1,
+TEST_F(NoFHeartbeatTest, ClientExpiryDoesNotUnmountNoFSegment) {
+    auto service = CreateService(/*heartbeat_interval_sec=*/5,
                                  /*probe_timeout_ms=*/50,
                                  /*failure_threshold=*/1,
                                  /*client_ttl_sec=*/1);
@@ -212,15 +240,18 @@ TEST_F(NoFHeartbeatTest, HeartbeatAndClientExpiryDoNotDoubleUnmount) {
         });
 
     UUID client_id = generate_uuid();
-    NoFSegment segment = MakeNoFSegment("nof_seg_ttl_race", "nof_ttl_race");
+    NoFSegment segment = MakeNoFSegment("nof_seg_ignore_client_ttl",
+                                        "nof_ignore_client_ttl");
     ASSERT_TRUE(service->MountNoFSegment(segment, client_id).has_value());
 
-    ASSERT_TRUE(WaitForCondition(std::chrono::milliseconds(5000),
-                                 std::chrono::milliseconds(50), [&]() {
-                                     return !service->IsNoFSegmentMountedForTesting(
-                                         segment.id);
-                                 }));
-    EXPECT_EQ(service->GetMountedNoFSegmentCountForTesting(), 0u);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+
+    EXPECT_TRUE(service->IsNoFSegmentMountedForTesting(segment.id));
+    EXPECT_EQ(service->GetMountedNoFSegmentCountForTesting(), 1u);
+    auto failure_count =
+        service->GetNoFHeartbeatFailureCountForTesting(segment.id);
+    ASSERT_TRUE(failure_count.has_value());
+    EXPECT_EQ(*failure_count, 0u);
 }
 
 }  // namespace mooncake::test

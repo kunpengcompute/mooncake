@@ -206,28 +206,6 @@ auto MasterService::MountNoFSegment(const NoFSegment& segment, const UUID& clien
     -> tl::expected<void, ErrorCode> {
     ScopedNoFSegmentAccess nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
 
-    // Tell the client monitor thread to start timing for this client. To
-    // avoid the following undesired situations, this message must be sent
-    // after locking the segment mutex and before the mounting operation
-    // completes:
-    // 1. Sending the message before the lock: the client expires and
-    // unmouting invokes before this mounting are completed, which prevents
-    // this segment being able to be unmounted forever;
-    // 2. Sending the message after mounting the segment: After mounting
-    // this segment, when trying to push id to the queue, the queue is
-    // already full. However, at this point, the message must be sent,
-    // otherwise this client cannot be monitored and expired.
-    {
-        PodUUID pod_client_id;
-        pod_client_id.first = client_id.first;
-        pod_client_id.second = client_id.second;
-        if (!client_ping_queue_.push(pod_client_id)) {
-            LOG(ERROR) << "NoF segment mount: " << "segment_name=" << segment.name
-                       << ", error=client_ping_queue_full";
-            return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-        }
-    }
-
     LOG(INFO) << "NoF segment mount: " << "client_id=" << client_id
               << ", action=mount_segment, segment_name=" << segment.name;
 
@@ -289,44 +267,12 @@ auto MasterService::ReMountSegment(const std::vector<Segment>& segments,
 auto MasterService::ReMountNoFSegment(const std::vector<NoFSegment>& segments,
                                    const UUID& client_id)
     -> tl::expected<void, ErrorCode> {
-    std::unique_lock<std::shared_mutex> lock(client_mutex_);
-    if (ok_client_.contains(client_id)) {
-        LOG(WARNING) << "NoF segment remount: " << "client_id=" << client_id
-                     << ", warn=client_already_remounted";
-        // Return OK because this is an idempotent operation
-        return {};
-    }
-
     ScopedNoFSegmentAccess nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
-
-    // Tell the client monitor thread to start timing for this client. To
-    // avoid the following undesired situations, this message must be sent
-    // after locking the segment mutex or client mutex and before the remounting
-    // operation completes:
-    // 1. Sending the message before the lock: the client expires and
-    // unmouting invokes before this remounting are completed, which prevents
-    // this segment being able to be unmounted forever;
-    // 2. Sending the message after remounting the segments: After remounting
-    // these segments, when trying to push id to the queue, the queue is
-    // already full. However, at this point, the message must be sent,
-    // otherwise this client cannot be monitored and expired.
-    PodUUID pod_client_id;
-    pod_client_id.first = client_id.first;
-    pod_client_id.second = client_id.second;
-    if (!client_ping_queue_.push(pod_client_id)) {
-        LOG(ERROR) << "NoF segment remount: " << "client_id=" << client_id
-                   << ", error=client_ping_queue_full";
-        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-    }
 
     ErrorCode err = nof_segment_access.ReMountSegment(segments, client_id);
     if (err != ErrorCode::OK) {
         return tl::make_unexpected(err);
     }
-
-    // Change the client status to OK
-    ok_client_.insert(client_id);
-    MasterMetricManager::instance().inc_active_clients();
 
     return {};
 }
@@ -2052,10 +1998,6 @@ void MasterService::ClientMonitorFunc() {
             std::vector<UUID> client_ids;
             std::vector<std::string> segment_names;
 
-            std::vector<UUID> unmount_nof_segments;
-            std::vector<size_t> dec_nof_capacities;
-            std::vector<UUID> nof_client_ids;
-            std::vector<std::string> nof_segment_names;
             {
                 // Lock client_mutex and segment_mutex
                 std::unique_lock<std::shared_mutex> lock(client_mutex_);
@@ -2069,8 +2011,6 @@ void MasterService::ClientMonitorFunc() {
 
                 ScopedSegmentAccess segment_access =
                     segment_manager_.getSegmentAccess();
-                ScopedNoFSegmentAccess nof_segment_access =
-                    nof_segment_manager_.getNoFSegmentAccess();
                 for (auto& client_id : expired_clients) {
                     // mounted mem segemtns of this expired client
                     std::vector<Segment> segments;
@@ -2092,30 +2032,6 @@ void MasterService::ClientMonitorFunc() {
                                           "mem_segment_failed";
                         }
                     }
-
-                    // mounted nof segments of this expired client
-                    std::vector<NoFSegment> nof_segments;
-                    nof_segment_access.GetClientSegments(client_id, nof_segments);
-                    for (auto& nof_seg : nof_segments) {
-                        size_t metrics_dec_nof_capacity = 0;
-                        if (nof_segment_access.PrepareUnmountSegment(
-                                nof_seg.id, metrics_dec_nof_capacity) ==
-                            ErrorCode::OK) {
-                            unmount_nof_segments.push_back(nof_seg.id);
-                            dec_nof_capacities.push_back(metrics_dec_nof_capacity);
-                            nof_client_ids.push_back(client_id);
-                            nof_segment_names.push_back(nof_seg.name);
-                            LOG(INFO) << "client_id=" << client_id
-                                      << ", segment_id=" << nof_seg.id
-                                      << ", segment_size=" << metrics_dec_nof_capacity;
-                        } else {
-                            LOG(ERROR) << "client_id=" << client_id
-                                       << ", segment_name=" << nof_seg.name
-                                       << ", "
-                                          "error=prepare_unmount_expired_"
-                                          "nof_segment_failed";
-                        }
-                    }
                 }
             }  // Release the mutex before long-running ClearInvalidHandles and
                // avoid deadlocks
@@ -2131,23 +2047,6 @@ void MasterService::ClientMonitorFunc() {
                     LOG(INFO) << "client_id=" << client_ids[i]
                               << ", segment_name=" << segment_names[i]
                               << ", action=unmount_expired_mem_segment";
-                }
-            }
-
-            if (!unmount_nof_segments.empty()) {
-                ClearInvalidHandles();
-                ScopedNoFSegmentAccess nof_segment_access =
-                    nof_segment_manager_.getNoFSegmentAccess();
-                for (size_t i = 0; i < unmount_nof_segments.size(); i++) {
-                    nof_segment_access.CommitUnmountSegment(
-                        unmount_nof_segments[i], nof_client_ids[i], dec_nof_capacities[i]);
-                    {
-                        std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
-                        nof_heartbeat_states_.erase(unmount_nof_segments[i]);
-                    }
-                    LOG(INFO) << "client_id=" << nof_client_ids[i]
-                              << ", segment_name=" << nof_segment_names[i]
-                              << ", action=unmount_expired_nof_segment";
                 }
             }
         }
@@ -2269,8 +2168,10 @@ void MasterService::NofHeartbeatThreadFunc() {
                         spread_ms = static_cast<int64_t>(
                             (interval_ms.count() * i) / ok_segments.size());
                     }
+                    state.last_success_at = snapshot.last_alive_time;
                     state.next_probe_at =
-                        now + std::chrono::milliseconds(spread_ms);
+                        snapshot.last_alive_time + nof_heartbeat_interval_sec_ +
+                        std::chrono::milliseconds(spread_ms);
                 }
             }
 
@@ -2321,16 +2222,32 @@ void MasterService::NofHeartbeatThreadFunc() {
 
         if (probe_success) {
             MasterMetricManager::instance().inc_nof_heartbeat_success_total();
+            auto success_time = std::chrono::steady_clock::now();
+            {
+                ScopedNoFSegmentAccess nof_segment_access =
+                    nof_segment_manager_.getNoFSegmentAccess();
+                auto refresh_result = nof_segment_access.RefreshAliveTime(
+                    probe_target->segment_id, success_time);
+                if (refresh_result != ErrorCode::OK &&
+                    refresh_result != ErrorCode::SEGMENT_NOT_FOUND &&
+                    refresh_result != ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS) {
+                    LOG(WARNING) << "segment_id=" << probe_target->segment_id
+                                 << ", segment_name="
+                                 << probe_target->segment.name
+                                 << ", endpoint="
+                                 << probe_target->segment.te_endpoint
+                                 << ", action=refresh_nof_segment_alive_time_failed"
+                                 << ", error=" << refresh_result;
+                }
+            }
             {
                 std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
                 auto it = nof_heartbeat_states_.find(probe_target->segment_id);
                 if (it != nof_heartbeat_states_.end()) {
                     it->second.consecutive_failures = 0;
-                    it->second.last_success_at = std::chrono::steady_clock::now();
+                    it->second.last_success_at = success_time;
                     it->second.last_error_reason.clear();
-                    it->second.next_probe_at =
-                        std::chrono::steady_clock::now() +
-                        nof_heartbeat_interval_sec_;
+                    it->second.next_probe_at = success_time + nof_heartbeat_interval_sec_;
                 }
             }
             VLOG(1) << "segment_id=" << probe_target->segment_id
@@ -2348,6 +2265,9 @@ void MasterService::NofHeartbeatThreadFunc() {
 
         bool should_unmount = false;
         uint32_t failure_count = 0;
+        auto failure_time = std::chrono::steady_clock::now();
+        auto alive_timeout = nof_heartbeat_interval_sec_ *
+                             static_cast<int64_t>(nof_heartbeat_failures_threshold_);
         {
             std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
             auto it = nof_heartbeat_states_.find(probe_target->segment_id);
@@ -2355,10 +2275,9 @@ void MasterService::NofHeartbeatThreadFunc() {
                 it->second.consecutive_failures++;
                 failure_count = it->second.consecutive_failures;
                 it->second.last_error_reason = error_reason;
-                it->second.next_probe_at =
-                    std::chrono::steady_clock::now() + nof_heartbeat_interval_sec_;
+                it->second.next_probe_at = failure_time + nof_heartbeat_interval_sec_;
                 should_unmount =
-                    failure_count >= nof_heartbeat_failures_threshold_;
+                    failure_time - probe_target->last_alive_time >= alive_timeout;
             }
         }
 

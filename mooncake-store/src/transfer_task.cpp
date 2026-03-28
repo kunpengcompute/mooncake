@@ -839,7 +839,11 @@ TransferSubmitter::TransferSubmitter(TransferEngine& engine,
                                      int numa_socket_id)
     : engine_(engine),
       memcpy_pool_(std::make_unique<MemcpyWorkerPool>()),
+#ifdef USE_NOF
       spdk_nvmf_pool_(std::make_unique<SpdkNofWorkerPool>(numa_socket_id)),
+#else
+      spdk_nvmf_pool_(nullptr),
+#endif
       fileread_pool_(std::make_unique<FilereadWorkerPool>(backend)),
       transfer_metric_(transfer_metric) {
     // Read MC_STORE_MEMCPY environment variable, default to false (disabled)
@@ -1079,6 +1083,11 @@ std::optional<TransferFuture> TransferSubmitter::submitTransferEngineOperation(
 std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
     const AllocatedBuffer::Descriptor& handle, void *ptr, size_t size,
     const TransferRequest::OpCode op_code) {
+#ifndef USE_NOF
+    LOG(ERROR) << "NoF transfer requested while USE_NOF is disabled"
+               << ", endpoint=" << handle.transport_endpoint_;
+    return std::nullopt;
+#else
     if (handle.transport_endpoint_.empty() || handle.size_ < size) {
         LOG(ERROR) << "Transport endpoint " << handle.transport_endpoint_
                    << " buffer size " << handle.size_ << ", request size" << size;
@@ -1105,6 +1114,7 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
 
     VLOG(1) << "Spdk nvmf transfer submitted to " << handle.transport_endpoint_;
     return TransferFuture(state);
+#endif
 }
 
 std::optional<TransferFuture> TransferSubmitter::submitFileReadOperation(

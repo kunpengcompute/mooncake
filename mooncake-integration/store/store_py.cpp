@@ -821,6 +821,7 @@ PYBIND11_MODULE(store, m) {
     py::class_<ReplicateConfig>(m, "ReplicateConfig")
         .def(py::init<>())
         .def_readwrite("replica_num", &ReplicateConfig::replica_num)
+        .def_readwrite("nof_replica_num", &ReplicateConfig::nof_replica_num)
         .def_readwrite("with_soft_pin", &ReplicateConfig::with_soft_pin)
         .def_readwrite("preferred_segments",
                        &ReplicateConfig::preferred_segments)

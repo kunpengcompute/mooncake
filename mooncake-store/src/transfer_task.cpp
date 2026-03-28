@@ -839,7 +839,11 @@ TransferSubmitter::TransferSubmitter(TransferEngine& engine,
                                      int numa_socket_id)
     : engine_(engine),
       memcpy_pool_(std::make_unique<MemcpyWorkerPool>()),
+#ifdef USE_NOF
       spdk_nvmf_pool_(std::make_unique<SpdkNofWorkerPool>(numa_socket_id)),
+#else
+      spdk_nvmf_pool_(nullptr),
+#endif
       fileread_pool_(std::make_unique<FilereadWorkerPool>(backend)),
       transfer_metric_(transfer_metric) {
     // Read MC_STORE_MEMCPY environment variable, default to false (disabled)

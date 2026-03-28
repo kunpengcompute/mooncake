@@ -167,10 +167,12 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     this->protocol = protocol;
     this->ipc_socket_path_ = ipc_socket_path;
 
+#ifdef USE_NOF
     if (!SpdkWrapper::GetInstance().InitializeEnv()) {
         LOG(ERROR) << "spdk env init fail";
         return tl::unexpected(ErrorCode::INTERNAL_ERROR);
     }
+#endif
 
     // Remove port if hostname already contains one
     std::string hostname = local_hostname;

@@ -1079,6 +1079,11 @@ std::optional<TransferFuture> TransferSubmitter::submitTransferEngineOperation(
 std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
     const AllocatedBuffer::Descriptor& handle, void *ptr, size_t size,
     const TransferRequest::OpCode op_code) {
+#ifndef USE_NOF
+    LOG(ERROR) << "NoF transfer requested while USE_NOF is disabled"
+               << ", endpoint=" << handle.transport_endpoint_;
+    return std::nullopt;
+#else
     if (handle.transport_endpoint_.empty() || handle.size_ < size) {
         LOG(ERROR) << "Transport endpoint " << handle.transport_endpoint_
                    << " buffer size " << handle.size_ << ", request size" << size;
@@ -1105,6 +1110,7 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
 
     VLOG(1) << "Spdk nvmf transfer submitted to " << handle.transport_endpoint_;
     return TransferFuture(state);
+#endif
 }
 
 std::optional<TransferFuture> TransferSubmitter::submitFileReadOperation(

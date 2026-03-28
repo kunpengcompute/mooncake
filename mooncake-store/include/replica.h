@@ -70,6 +70,7 @@ inline std::ostream& operator<<(std::ostream& os,
  */
 struct ReplicateConfig {
     size_t replica_num{1};
+    size_t nof_replica_num{0};
     bool with_soft_pin{false};
     std::vector<std::string>
         preferred_segments{};         // Preferred segments for allocation
@@ -82,6 +83,7 @@ struct ReplicateConfig {
     friend std::ostream& operator<<(std::ostream& os,
                                     const ReplicateConfig& config) noexcept {
         os << "ReplicateConfig: { replica_num: " << config.replica_num
+           << ", nof_replica_num: " << config.nof_replica_num
            << ", with_soft_pin: " << config.with_soft_pin
            << ", preferred_segments: [";
         for (size_t i = 0; i < config.preferred_segments.size(); ++i) {

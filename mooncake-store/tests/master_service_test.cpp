@@ -311,8 +311,9 @@ TEST_F(MasterServiceTest, PutStartInvalidParams) {
     std::string key = "test_key";
     ReplicateConfig config;
 
-    // Test invalid replica_num
+    // Test invalid replica config
     config.replica_num = 0;
+    config.nof_replica_num = 0;
     auto put_result1 = service_->PutStart(client_id, key, 1024, config);
     EXPECT_FALSE(put_result1.has_value());
     EXPECT_EQ(ErrorCode::INVALID_PARAMS, put_result1.error());

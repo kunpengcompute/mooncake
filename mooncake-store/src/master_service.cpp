@@ -67,6 +67,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
             "put_start_discard_timeout_sec");
     }
 
+#ifdef USE_NOF
     if (nof_heartbeat_interval_sec_.count() <= 0) {
         LOG(ERROR) << "nof_heartbeat_interval_sec must be positive, current "
                    << nof_heartbeat_interval_sec_.count();
@@ -87,6 +88,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
         return SpdkWrapper::GetInstance().ProbeNofSegment(
             te_endpoint, timeout_ms, error_reason);
     };
+#endif
 
     eviction_running_ = true;
     eviction_thread_ = std::thread(&MasterService::EvictionThreadFunc, this);
@@ -98,10 +100,12 @@ MasterService::MasterService(const MasterServiceConfig& config)
         std::thread(&MasterService::ClientMonitorFunc, this);
     VLOG(1) << "action=start_client_monitor_thread";
 
+#ifdef USE_NOF
     nof_heartbeat_running_ = true;
     nof_heartbeat_thread_ =
         std::thread(&MasterService::NofHeartbeatThreadFunc, this);
     VLOG(1) << "action=start_nof_heartbeat_thread";
+#endif
 
     if (!root_fs_dir_.empty()) {
         use_disk_replica_ = true;
@@ -204,6 +208,12 @@ auto MasterService::MountSegment(const Segment& segment, const UUID& client_id)
 
 auto MasterService::MountNoFSegment(const NoFSegment& segment, const UUID& client_id)
     -> tl::expected<void, ErrorCode> {
+#ifndef USE_NOF
+    LOG(ERROR) << "client_id=" << client_id
+               << ", segment_name=" << segment.name
+               << ", error=nof_pool_disabled";
+    return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+#else
     ScopedNoFSegmentAccess nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
 
     LOG(INFO) << "NoF segment mount: " << "client_id=" << client_id
@@ -217,6 +227,7 @@ auto MasterService::MountNoFSegment(const NoFSegment& segment, const UUID& clien
         return tl::make_unexpected(err);
     }
     return {};
+#endif
 }
 
 auto MasterService::ReMountSegment(const std::vector<Segment>& segments,
@@ -267,6 +278,12 @@ auto MasterService::ReMountSegment(const std::vector<Segment>& segments,
 auto MasterService::ReMountNoFSegment(const std::vector<NoFSegment>& segments,
                                    const UUID& client_id)
     -> tl::expected<void, ErrorCode> {
+#ifndef USE_NOF
+    LOG(ERROR) << "client_id=" << client_id
+               << ", segments_count=" << segments.size()
+               << ", error=nof_pool_disabled";
+    return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+#else
     ScopedNoFSegmentAccess nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
 
     ErrorCode err = nof_segment_access.ReMountSegment(segments, client_id);
@@ -275,6 +292,7 @@ auto MasterService::ReMountNoFSegment(const std::vector<NoFSegment>& segments,
     }
 
     return {};
+#endif
 }
 
 
@@ -334,6 +352,11 @@ auto MasterService::UnmountSegment(const UUID& segment_id,
 auto MasterService::UnmountNoFSegment(const UUID& segment_id,
                                    const UUID& client_id)
     -> tl::expected<void, ErrorCode> {
+#ifndef USE_NOF
+    LOG(ERROR) << "client_id=" << client_id << ", segment_id=" << segment_id
+               << ", error=nof_pool_disabled";
+    return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+#else
     size_t metrics_dec_capacity = 0;  // to update the metrics
 
     // 1. Prepare to unmount the segment by deleting its allocator
@@ -365,6 +388,7 @@ auto MasterService::UnmountNoFSegment(const UUID& segment_id,
         nof_heartbeat_states_.erase(segment_id);
     }
     return {};
+#endif
 }
 
 auto MasterService::ExistKey(const std::string& key)
@@ -706,12 +730,22 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
                              const uint64_t slice_length,
                              const ReplicateConfig& config)
     -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
-    if (config.replica_num == 0 || key.empty() || slice_length == 0) {
+    if ((config.replica_num == 0 && config.nof_replica_num == 0) ||
+        key.empty() || slice_length == 0) {
         LOG(ERROR) << "key=" << key << ", replica_num=" << config.replica_num
+                   << ", nof_replica_num=" << config.nof_replica_num
                    << ", slice_length=" << slice_length
                    << ", key_size=" << key.size() << ", error=invalid_params";
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
+#ifndef USE_NOF
+    if (config.nof_replica_num > 0) {
+        LOG(ERROR) << "key=" << key
+                   << ", nof_replica_num=" << config.nof_replica_num
+                   << ", error=nof_pool_disabled";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+#endif
 
     // Validate slice lengths
     uint64_t total_length = 0;
@@ -759,7 +793,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     // Allocate memory replicas
     std::vector<Replica> replicas;
-    if (segment_manager_.getMountedSegmentCount() > 0) {
+    if (config.replica_num > 0 && segment_manager_.getMountedSegmentCount() > 0) {
         ScopedAllocatorAccess allocator_access =
             segment_manager_.getAllocatorAccess();
         const auto& allocator_manager = allocator_access.getAllocatorManager();
@@ -786,7 +820,16 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         replicas = std::move(allocation_result.value());
     }
 
-    if (nof_segment_manager_.getMountedSegmentCount() > 0) {
+#ifdef USE_NOF
+    if (config.nof_replica_num > 0 &&
+        nof_segment_manager_.getMountedSegmentCount() == 0) {
+        VLOG(1) << "Failed to allocate nof replicas for key=" << key
+                << ", error=no_available_handle";
+        return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+    }
+
+    if (config.nof_replica_num > 0 &&
+        nof_segment_manager_.getMountedSegmentCount() > 0) {
         ScopedAllocatorAccess allocator_access =
             nof_segment_manager_.getAllocatorAccess();
         const auto& allocator_manager = allocator_access.getAllocatorManager();
@@ -797,7 +840,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
         }
 
         auto allocation_result = allocation_strategy_->Allocate(
-            allocator_manager, slice_length, config.replica_num,
+            allocator_manager, slice_length, config.nof_replica_num,
             preferred_segments, std::set<std::string>(), ReplicaType::NOF_SSD);
 
         if (!allocation_result.has_value()) {
@@ -814,6 +857,7 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
             replicas.push_back(std::move(replica));
         }
     }
+#endif
 
     // If disk replica is enabled, allocate a disk replica
     if (use_disk_replica_) {
@@ -1321,18 +1365,22 @@ void MasterService::EvictionThreadFunc() {
             BatchEvict(evict_ratio_target, evict_ratio_lowerbound);
         }
 
-        double nof_used_ratio = 
+#ifdef USE_NOF
+        double nof_used_ratio =
             MasterMetricManager::instance().get_global_nof_used_ratio();
         if (nof_used_ratio > nof_eviction_high_watermark_ratio_ ||
             (need_eviction_ && nof_eviction_ratio_ > 0.0)) {
-                double nof_evict_ratio_target = std::max(
-                    nof_eviction_ratio_,
-                    nof_used_ratio - nof_eviction_high_watermark_ratio_ + nof_eviction_ratio_);
-                double nof_evict_ratio_lowerbound = 
-                    std::max(nof_evict_ratio_target * 0.5,
-                             nof_used_ratio - nof_eviction_high_watermark_ratio_);
-                NoFBatchEvict(nof_evict_ratio_target, nof_evict_ratio_lowerbound);
-            }
+            double nof_evict_ratio_target =
+                std::max(nof_eviction_ratio_,
+                         nof_used_ratio - nof_eviction_high_watermark_ratio_ +
+                             nof_eviction_ratio_);
+            double nof_evict_ratio_lowerbound =
+                std::max(nof_evict_ratio_target * 0.5,
+                         nof_used_ratio -
+                             nof_eviction_high_watermark_ratio_);
+            NoFBatchEvict(nof_evict_ratio_target, nof_evict_ratio_lowerbound);
+        }
+#endif
 
         std::this_thread::sleep_for(
             std::chrono::milliseconds(kEvictionThreadSleepMs));
@@ -2058,6 +2106,12 @@ void MasterService::ClientMonitorFunc() {
 
 bool MasterService::ProbeNoFSegment(const std::string& te_endpoint,
                                     std::string* error_reason) {
+#ifndef USE_NOF
+    if (error_reason) {
+        *error_reason = "nof_pool_disabled";
+    }
+    return false;
+#else
     NoFProbeFn probe_fn;
     {
         std::lock_guard<std::mutex> lock(nof_probe_fn_mutex_);
@@ -2072,6 +2126,7 @@ bool MasterService::ProbeNoFSegment(const std::string& te_endpoint,
     return probe_fn(te_endpoint,
                     static_cast<uint32_t>(nof_heartbeat_probe_timeout_ms_.count()),
                     error_reason);
+#endif
 }
 
 bool MasterService::TryUnmountNoFSegmentByHeartbeat(

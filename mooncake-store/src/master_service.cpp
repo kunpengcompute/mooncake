@@ -14,6 +14,21 @@
 
 namespace mooncake {
 
+namespace {
+
+bool HasExpectedReplicaAllocation(const ReplicateConfig& config,
+                                  size_t allocated_memory_replicas,
+                                  size_t allocated_nof_replicas) {
+    if (DetermineReplicaWriteMode(config) ==
+        ReplicaWriteMode::FLEXIBLE_DUAL_REPLICA) {
+        return allocated_memory_replicas + allocated_nof_replicas > 0;
+    }
+    return allocated_memory_replicas == config.replica_num &&
+           allocated_nof_replicas == config.nof_replica_num;
+}
+
+}  // namespace
+
 MasterService::MasterService() : MasterService(MasterServiceConfig()) {}
 
 MasterService::MasterService(const MasterServiceConfig& config)
@@ -738,6 +753,14 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
                    << ", key_size=" << key.size() << ", error=invalid_params";
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
+    if (config.prefer_alloc_in_same_node && config.nof_replica_num > 0) {
+        LOG(ERROR) << "key=" << key
+                   << ", nof_replica_num=" << config.nof_replica_num
+                   << ", prefer_alloc_in_same_node="
+                   << config.prefer_alloc_in_same_node
+                   << ", error=nof_not_supported_with_prefer_same_node";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
 #ifndef USE_NOF
     if (config.nof_replica_num > 0) {
         LOG(ERROR) << "key=" << key
@@ -793,6 +816,9 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
 
     // Allocate memory replicas
     std::vector<Replica> replicas;
+    const auto write_mode = DetermineReplicaWriteMode(config);
+    size_t allocated_memory_replicas = 0;
+    size_t allocated_nof_replicas = 0;
     if (config.replica_num > 0 && segment_manager_.getMountedSegmentCount() > 0) {
         ScopedAllocatorAccess allocator_access =
             segment_manager_.getAllocatorAccess();
@@ -813,21 +839,17 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
             if (allocation_result.error() == ErrorCode::INVALID_PARAMS) {
                 return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
             }
-            need_eviction_ = true;
-            return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+            if (write_mode != ReplicaWriteMode::FLEXIBLE_DUAL_REPLICA) {
+                need_eviction_ = true;
+                return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+            }
+        } else {
+            allocated_memory_replicas = allocation_result->size();
+            replicas = std::move(allocation_result.value());
         }
-
-        replicas = std::move(allocation_result.value());
     }
 
 #ifdef USE_NOF
-    if (config.nof_replica_num > 0 &&
-        nof_segment_manager_.getMountedSegmentCount() == 0) {
-        VLOG(1) << "Failed to allocate nof replicas for key=" << key
-                << ", error=no_available_handle";
-        return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
-    }
-
     if (config.nof_replica_num > 0 &&
         nof_segment_manager_.getMountedSegmentCount() > 0) {
         ScopedAllocatorAccess allocator_access =
@@ -849,15 +871,34 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
             if (allocation_result.error() == ErrorCode::INVALID_PARAMS) {
                 return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
             }
-            need_eviction_ = true;
-            return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
-        }
-        
-        for (auto& replica : allocation_result.value()) {
-            replicas.push_back(std::move(replica));
+            if (write_mode != ReplicaWriteMode::FLEXIBLE_DUAL_REPLICA) {
+                need_eviction_ = true;
+                return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+            }
+        } else {
+            allocated_nof_replicas = allocation_result->size();
+            for (auto& replica : allocation_result.value()) {
+                replicas.push_back(std::move(replica));
+            }
         }
     }
 #endif
+
+    if (!HasExpectedReplicaAllocation(config, allocated_memory_replicas,
+                                      allocated_nof_replicas)) {
+        if ((config.replica_num > 0 &&
+             allocated_memory_replicas != config.replica_num) ||
+            (config.nof_replica_num > 0 &&
+             allocated_nof_replicas != config.nof_replica_num)) {
+            need_eviction_ = true;
+        }
+        VLOG(1) << "Failed to satisfy replica allocation requirement for key="
+                << key << ", requested_memory_replicas=" << config.replica_num
+                << ", allocated_memory_replicas=" << allocated_memory_replicas
+                << ", requested_nof_replicas=" << config.nof_replica_num
+                << ", allocated_nof_replicas=" << allocated_nof_replicas;
+        return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+    }
 
     // If disk replica is enabled, allocate a disk replica
     if (use_disk_replica_) {
@@ -870,20 +911,26 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     std::vector<Replica::Descriptor> replica_list;
     replica_list.reserve(replicas.size());
     int i = 0;
-    LOG(INFO) << "PutStart, create replicas: client_id=" << client_id
-              << ", key=" << key << ", slice_length=" << slice_length;
+    VLOG(1) << "PutStart, create replicas: client_id=" << client_id
+            << ", key=" << key << ", slice_length=" << slice_length;
     for (const auto& replica : replicas) {
         const auto desc = replica.get_descriptor();
         replica_list.emplace_back(desc);
 
         if (replica.is_memory_replica()) {
             const auto& mem_desc = desc.get_memory_descriptor();
-            LOG(INFO) << "Replica #" << ++i << ": buffer_address=" << mem_desc.buffer_descriptor.buffer_address_
-                  << ", transport_endpoint=" << mem_desc.buffer_descriptor.transport_endpoint_;
+            VLOG(1) << "Replica #" << ++i
+                    << ": buffer_address="
+                    << mem_desc.buffer_descriptor.buffer_address_
+                    << ", transport_endpoint="
+                    << mem_desc.buffer_descriptor.transport_endpoint_;
         } else if (replica.is_nof_replica()) {
             const auto& nof_desc = desc.get_nof_descriptor();
-            LOG(INFO) << "Replica #" << ++i << ": buffer_address=" << nof_desc.buffer_descriptor.buffer_address_
-                  << ", transport_endpoint=" << nof_desc.buffer_descriptor.transport_endpoint_;
+            VLOG(1) << "Replica #" << ++i
+                    << ": buffer_address="
+                    << nof_desc.buffer_descriptor.buffer_address_
+                    << ", transport_endpoint="
+                    << nof_desc.buffer_descriptor.transport_endpoint_;
         }
     }
 
@@ -919,9 +966,12 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
     }
 
     for (auto& replica : metadata.replicas) {
-        // FIXME: replica_type is deprecated temporarily
-        if (replica.type() == ReplicaType::MEMORY ||
-            replica.type() == ReplicaType::NOF_SSD) {
+        const bool type_matches =
+            replica_type == ReplicaType::ALL
+                ? (replica.type() == ReplicaType::MEMORY ||
+                   replica.type() == ReplicaType::NOF_SSD)
+                : replica.type() == replica_type;
+        if (type_matches) {
             replica.mark_complete();
         }
         if (enable_offload_) {
@@ -934,7 +984,8 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
         accessor.EraseFromProcessing();
     }
 
-    if (replica_type == ReplicaType::MEMORY) {
+    if (replica_type == ReplicaType::MEMORY ||
+        (replica_type == ReplicaType::ALL && metadata.HasMemReplica())) {
         MasterMetricManager::instance().inc_mem_cache_nums();
     } else if (replica_type == ReplicaType::DISK) {
         MasterMetricManager::instance().inc_file_cache_nums();
@@ -1005,27 +1056,21 @@ auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
         return metadata.HasDiffRepStatus(ReplicaStatus::PROCESSING, type);
     };
 
-    if (replica_type == ReplicaType::MEMORY) {
-        if (auto status = check_status(ReplicaType::MEMORY)) {
-            LOG(ERROR) << "key=" << key << ", status=" << *status
-                       << ", error=invalid_replica_status";
-            return tl::make_unexpected(ErrorCode::INVALID_WRITE);
-        }
-        if (auto status = check_status(ReplicaType::NOF_SSD)) {
-            LOG(ERROR) << "key=" << key << ", status=" << *status
-                       << ", error=invalid_replica_status";
-            return tl::make_unexpected(ErrorCode::INVALID_WRITE);
-        }
-    } else if (auto status = check_status(replica_type)) {
+    if (auto status = check_status(replica_type)) {
         LOG(ERROR) << "key=" << key << ", status=" << *status
                    << ", error=invalid_replica_status";
         return tl::make_unexpected(ErrorCode::INVALID_WRITE);
     }
 
     if (replica_type == ReplicaType::MEMORY) {
-        // MEMORY revoke path also rolls back NOF replicas.
         MasterMetricManager::instance().dec_mem_cache_nums();
         metadata.EraseReplica(ReplicaType::MEMORY);
+    } else if (replica_type == ReplicaType::ALL) {
+        if (metadata.HasMemReplica()) {
+            MasterMetricManager::instance().dec_mem_cache_nums();
+        }
+        metadata.EraseReplica(ReplicaType::ALL);
+    } else if (replica_type == ReplicaType::NOF_SSD) {
         metadata.EraseReplica(ReplicaType::NOF_SSD);
     } else if (replica_type == ReplicaType::DISK) {
         MasterMetricManager::instance().dec_file_cache_nums();
@@ -1046,21 +1091,23 @@ auto MasterService::PutRevoke(const UUID& client_id, const std::string& key,
 }
 
 std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutEnd(
-    const UUID& client_id, const std::vector<std::string>& keys) {
+    const UUID& client_id, const std::vector<std::string>& keys,
+    ReplicaType replica_type) {
     std::vector<tl::expected<void, ErrorCode>> results;
     results.reserve(keys.size());
     for (const auto& key : keys) {
-        results.emplace_back(PutEnd(client_id, key, ReplicaType::MEMORY));
+        results.emplace_back(PutEnd(client_id, key, replica_type));
     }
     return results;
 }
 
 std::vector<tl::expected<void, ErrorCode>> MasterService::BatchPutRevoke(
-    const UUID& client_id, const std::vector<std::string>& keys) {
+    const UUID& client_id, const std::vector<std::string>& keys,
+    ReplicaType replica_type) {
     std::vector<tl::expected<void, ErrorCode>> results;
     results.reserve(keys.size());
     for (const auto& key : keys) {
-        results.emplace_back(PutRevoke(client_id, key, ReplicaType::MEMORY));
+        results.emplace_back(PutRevoke(client_id, key, replica_type));
     }
     return results;
 }

@@ -71,10 +71,12 @@ class WrappedMasterService {
                   const ReplicateConfig& config);
 
     std::vector<tl::expected<void, ErrorCode>> BatchPutEnd(
-        const UUID& client_id, const std::vector<std::string>& keys);
+        const UUID& client_id, const std::vector<std::string>& keys,
+        ReplicaType replica_type);
 
     std::vector<tl::expected<void, ErrorCode>> BatchPutRevoke(
-        const UUID& client_id, const std::vector<std::string>& keys);
+        const UUID& client_id, const std::vector<std::string>& keys,
+        ReplicaType replica_type);
 
     tl::expected<void, ErrorCode> Remove(const std::string& key);
 

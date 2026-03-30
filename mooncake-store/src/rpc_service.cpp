@@ -496,7 +496,8 @@ WrappedMasterService::BatchPutStart(const UUID& client_id,
 }
 
 std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutEnd(
-    const UUID& client_id, const std::vector<std::string>& keys) {
+    const UUID& client_id, const std::vector<std::string>& keys,
+    ReplicaType replica_type) {
     ScopedVLogTimer timer(1, "BatchPutEnd");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
@@ -506,8 +507,7 @@ std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutEnd(
     results.reserve(keys.size());
 
     for (const auto& key : keys) {
-        results.emplace_back(
-            master_service_.PutEnd(client_id, key, ReplicaType::MEMORY));
+        results.emplace_back(master_service_.PutEnd(client_id, key, replica_type));
     }
 
     size_t failure_count = 0;
@@ -535,7 +535,8 @@ std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutEnd(
 }
 
 std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutRevoke(
-    const UUID& client_id, const std::vector<std::string>& keys) {
+    const UUID& client_id, const std::vector<std::string>& keys,
+    ReplicaType replica_type) {
     ScopedVLogTimer timer(1, "BatchPutRevoke");
     const size_t total_keys = keys.size();
     timer.LogRequest("client_id=", client_id, ", keys_count=", total_keys);
@@ -546,7 +547,7 @@ std::vector<tl::expected<void, ErrorCode>> WrappedMasterService::BatchPutRevoke(
 
     for (const auto& key : keys) {
         results.emplace_back(
-            master_service_.PutRevoke(client_id, key, ReplicaType::MEMORY));
+            master_service_.PutRevoke(client_id, key, replica_type));
     }
 
     size_t failure_count = 0;

@@ -27,7 +27,8 @@ inline std::ostream& operator<<(std::ostream& os,
         replica_type_strings{{ReplicaType::MEMORY, "MEMORY"},
                              {ReplicaType::DISK, "DISK"},
                              {ReplicaType::LOCAL_DISK, "LOCAL_DISK"},
-                             {ReplicaType::NOF_SSD, "NOF_SSD"}};
+                             {ReplicaType::NOF_SSD, "NOF_SSD"},
+                             {ReplicaType::ALL, "ALL"}};
 
     os << (replica_type_strings.count(replicaType)
                ? replica_type_strings.at(replicaType)
@@ -100,6 +101,23 @@ struct ReplicateConfig {
         return os;
     }
 };
+
+enum class ReplicaWriteMode {
+    SINGLE_REPLICA,
+    FLEXIBLE_DUAL_REPLICA,
+    RELIABLE_MULTI_REPLICA,
+};
+
+inline ReplicaWriteMode DetermineReplicaWriteMode(
+    const ReplicateConfig& config) {
+    if (config.replica_num == 1 && config.nof_replica_num == 1) {
+        return ReplicaWriteMode::FLEXIBLE_DUAL_REPLICA;
+    }
+    if (config.replica_num > 1 || config.nof_replica_num > 1) {
+        return ReplicaWriteMode::RELIABLE_MULTI_REPLICA;
+    }
+    return ReplicaWriteMode::SINGLE_REPLICA;
+}
 
 struct MemoryReplicaData {
     std::unique_ptr<AllocatedBuffer> buffer;

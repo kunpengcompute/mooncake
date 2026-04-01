@@ -1,0 +1,3 @@
+# Runtime dependencies for Mooncake
+# Install with: pip install -r requirements.txt
+paramiko>=3.4.0

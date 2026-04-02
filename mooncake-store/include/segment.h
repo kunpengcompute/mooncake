@@ -11,6 +11,7 @@
 
 #include "allocation_strategy.h"
 #include "allocator.h"
+#include "rpc_types.h"
 #include "types.h"
 
 namespace mooncake {
@@ -388,6 +389,22 @@ class NoFSegmentManager {
 
     void GetMountedSegmentsSnapshot(
         std::vector<MountedNoFSegmentSnapshot>& segments) const;
+
+    tl::expected<std::vector<NoFSegmentOwnerInfo>, ErrorCode>
+    GetSegmentsByName(
+        const std::string& segment_name) const {
+        std::shared_lock<std::shared_mutex> lock(segment_mutex_);
+        std::vector<NoFSegmentOwnerInfo> result;
+        for (const auto& [segment_id, mounted_segment] : mounted_segments_) {
+            if (mounted_segment.segment.name == segment_name) {
+                result.emplace_back(segment_id, mounted_segment.client_id);
+            }
+        }
+        if (result.empty()) {
+            return tl::make_unexpected(ErrorCode::SEGMENT_NOT_FOUND);
+        }
+        return result;
+    }
 
 
    private:

@@ -142,6 +142,11 @@ struct RpcNameTraits<&WrappedMasterService::GetAllNoFSegments> {
 };
 
 template <>
+struct RpcNameTraits<&WrappedMasterService::GetNoFSegmentsByName> {
+    static constexpr const char* value = "GetNoFSegmentsByName";
+};
+
+template <>
 struct RpcNameTraits<&WrappedMasterService::Ping> {
     static constexpr const char* value = "Ping";
 };
@@ -587,6 +592,20 @@ tl::expected<std::vector<NoFSegment>, ErrorCode> MasterClient::GetAllNoFSegments
     timer.LogRequest("Get all NoF segments, client_id=", client_id_);
 
     auto result = invoke_rpc<&WrappedMasterService::GetAllNoFSegments, std::vector<NoFSegment>>();
+    timer.LogResponseExpected(result);
+    return result;
+}
+
+tl::expected<std::vector<NoFSegmentOwnerInfo>, ErrorCode>
+MasterClient::GetNoFSegmentsByName(
+    const std::string& segment_name) {
+    ScopedVLogTimer timer(1, "MasterClient::GetNoFSegmentsByName");
+    timer.LogRequest("segment_name=", segment_name, ", client_id=", client_id_);
+
+    auto result =
+        invoke_rpc<&WrappedMasterService::GetNoFSegmentsByName,
+                   std::vector<NoFSegmentOwnerInfo>>(
+            segment_name);
     timer.LogResponseExpected(result);
     return result;
 }

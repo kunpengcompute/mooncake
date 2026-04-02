@@ -13,9 +13,9 @@
 namespace mooncake {
 
 std::shared_ptr<ClientBufferAllocator> ClientBufferAllocator::create(
-    size_t size, const std::string& protocol) {
+    size_t size, const std::string& protocol, bool use_spdk_dma) {
     return std::shared_ptr<ClientBufferAllocator>(
-        new ClientBufferAllocator(size, protocol));
+        new ClientBufferAllocator(size, protocol, use_spdk_dma));
 }
 
 std::shared_ptr<ClientBufferAllocator> ClientBufferAllocator::create(
@@ -25,11 +25,15 @@ std::shared_ptr<ClientBufferAllocator> ClientBufferAllocator::create(
 }
 
 ClientBufferAllocator::ClientBufferAllocator(size_t size,
-                                             const std::string& protocol)
-    : protocol(protocol), buffer_size_(size) {
+                                             const std::string& protocol,
+                                             bool use_spdk_dma)
+    : protocol(protocol),
+      buffer_size_(size),
+      use_spdk_dma_(use_spdk_dma) {
     // Align to 64 bytes(cache line size) for better cache performance
     constexpr size_t alignment = 64;
-    buffer_ = allocate_buffer_allocator_memory(size, protocol, alignment);
+    buffer_ = allocate_buffer_allocator_memory(size, protocol, alignment,
+                                               use_spdk_dma_);
     if (!buffer_) {
         throw std::bad_alloc();
     }
@@ -50,7 +54,7 @@ ClientBufferAllocator::ClientBufferAllocator(void* addr, size_t size,
 ClientBufferAllocator::~ClientBufferAllocator() {
     // Free the aligned allocated memory or unmap shared memory
     if (!is_external_memory_ && buffer_) {
-        free_memory(protocol, buffer_);
+        free_memory(protocol, buffer_, use_spdk_dma_);
     }
 }
 

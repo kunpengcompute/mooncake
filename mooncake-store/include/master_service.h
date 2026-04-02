@@ -148,6 +148,15 @@ class MasterService {
     auto GetAllNoFSegments() -> tl::expected<std::vector<NoFSegment>, ErrorCode>;
 
     /**
+     * @brief Query mounted NoF segments by segment name and return their
+     * segment ids together with owner client ids.
+     * @param segment_name Mounted NoF segment name.
+     * @return Matching segment owner info list on success, error code otherwise.
+     */
+    auto GetNoFSegmentsByName(const std::string& segment_name)
+        -> tl::expected<std::vector<NoFSegmentOwnerInfo>, ErrorCode>;
+
+    /**
      * @brief Query a segment's capacity and used size in bytes.
      * Conductor should use these information to schedule new requests.
      * @return ErrorCode::OK if exists

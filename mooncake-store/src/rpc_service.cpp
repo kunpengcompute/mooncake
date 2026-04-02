@@ -693,6 +693,17 @@ tl::expected<std::vector<NoFSegment>, ErrorCode> WrappedMasterService::GetAllNoF
     );
 }
 
+tl::expected<std::vector<NoFSegmentOwnerInfo>, ErrorCode>
+WrappedMasterService::GetNoFSegmentsByName(
+    const std::string& segment_name) {
+    return execute_rpc(
+        "GetNoFSegmentsByName",
+        [&] { return master_service_.GetNoFSegmentsByName(segment_name); },
+        [&](auto& timer) { timer.LogRequest("segment_name=", segment_name); },
+        [] {},
+        [] {});
+}
+
 tl::expected<std::string, ErrorCode> WrappedMasterService::GetFsdir() {
     ScopedVLogTimer timer(1, "GetFsdir");
     timer.LogRequest("action=get_fsdir");
@@ -815,6 +826,9 @@ void RegisterRpcService(
     server.register_handler<&mooncake::WrappedMasterService::UnmountNoFSegment>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::GetAllNoFSegments>(
+        &wrapped_master_service);
+    server.register_handler<
+        &mooncake::WrappedMasterService::GetNoFSegmentsByName>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::Ping>(
         &wrapped_master_service);

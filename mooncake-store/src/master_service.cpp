@@ -470,8 +470,13 @@ auto MasterService::GetAllNoFSegments()
     for (const auto& segment : mounted_segments) {
         result.push_back(segment.segment);
     }
-    
+
     return result;
+}
+
+auto MasterService::GetNoFSegmentsByName(const std::string& segment_name)
+    -> tl::expected<std::vector<NoFSegmentOwnerInfo>, ErrorCode> {
+    return nof_segment_manager_.GetSegmentsByName(segment_name);
 }
 
 auto MasterService::QuerySegments(const std::string& segment)

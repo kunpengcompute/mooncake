@@ -208,8 +208,12 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     // fail in some rdma implementations.
     // Dummy Client can create shm and share it with Real Client, so Real Client
     // can create client buffer allocator on the shared memory later.
-    client_buffer_allocator_ =
-        ClientBufferAllocator::create(local_buffer_size, this->protocol);
+    bool use_spdk_dma_for_client_buffer = false;
+#ifdef USE_NOF
+    use_spdk_dma_for_client_buffer = true;
+#endif
+    client_buffer_allocator_ = ClientBufferAllocator::create(
+        local_buffer_size, this->protocol, use_spdk_dma_for_client_buffer);
     if (local_buffer_size > 0) {
         LOG(INFO) << "Registering local memory: " << local_buffer_size
                   << " bytes";

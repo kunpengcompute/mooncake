@@ -256,7 +256,8 @@ class MasterService {
      * found, ErrorCode::INVALID_WRITE if replica status is invalid
      */
     std::vector<tl::expected<void, ErrorCode>> BatchPutEnd(
-        const UUID& client_id, const std::vector<std::string>& keys);
+        const UUID& client_id, const std::vector<std::string>& keys,
+        ReplicaType replica_type = ReplicaType::ALL);
 
     /**
      * @brief Revoke a batch of put operations
@@ -264,7 +265,8 @@ class MasterService {
      * found, ErrorCode::INVALID_WRITE if replica status is invalid
      */
     std::vector<tl::expected<void, ErrorCode>> BatchPutRevoke(
-        const UUID& client_id, const std::vector<std::string>& keys);
+        const UUID& client_id, const std::vector<std::string>& keys,
+        ReplicaType replica_type = ReplicaType::ALL);
 
     /**
      * @brief Remove an object and its replicas
@@ -433,8 +435,12 @@ class MasterService {
         std::optional<ReplicaStatus> HasDiffRepStatus(
             ReplicaStatus status, ReplicaType replica_type) const {
             for (const auto& replica : replicas) {
-                if (replica.status() != status &&
-                    replica.type() == replica_type) {
+                const bool type_matches =
+                    replica_type == ReplicaType::ALL
+                        ? (replica.type() == ReplicaType::MEMORY ||
+                           replica.type() == ReplicaType::NOF_SSD)
+                        : replica.type() == replica_type;
+                if (replica.status() != status && type_matches) {
                     return replica.status();
                 }
             }
@@ -460,6 +466,12 @@ class MasterService {
             replicas.erase(
                 std::remove_if(replicas.begin(), replicas.end(),
                                [replica_type](const Replica& replica) {
+                                   if (replica_type == ReplicaType::ALL) {
+                                       return replica.type() ==
+                                                  ReplicaType::MEMORY ||
+                                              replica.type() ==
+                                                  ReplicaType::NOF_SSD;
+                                   }
                                    return replica.type() == replica_type;
                                }),
                 replicas.end());

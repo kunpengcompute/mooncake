@@ -172,7 +172,8 @@ class MasterClient {
      * @return ErrorCode indicating success/failure
      */
     [[nodiscard]] std::vector<tl::expected<void, ErrorCode>> BatchPutEnd(
-        const std::vector<std::string>& keys);
+        const std::vector<std::string>& keys,
+        ReplicaType replica_type = ReplicaType::ALL);
 
     /**
      * @brief Revokes a put operation
@@ -189,7 +190,8 @@ class MasterClient {
      * @return ErrorCode indicating success/failure
      */
     [[nodiscard]] std::vector<tl::expected<void, ErrorCode>> BatchPutRevoke(
-        const std::vector<std::string>& keys);
+        const std::vector<std::string>& keys,
+        ReplicaType replica_type = ReplicaType::ALL);
 
     /**
      * @brief Removes an object and all its replicas

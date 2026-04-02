@@ -26,6 +26,8 @@ def main() -> int:
     parser.add_argument("--duration-sec", type=int, default=20)
     parser.add_argument("--sleep-ms", type=int, default=200)
     parser.add_argument("--key-prefix", default="nof-e2e")
+    parser.add_argument("--memory-replica-num", type=int, default=1)
+    parser.add_argument("--nof-replica-num", type=int, default=1)
     args = parser.parse_args()
 
     try:
@@ -48,6 +50,10 @@ def main() -> int:
     if setup_ret != 0:
         return setup_ret
 
+    replicate_config = store.ReplicateConfig()
+    replicate_config.replica_num = args.memory_replica_num
+    replicate_config.nof_replica_num = args.nof_replica_num
+
     deadline = time.time() + args.duration_sec
     seq = 0
     put_ok = 0
@@ -61,7 +67,7 @@ def main() -> int:
         key = f"{args.key_prefix}-{seq}"
         expected = make_payload(seq, args.payload_size)
 
-        put_ret = mc.put(key, expected)
+        put_ret = mc.put(key, expected, replicate_config)
         if put_ret == 0:
             put_ok += 1
             print(f"put_ok seq={seq} key={key} len={len(expected)}", flush=True)

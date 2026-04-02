@@ -23,6 +23,8 @@ HEARTBEAT_TIMEOUT_MS=${HEARTBEAT_TIMEOUT_MS:-500}
 HEARTBEAT_FAILURES=${HEARTBEAT_FAILURES:-3}
 CLIENT_GLOBAL_SEGMENT_SIZE=${CLIENT_GLOBAL_SEGMENT_SIZE:-67108864}
 CLIENT_LOCAL_BUFFER_SIZE=${CLIENT_LOCAL_BUFFER_SIZE:-33554432}
+CLIENT_MEMORY_REPLICA_NUM=${CLIENT_MEMORY_REPLICA_NUM:-1}
+CLIENT_NOF_REPLICA_NUM=${CLIENT_NOF_REPLICA_NUM:-1}
 PRE_FAULT_SUCCESS_TARGET=${PRE_FAULT_SUCCESS_TARGET:-3}
 
 TARGET_PID=""
@@ -121,6 +123,8 @@ PYTHONPATH="$BUILD_DIR/mooncake-integration" python3 "$SCRIPT_DIR/store_client_e
   --master-server "$MASTER_RPC" \
   --global-segment-size "$CLIENT_GLOBAL_SEGMENT_SIZE" \
   --local-buffer-size "$CLIENT_LOCAL_BUFFER_SIZE" \
+  --memory-replica-num "$CLIENT_MEMORY_REPLICA_NUM" \
+  --nof-replica-num "$CLIENT_NOF_REPLICA_NUM" \
   --payload-size "$PAYLOAD_SIZE" \
   --duration-sec "$CLIENT_DURATION" \
   --sleep-ms "$CLIENT_SLEEP_MS" \
@@ -214,6 +218,8 @@ fi
   echo "pre_fault_line_count=$pre_fault_line_count"
   echo "post_unmount_line_count=$post_unmount_line_count"
   echo "client_global_segment_size=$CLIENT_GLOBAL_SEGMENT_SIZE"
+  echo "client_memory_replica_num=$CLIENT_MEMORY_REPLICA_NUM"
+  echo "client_nof_replica_num=$CLIENT_NOF_REPLICA_NUM"
 } >"$LOG_DIR/summary.log"
 
 cat "$LOG_DIR/summary.log"

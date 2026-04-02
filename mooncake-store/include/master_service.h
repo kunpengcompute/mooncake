@@ -142,6 +142,12 @@ class MasterService {
     auto GetAllSegments() -> tl::expected<std::vector<std::string>, ErrorCode>;
 
     /**
+     * @brief Fetch all mounted NoF segments.
+     * @return std::vector<MountedNoFSegmentSnapshot> on success, error code otherwise.
+     */
+    auto GetAllNoFSegments() -> tl::expected<std::vector<NoFSegment>, ErrorCode>;
+
+    /**
      * @brief Query a segment's capacity and used size in bytes.
      * Conductor should use these information to schedule new requests.
      * @return ErrorCode::OK if exists

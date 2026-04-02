@@ -680,6 +680,18 @@ tl::expected<void, ErrorCode> WrappedMasterService::UnmountNoFSegment(
         [] { MasterMetricManager::instance().inc_unmount_nof_segment_failures(); });
 }
 
+tl::expected<std::vector<NoFSegment>, ErrorCode> WrappedMasterService::GetAllNoFSegments() {
+    return execute_rpc(
+        "GetAllNoFSegments",
+        [&] { return master_service_.GetAllNoFSegments(); },
+        [&](auto& timer) {
+            timer.LogRequest("Get all NoF segments");
+        },
+        [] { }, // Empty lambda for request metric
+        [] { }  // Empty lambda for failure metric
+    );
+}
+
 tl::expected<std::string, ErrorCode> WrappedMasterService::GetFsdir() {
     ScopedVLogTimer timer(1, "GetFsdir");
     timer.LogRequest("action=get_fsdir");
@@ -800,6 +812,8 @@ void RegisterRpcService(
     server.register_handler<&mooncake::WrappedMasterService::UnmountSegment>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::UnmountNoFSegment>(
+        &wrapped_master_service);
+    server.register_handler<&mooncake::WrappedMasterService::GetAllNoFSegments>(
         &wrapped_master_service);
     server.register_handler<&mooncake::WrappedMasterService::Ping>(
         &wrapped_master_service);

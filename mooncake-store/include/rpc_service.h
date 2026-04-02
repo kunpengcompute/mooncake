@@ -12,6 +12,7 @@
 #include "types.h"
 #include "rpc_types.h"
 #include "master_config.h"
+#include "segment.h"
 
 namespace mooncake {
 
@@ -99,6 +100,8 @@ class WrappedMasterService {
 
     tl::expected<void, ErrorCode> UnmountNoFSegment(const UUID& segment_id,
                                                  const UUID& client_id);
+
+   [[nodiscard]] tl::expected<std::vector<NoFSegment>, ErrorCode> GetAllNoFSegments();
 
     tl::expected<std::string, ErrorCode> GetFsdir();
 

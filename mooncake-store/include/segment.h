@@ -60,6 +60,23 @@ struct MountedNoFSegmentSnapshot {
     std::chrono::steady_clock::time_point last_alive_time;
 };
 
+/**
+ * @brief Stream operator for MountedNoFSegmentSnapshot
+ */
+inline std::ostream& operator<<(std::ostream& os,
+                                const MountedNoFSegmentSnapshot& snapshot) noexcept {
+    os << "{segment_id=" << snapshot.segment_id
+       << ", client_id=" << snapshot.client_id
+       << ", segment.id=" << snapshot.segment.id
+       << ", segment.name=" << snapshot.segment.name
+       << ", segment.base=" << snapshot.segment.base
+       << ", segment.size=" << snapshot.segment.size
+       << ", segment.te_endpoint=" << snapshot.segment.te_endpoint
+       << ", status=" << snapshot.status
+       << "}";
+    return os;
+}
+
 struct LocalDiskSegment {
     mutable Mutex offloading_mutex_;
     bool enable_offloading;

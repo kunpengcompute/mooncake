@@ -137,6 +137,11 @@ struct RpcNameTraits<&WrappedMasterService::UnmountNoFSegment> {
 };
 
 template <>
+struct RpcNameTraits<&WrappedMasterService::GetAllNoFSegments> {
+    static constexpr const char* value = "GetAllNoFSegments";
+};
+
+template <>
 struct RpcNameTraits<&WrappedMasterService::Ping> {
     static constexpr const char* value = "Ping";
 };
@@ -573,6 +578,15 @@ tl::expected<void, ErrorCode> MasterClient::UnmountNoFSegment(
 
     auto result = invoke_rpc<&WrappedMasterService::UnmountNoFSegment, void>(
         segment_id, client_id_);
+    timer.LogResponseExpected(result);
+    return result;
+}
+
+tl::expected<std::vector<NoFSegment>, ErrorCode> MasterClient::GetAllNoFSegments() {
+    ScopedVLogTimer timer(1, "MasterClient::GetAllNoFSegments");
+    timer.LogRequest("Get all NoF segments, client_id=", client_id_);
+
+    auto result = invoke_rpc<&WrappedMasterService::GetAllNoFSegments, std::vector<NoFSegment>>();
     timer.LogResponseExpected(result);
     return result;
 }

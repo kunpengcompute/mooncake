@@ -59,4 +59,66 @@ int NoFRegisterClient::set_register(
     return OPERATION_OK;
   }
 
+
+int NoFRegisterClient::set_unregister_by_endpoint(const std::string &nqn, size_t nsid, const std::string &traddr, size_t trsvcid, const std::string &master_server_addr) {
+    LOG(INFO) << "Unregistering SSD by endpoint: nqn=" << nqn
+              << ",nsid=" << nsid
+              << ",traddr=" << traddr
+              << ",trsvcid=" << trsvcid
+              << ",master=" << master_server_addr;
+
+    // Connect to master server
+    auto err = master_client_.Connect(master_server_addr);
+    if (err != ErrorCode::OK) {
+        LOG(ERROR) << "Failed to connect to master: " << static_cast<int>(err);
+        return OPERATION_FAILED;
+    }
+
+    // Build the te_endpoint string to match registered segments
+    std::string trtype = "RDMA"; // Default transport type
+    std::string te_endpoint = "traddr:" + traddr + " trsvcid:" + std::to_string(trsvcid) +
+                              " subnqn:" + nqn + " trtype:" + trtype +
+                              " adrfam:IPv4 ns:" + std::to_string(nsid);
+
+    LOG(INFO) << "Built te_endpoint: " << te_endpoint;
+
+    // Get all mounted NoF segments from master
+    auto all_segments_result = master_client_.GetAllNoFSegments();
+    if (!all_segments_result) {
+        LOG(ERROR) << "Failed to get all NoF segments: " << static_cast<int>(all_segments_result.error());
+        return OPERATION_FAILED;
+    }
+
+    std::vector<NoFSegment> all_segments = all_segments_result.value();
+    LOG(INFO) << "Retrieved " << all_segments.size() << " mounted NoF segments";
+
+    // Find segments that match our te_endpoint
+    std::vector<UUID> matching_segments;
+    for (const auto& segment : all_segments) {
+        if (segment.te_endpoint == te_endpoint) {
+            matching_segments.push_back(segment.id);
+            LOG(INFO) << "Found matching segment: id=" << segment.id << ", te_endpoint=" << segment.te_endpoint;
+        }
+    }
+
+    if (matching_segments.empty()) {
+        LOG(ERROR) << "No segment found for te_endpoint: " << te_endpoint;
+        return OPERATION_FAILED;
+    }
+
+    // Unmount all matching segments
+    bool all_unmounted = true;
+    for (const auto& segment_id : matching_segments) {
+        auto unmount_result = master_client_.UnmountNoFSegment(segment_id);
+        if (!unmount_result) {
+            LOG(ERROR) << "Failed to unmount segment " << segment_id << ": " << static_cast<int>(unmount_result.error());
+            all_unmounted = false;
+        } else {
+            LOG(INFO) << "Successfully unmounted segment " << segment_id;
+        }
+    }
+
+    return all_unmounted ? OPERATION_OK : OPERATION_FAILED;
+}
+
 }

@@ -279,20 +279,30 @@ ErrorCode ScopedNoFSegmentAccess::MountSegment(const NoFSegment& segment,
         return ErrorCode::INVALID_PARAMS;
     }
 
-    // Check if segment already exists
-    auto exist_segment_it =
-        nof_segment_manager_->mounted_segments_.find(segment.id);
+    // Check if segment already exists by ID
+    auto exist_segment_it = nof_segment_manager_->mounted_segments_.find(segment.id);
     if (exist_segment_it != nof_segment_manager_->mounted_segments_.end()) {
         auto& exist_segment = exist_segment_it->second;
         if (exist_segment.status == SegmentStatus::OK) {
             LOG(WARNING) << "NoF segment mount: " << "segment_name=" << segment.name
-                         << ", warn=segment_already_exists";
+                         << ", warn=segment_already_exists_by_id";
             return ErrorCode::SEGMENT_ALREADY_EXISTS;
         } else {
             LOG(ERROR) << "NoF segment mount: " << "segment_name=" << segment.name
                        << ", error=segment_already_exists_but_not_ok"
                        << ", status=" << exist_segment.status;
             return ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS;
+        }
+    }
+    
+    // Check if segment already exists by te_endpoint (same SSD but different UUID)
+    for (const auto& [existing_id, existing_segment] : nof_segment_manager_->mounted_segments_) {
+        if (existing_segment.status == SegmentStatus::OK && 
+            existing_segment.segment.te_endpoint == segment.te_endpoint) {
+            LOG(WARNING) << "NoF segment mount: " << "segment_name=" << segment.name
+                        << ", endpoint=" << segment.te_endpoint
+                        << ", warn=segment_already_exists_with_different_id";
+            return ErrorCode::SEGMENT_ALREADY_EXISTS;
         }
     }
 

@@ -446,6 +446,19 @@ auto MasterService::GetAllSegments()
     return all_segments;
 }
 
+auto MasterService::GetAllNoFSegments()
+    -> tl::expected<std::vector<NoFSegment>, ErrorCode> {
+    std::vector<MountedNoFSegmentSnapshot> mounted_segments;
+    nof_segment_manager_.GetMountedSegmentsSnapshot(mounted_segments);
+    
+    std::vector<NoFSegment> result;
+    for (const auto& segment : mounted_segments) {
+        result.push_back(segment.segment);
+    }
+    
+    return result;
+}
+
 auto MasterService::QuerySegments(const std::string& segment)
     -> tl::expected<std::pair<size_t, size_t>, ErrorCode> {
     ScopedSegmentAccess segment_access = segment_manager_.getSegmentAccess();

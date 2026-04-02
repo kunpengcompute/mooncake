@@ -13,6 +13,7 @@
 #include "types.h"
 #include "rpc_types.h"
 #include "master_metric_manager.h"
+#include "segment.h"
 
 namespace mooncake {
 
@@ -268,6 +269,12 @@ class MasterClient {
      */
     [[nodiscard]] tl::expected<void, ErrorCode> UnmountNoFSegment(
         const UUID& segment_id);
+
+    /**
+     * @brief Gets all mounted NoF ssd segments from master
+     * @return tl::expected<std::vector<MountedNoFSegmentSnapshot>, ErrorCode> containing all mounted segments
+     */
+    [[nodiscard]] tl::expected<std::vector<NoFSegment>, ErrorCode> GetAllNoFSegments();
 
     /**
      * @brief Gets the cluster ID for the current client to use as subdirectory

@@ -42,14 +42,17 @@ int NoFRegisterClient::set_register(
         trtype = "RDMA";
     }
 
+    std::string te_endpoint = "traddr:" + traddr + " trsvcid:" +
+                              std::to_string(trsvcid) + " subnqn:" + nqn +
+                              " trtype:" + trtype + " adrfam:IPv4 ns:" +
+                              std::to_string(nsid);
+
     NoFSegment segment;
     segment.base = base;
     segment.size = size;
     segment.id = generate_uuid();
-    segment.name = nqn;
-    segment.te_endpoint = "traddr:" + traddr + " trsvcid:" + std::to_string(trsvcid) +
-                          " subnqn:" + nqn + " trtype:" + trtype +
-                          " adrfam:IPv4 ns:" + std::to_string(nsid);
+    segment.name = te_endpoint;
+    segment.te_endpoint = te_endpoint;
     auto mount_result = master_client_.MountNoFSegment(segment);
     if (!mount_result) {
         LOG(ERROR) << "mount_segment_to_master_failed ";
@@ -74,33 +77,35 @@ int NoFRegisterClient::set_unregister_by_endpoint(const std::string &nqn, size_t
         return OPERATION_FAILED;
     }
 
+    const char *trtype_env = std::getenv("MC_NOF_TRTYPE");
+    std::string trtype = trtype_env ? trtype_env : "RDMA";
+    std::transform(trtype.begin(), trtype.end(), trtype.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    if (trtype != "RDMA" && trtype != "TCP") {
+        LOG(WARNING) << "Invalid MC_NOF_TRTYPE=" << trtype
+                     << ", fallback to RDMA";
+        trtype = "RDMA";
+    }
+
     // Build the te_endpoint string to match registered segments
-    std::string trtype = "RDMA"; // Default transport type
     std::string te_endpoint = "traddr:" + traddr + " trsvcid:" + std::to_string(trsvcid) +
                               " subnqn:" + nqn + " trtype:" + trtype +
                               " adrfam:IPv4 ns:" + std::to_string(nsid);
 
     LOG(INFO) << "Built te_endpoint: " << te_endpoint;
 
-    // Get all mounted NoF segments from master
-    auto all_segments_result = master_client_.GetAllNoFSegments();
-    if (!all_segments_result) {
-        LOG(ERROR) << "Failed to get all NoF segments: " << static_cast<int>(all_segments_result.error());
+    auto matching_segments_result =
+        master_client_.GetNoFSegmentsByName(te_endpoint);
+    if (!matching_segments_result) {
+        LOG(ERROR) << "Failed to get NoF segments by name: "
+                   << static_cast<int>(matching_segments_result.error());
         return OPERATION_FAILED;
     }
 
-    std::vector<NoFSegment> all_segments = all_segments_result.value();
-    LOG(INFO) << "Retrieved " << all_segments.size() << " mounted NoF segments";
-
-    // Find segments that match our te_endpoint
-    std::vector<UUID> matching_segments;
-    for (const auto& segment : all_segments) {
-        if (segment.te_endpoint == te_endpoint) {
-            matching_segments.push_back(segment.id);
-            LOG(INFO) << "Found matching segment: id=" << segment.id << ", te_endpoint=" << segment.te_endpoint;
-        }
-    }
-
+    std::vector<NoFSegmentOwnerInfo> matching_segments =
+        matching_segments_result.value();
+    LOG(INFO) << "Retrieved " << matching_segments.size()
+              << " mounted NoF segments for te_endpoint";
     if (matching_segments.empty()) {
         LOG(ERROR) << "No segment found for te_endpoint: " << te_endpoint;
         return OPERATION_FAILED;
@@ -108,13 +113,29 @@ int NoFRegisterClient::set_unregister_by_endpoint(const std::string &nqn, size_t
 
     // Unmount all matching segments
     bool all_unmounted = true;
-    for (const auto& segment_id : matching_segments) {
-        auto unmount_result = master_client_.UnmountNoFSegment(segment_id);
+    for (const auto& segment : matching_segments) {
+        LOG(INFO) << "Found matching segment: id=" << segment.segment_id
+                  << ", owner_client_id=" << segment.client_id;
+        MasterClient owner_master_client(segment.client_id, nullptr);
+        err = owner_master_client.Connect(master_server_addr);
+        if (err != ErrorCode::OK) {
+            LOG(ERROR) << "Failed to connect owner master client for segment "
+                       << segment.segment_id << ": " << static_cast<int>(err);
+            all_unmounted = false;
+            continue;
+        }
+
+        auto unmount_result =
+            owner_master_client.UnmountNoFSegment(segment.segment_id);
         if (!unmount_result) {
-            LOG(ERROR) << "Failed to unmount segment " << segment_id << ": " << static_cast<int>(unmount_result.error());
+            LOG(ERROR) << "Failed to unmount segment " << segment.segment_id
+                       << ": "
+                       << static_cast<int>(unmount_result.error());
             all_unmounted = false;
         } else {
-            LOG(INFO) << "Successfully unmounted segment " << segment_id;
+            LOG(INFO) << "Successfully unmounted segment "
+                      << segment.segment_id
+                      << ", owner_client_id=" << segment.client_id;
         }
     }
 

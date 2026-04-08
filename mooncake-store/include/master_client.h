@@ -279,6 +279,16 @@ class MasterClient {
     [[nodiscard]] tl::expected<std::vector<NoFSegment>, ErrorCode> GetAllNoFSegments();
 
     /**
+     * @brief Gets all mounted NoF segments that match a segment name together
+     * with their owner client ids.
+     * @param segment_name Mounted NoF segment name
+     * @return Matching segment owner info list
+     */
+    [[nodiscard]] tl::expected<std::vector<NoFSegmentOwnerInfo>, ErrorCode>
+    GetNoFSegmentsByName(
+        const std::string& segment_name);
+
+    /**
      * @brief Gets the cluster ID for the current client to use as subdirectory
      * name
      * @return GetClusterIdResponse containing the cluster ID

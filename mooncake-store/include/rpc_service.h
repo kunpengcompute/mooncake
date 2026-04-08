@@ -105,6 +105,10 @@ class WrappedMasterService {
 
    [[nodiscard]] tl::expected<std::vector<NoFSegment>, ErrorCode> GetAllNoFSegments();
 
+   [[nodiscard]] tl::expected<std::vector<NoFSegmentOwnerInfo>, ErrorCode>
+   GetNoFSegmentsByName(
+       const std::string& segment_name);
+
     tl::expected<std::string, ErrorCode> GetFsdir();
 
     tl::expected<GetStorageConfigResponse, ErrorCode> GetStorageConfig();

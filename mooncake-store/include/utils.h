@@ -126,9 +126,11 @@ std::string expected_to_str(const tl::expected<T, ErrorCode>& expected) {
 */
 void* allocate_buffer_allocator_memory(
     size_t total_size, const std::string& protocol = "",
-    size_t alignment = facebook::cachelib::Slab::kSize);
+    size_t alignment = facebook::cachelib::Slab::kSize,
+    bool use_spdk_dma = false);
 
-void free_memory(const std::string& protocol, void* ptr);
+void free_memory(const std::string& protocol, void* ptr,
+                 bool use_spdk_dma = false);
 
 [[nodiscard]] inline std::string byte_size_to_string(uint64_t bytes) {
     const double KB = 1024.0;

@@ -2288,9 +2288,9 @@ void MasterService::NofHeartbeatThreadFunc() {
                         spread_ms = static_cast<int64_t>(
                             (interval_ms.count() * i) / ok_segments.size());
                     }
-                    state.last_success_at = snapshot.last_alive_time;
+                    state.last_success_at = now;
                     state.next_probe_at =
-                        snapshot.last_alive_time + nof_heartbeat_interval_sec_ +
+                        now + nof_heartbeat_interval_sec_ +
                         std::chrono::milliseconds(spread_ms);
                 }
             }
@@ -2344,23 +2344,6 @@ void MasterService::NofHeartbeatThreadFunc() {
             MasterMetricManager::instance().inc_nof_heartbeat_success_total();
             auto success_time = std::chrono::steady_clock::now();
             {
-                ScopedNoFSegmentAccess nof_segment_access =
-                    nof_segment_manager_.getNoFSegmentAccess();
-                auto refresh_result = nof_segment_access.RefreshAliveTime(
-                    probe_target->segment_id, success_time);
-                if (refresh_result != ErrorCode::OK &&
-                    refresh_result != ErrorCode::SEGMENT_NOT_FOUND &&
-                    refresh_result != ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS) {
-                    LOG(WARNING) << "segment_id=" << probe_target->segment_id
-                                 << ", segment_name="
-                                 << probe_target->segment.name
-                                 << ", endpoint="
-                                 << probe_target->segment.te_endpoint
-                                 << ", action=refresh_nof_segment_alive_time_failed"
-                                 << ", error=" << refresh_result;
-                }
-            }
-            {
                 std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
                 auto it = nof_heartbeat_states_.find(probe_target->segment_id);
                 if (it != nof_heartbeat_states_.end()) {
@@ -2397,7 +2380,7 @@ void MasterService::NofHeartbeatThreadFunc() {
                 it->second.last_error_reason = error_reason;
                 it->second.next_probe_at = failure_time + nof_heartbeat_interval_sec_;
                 should_unmount =
-                    failure_time - probe_target->last_alive_time >= alive_timeout;
+                    failure_time - it->second.last_success_at >= alive_timeout;
             }
         }
 

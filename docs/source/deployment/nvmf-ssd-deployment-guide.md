@@ -52,10 +52,15 @@ mooncake_master --rpc_address=192.168.65.81
 ```bash
 python3 -m mooncake.http_metadata_server --host=192.168.65.81 --port=8080
 ```
+启动可能出现 aiohttp 相关错误，需安装 aiohttp 库：
+```bash
+pip3 install aiohttp
+```
 
 ### 3.4 部署 Store 服务
 
 #### 配置文件 `store_service.json`
+在 `home` 目录下创建 `store_service.json` 配置文件：
 ```json
 {
   "local_hostname": "localhost",
@@ -72,15 +77,25 @@ python3 -m mooncake.http_metadata_server --host=192.168.65.81 --port=8080
 - `device_name`：可通过 `ibv_devices` 命令查看 192.168.65.81 节点的网卡名称
 
 #### 启动服务
+store 服务启动会初始化 spdk 环境，需要在 store 服务节点（192.168.65.81）上配置大页内存：
 ```bash
-python3 -m mooncake.mooncake_store_service --config=store_service.json --port=8081
+echo 512 > /proc/sys/vm/nr_hugepages
 ```
+说明：启动只需要少量大页内存，建议启动时配置 512 个大页内存即可。
+
+启动 store 服务：
+```bash
+python3 -m mooncake.mooncake_store_service --config=/home/store_service.json --port=8081
+```
+提示：如启动出现 Timeout 错误，需检查 192.168.65.81 节点是否配置了代理。 如配置了代理，需取消代理配置。
 
 ## 4. NVMF-SSD 池部署
 
 ### 4.1 前置条件
 1. 在 Mooncake 节点（192.168.65.81）配置到 SSD 池节点（192.168.65.56 和 192.168.65.57）的免密登录
+参考 [配置免密登录](https://www.hikunpeng.com/document/detail/zh/kunpengsdss/ecosystemEnable/Ceph/kunpengcephblock_04_0017_0.html)
 2. SSD 池节点需提前编译好 SPDK
+参考 [SPDK 编译安装](https://github.com/spdk/spdk/blob/master/README.md#build)
 
 ### 4.2 安装 SSH 依赖
 ```bash

@@ -121,6 +121,7 @@ SYSTEM_PACKAGES="@development \
                  liburing-devel \
                  jemalloc-devel \
                  pkgconf-pkg-config \
+                 elfutils-libelf-devel \
                  patchelf"
 
 yum install -y $SYSTEM_PACKAGES

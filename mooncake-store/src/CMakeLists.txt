@@ -60,6 +60,7 @@ set(SPDK_STATIC_LIBS
     ${SPDK_LIB_DIR}/libspdk_event.a
 	${SPDK_LIB_DIR}/libspdk_rdma.a
     ${SPDK_LIB_DIR}/libspdk_nvme.a
+    ${SPDK_LIB_DIR}/libspdk_sock_posix.a
 	-Wl,--no-whole-archive  # 恢复按需链接
 	${SPDK_LIB_DIR}/libspdk_vfio_user.a
 	${SPDK_LIB_DIR}/libspdk_dma.a
@@ -100,7 +101,7 @@ set(SPDK_STATIC_LIBS
     ${DPDK_LIB_DIR}/librte_rcu.a
 
     # 系统库
-    pthread dl numa rt m uuid crypto aio z elf ibverbs rdmacm
+    pthread dl numa rt m uuid crypto aio z elf ibverbs rdmacm ssl
 )
 
 target_link_libraries(mooncake_store

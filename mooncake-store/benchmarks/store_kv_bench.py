@@ -249,49 +249,27 @@ def make_lane_hostname(base_hostname: str, lane_id: int) -> str:
 
 
 class StoreSession:
-    def __init__(self, args: argparse.Namespace, lane_id: int, payload_factory: PayloadFactory):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        lane_id: int,
+        payload_factory: PayloadFactory,
+        store_module,
+        store_obj,
+        zcopy: Optional["ZcopyBufferView"] = None,
+    ):
         self.args = args
         self.lane_id = lane_id
         self.payload_factory = payload_factory
-
-        import store  # type: ignore
-
-        self._store_module = store
-        self.store = store.MooncakeDistributedStore()
-        self.config = store.ReplicateConfig()
+        self._store_module = store_module
+        self.store = store_obj
+        self.config = self._store_module.ReplicateConfig()
         self.config.replica_num = args.memory_replica_num
         self.config.nof_replica_num = args.nof_replica_num
-
-        setup_ret = self.store.setup(
-            make_lane_hostname(args.local_hostname, lane_id),
-            args.metadata_server,
-            args.global_segment_size,
-            args.local_buffer_size,
-            args.protocol,
-            args.device_name,
-            args.master_server,
-        )
-        if setup_ret != 0:
-            raise RuntimeError(f"setup failed for lane {lane_id}: {setup_ret}")
-
-        self._zcopy: Optional[ZcopyBufferSet] = None
-        if self.args.io_api == "zcopy":
-            self._zcopy = ZcopyBufferSet(self.store, self.args.value_size, max(1, self.args.batch_size))
+        self._zcopy = zcopy
 
     def close(self) -> None:
-        if self._zcopy is not None:
-            self._zcopy.close()
-            self._zcopy = None
-        if hasattr(self.store, "close"):
-            try:
-                self.store.close()
-            except Exception:
-                LOG.debug("store close failed for lane %d", self.lane_id, exc_info=True)
-        elif hasattr(self.store, "tearDownAll"):
-            try:
-                self.store.tearDownAll()
-            except Exception:
-                LOG.debug("tearDownAll failed for lane %d", self.lane_id, exc_info=True)
+        self._zcopy = None
 
     def put_ids(self, object_ids: List[int]) -> RequestResult:
         keys = [make_key(self.args.key_prefix, self.args.key_size, object_id) for object_id in object_ids]
@@ -401,47 +379,158 @@ class StoreSession:
         return list(self.store.batch_get_into(keys, ptrs, sizes))
 
 
-class ZcopyBufferSet:
-    def __init__(self, store_obj, value_size: int, slots: int):
+class ZcopyBufferPool:
+    def __init__(self, store_module, store_obj, value_size: int, slots: int):
+        self.store_module = store_module
         self.store = store_obj
         self.value_size = value_size
         self.slots = slots
-        self.write_buffers = [ctypes.create_string_buffer(value_size) for _ in range(slots)]
-        self.read_buffers = [ctypes.create_string_buffer(value_size) for _ in range(slots)]
-        self.write_ptrs = [ctypes.addressof(buf) for buf in self.write_buffers]
-        self.read_ptrs = [ctypes.addressof(buf) for buf in self.read_buffers]
-        self._registered_ptrs: List[int] = []
+        self.total_size = self.value_size * self.slots
+        self._alloc_fn = None
+        self._free_fn = None
+        self._registered = False
+        self.base_ptr = 0
 
-        for ptr in self.write_ptrs + self.read_ptrs:
-            ret = self.store.register_buffer(ptr, self.value_size)
-            if ret != 0:
-                raise RuntimeError(f"register_buffer failed for ptr={ptr}: {ret}")
-            self._registered_ptrs.append(ptr)
+        alloc_addr = getattr(self.store_module, "get_alloc_func_addr", None)
+        free_addr = getattr(self.store_module, "get_free_func_addr", None)
+        if alloc_addr is None or free_addr is None:
+            raise RuntimeError("store module does not expose hugepage alloc/free helpers")
+
+        self._alloc_fn = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)(
+            self.store_module.get_alloc_func_addr()
+        )
+        self._free_fn = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(
+            self.store_module.get_free_func_addr()
+        )
+
+        raw_ptr = self._alloc_fn(self.total_size)
+        self.base_ptr = ctypes.cast(raw_ptr, ctypes.c_void_p).value or 0
+        if self.base_ptr == 0:
+            raise RuntimeError(
+                f"direct hugepage alloc failed for zcopy pool: size={self.total_size}"
+            )
+        ret = self.store.register_buffer(self.base_ptr, self.total_size)
+        if ret != 0:
+            failed_ptr = self.base_ptr
+            self._free_fn(ctypes.c_void_p(self.base_ptr))
+            self.base_ptr = 0
+            raise RuntimeError(
+                f"register_buffer failed for direct zcopy pool ptr={failed_ptr}: {ret}"
+            )
+        self._registered = True
+        self._buffer = (ctypes.c_ubyte * self.total_size).from_address(self.base_ptr)
 
     def close(self) -> None:
-        for ptr in reversed(self._registered_ptrs):
-            try:
-                self.store.unregister_buffer(ptr)
-            except Exception:
-                LOG.debug("unregister_buffer failed for ptr=%s", ptr, exc_info=True)
-        self._registered_ptrs.clear()
+        self._buffer = None
+        if self.base_ptr:
+            if self._registered:
+                try:
+                    self.store.unregister_buffer(self.base_ptr)
+                except Exception:
+                    LOG.debug("unregister_buffer failed for direct zcopy pool ptr=%s", self.base_ptr, exc_info=True)
+                self._registered = False
+            if self._free_fn is not None:
+                self._free_fn(ctypes.c_void_p(self.base_ptr))
+            self.base_ptr = 0
+
+    def slot_ptr(self, slot: int) -> int:
+        if slot < 0 or slot >= self.slots:
+            raise IndexError(f"zcopy slot {slot} is out of range [0, {self.slots})")
+        return self.base_ptr + slot * self.value_size
+
+
+class ZcopyBufferView:
+    def __init__(self, pool: ZcopyBufferPool, slot_offset: int, slots: int):
+        self.pool = pool
+        self.slot_offset = slot_offset
+        self.slots = slots
+
+    def _slot_ptr(self, slot: int) -> int:
+        if slot < 0 or slot >= self.slots:
+            raise IndexError(f"zcopy view slot {slot} is out of range [0, {self.slots})")
+        return self.pool.slot_ptr(self.slot_offset + slot)
 
     def fill_write_buffers(self, payloads: List[bytes]) -> List[int]:
         ptrs: List[int] = []
         for slot, payload in enumerate(payloads):
-            ctypes.memmove(self.write_ptrs[slot], payload, len(payload))
-            ptrs.append(self.write_ptrs[slot])
+            ptr = self._slot_ptr(slot)
+            ctypes.memmove(ptr, payload, len(payload))
+            ptrs.append(ptr)
         return ptrs
 
     def prepare_read_buffers(self, slot_count: int) -> List[int]:
         ptrs: List[int] = []
         for slot in range(slot_count):
-            ctypes.memset(self.read_ptrs[slot], 0, self.value_size)
-            ptrs.append(self.read_ptrs[slot])
+            ptr = self._slot_ptr(slot)
+            ctypes.memset(ptr, 0, self.pool.value_size)
+            ptrs.append(ptr)
         return ptrs
 
     def read_bytes(self, slot: int, size: int) -> bytes:
-        return ctypes.string_at(self.read_ptrs[slot], size)
+        return ctypes.string_at(self._slot_ptr(slot), size)
+
+
+class StoreRuntime:
+    def __init__(self, args: argparse.Namespace, lane_count: int):
+        import store  # type: ignore
+
+        self.lane_count = lane_count
+        self.store_module = store
+        self.store = store.MooncakeDistributedStore()
+        setup_ret = self.store.setup(
+            args.local_hostname,
+            args.metadata_server,
+            args.global_segment_size,
+            args.local_buffer_size,
+            args.protocol,
+            args.device_name,
+            args.master_server,
+        )
+        if setup_ret != 0:
+            raise RuntimeError(f"setup failed: {setup_ret}")
+
+        self.zcopy_pool: Optional[ZcopyBufferPool] = None
+        if args.io_api == "zcopy":
+            slots = max(1, args.batch_size) * lane_count
+            self.zcopy_pool = ZcopyBufferPool(
+                self.store_module, self.store, args.value_size, slots
+            )
+
+    def make_session(
+        self,
+        args: argparse.Namespace,
+        lane_id: int,
+        payload_factory: PayloadFactory,
+    ) -> StoreSession:
+        zcopy_view: Optional[ZcopyBufferView] = None
+        if self.zcopy_pool is not None:
+            slots_per_lane = max(1, args.batch_size)
+            zcopy_view = ZcopyBufferView(
+                self.zcopy_pool, lane_id * slots_per_lane, slots_per_lane
+            )
+        return StoreSession(
+            args,
+            lane_id,
+            payload_factory,
+            self.store_module,
+            self.store,
+            zcopy_view,
+        )
+
+    def close(self) -> None:
+        if self.zcopy_pool is not None:
+            self.zcopy_pool.close()
+            self.zcopy_pool = None
+        if hasattr(self.store, "close"):
+            try:
+                self.store.close()
+            except Exception:
+                LOG.debug("shared store close failed", exc_info=True)
+        elif hasattr(self.store, "tearDownAll"):
+            try:
+                self.store.tearDownAll()
+            except Exception:
+                LOG.debug("shared tearDownAll failed", exc_info=True)
 
 
 def merge_stats(name: str, stats_list: List[PhaseStats]) -> PhaseStats:
@@ -547,6 +636,7 @@ class BenchmarkRunner:
         self.dataset = DatasetState(args.object_id_start)
         self.lane_count = args.numjobs * args.iodepth
         self._sessions: Optional[List[StoreSession]] = None
+        self._runtime: Optional[StoreRuntime] = None
         self._validate_args()
 
     def _validate_args(self) -> None:
@@ -591,18 +681,21 @@ class BenchmarkRunner:
 
     def _make_sessions(self) -> List[StoreSession]:
         if self._sessions is None:
+            self._runtime = StoreRuntime(self.args, self.lane_count)
             self._sessions = [
-                StoreSession(self.args, lane_id, self.payload_factory)
+                self._runtime.make_session(self.args, lane_id, self.payload_factory)
                 for lane_id in range(self.lane_count)
             ]
         return self._sessions
 
     def close(self) -> None:
-        if self._sessions is None:
-            return
-        for session in self._sessions:
-            session.close()
-        self._sessions = None
+        if self._sessions is not None:
+            for session in self._sessions:
+                session.close()
+            self._sessions = None
+        if self._runtime is not None:
+            self._runtime.close()
+            self._runtime = None
 
     def _phase_gap(self, label: str) -> None:
         mode = self.args.phase_gap_mode

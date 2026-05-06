@@ -190,16 +190,69 @@ python3 -m mooncake.mooncake_ssd_unregister \
 | `--duration_sec` | 测试时长（秒） |
 
 ### 7.2 VLLM+LMCache+Mooncake 端到端测试
+在 192.168.65.81 节点部署 VLLM 服务，并配置 LMCache 插件。
+192.168.65.81 作为推理节点，需要配置显卡资源(本文档以 1 张 Nvidia A100 显卡为例)。
+#### 安装 Nvidia 驱动
+下载并安装显卡对应的 CUDA 驱动，根据 GPU 型号选择合适的驱动版本。参考 [Nvidia 驱动安装](https://www.nvidia.com/Download/index.aspx) A100 显卡对应的 CUDA 驱动我们选择版本为 12.9.0
 
-#### 前置条件
-- 192.168.65.81 节点已成功部署 VLLM 服务
+下载 CUDA 12.9.0 驱动：
+```bash
+wget https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/cuda_12.9.0_575.51.03_linux_sbsa.run
+```
+安装 CUDA 12.9.0 驱动：
+```bash
+sudo sh cuda_12.9.9_575.51.03_linux_sbsa.run
+```
+
+#### 安装 pytorch 及 torch 相关库
+用一个干净的python环境安装pytorch及torch相关库,使用 conda 构建一个新python 3.11的环境
+下载conda安装脚本：
+```bash
+wget https://repo.anaconda.com/archive/Anaconda3-2025.05-Linux-aarch64.sh
+```
+安装conda：
+```bash
+bash Anaconda3-2025.05-Linux-aarch64.sh
+```
+重启shell会话，使conda生效：
+```bash
+source /root/anaconda3/etc/profile.d/conda.sh
+```
+创建新的python 3.11环境：
+```bash
+conda create -n vllm python=3.11
+conda activate vllm
+```
+安装pytorch及torch相关库：
+```bash
+pip install torch==2.9.0 -f https://mirrors.aliyun.com/pytorch-wheels/cu129 --trust-host mirrors.aliyun.com
+```
 
 #### 安装 LMCache
+用 conda 环境安装 LMCache ，设置 LMCache 环境变量：
+```bash
+export CUDA_HOME=/usr/local/cuda/
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export TORCH_CUDA_ARCH_LIST="8.0"
+```
+下载 LMCache 代码并安装：
 ```bash
 git clone https://gitcode.com/boostkit/LMCache.git
 cd LMCache
 git checkout v0.3.13_support_hugepage_memory
 pip install -e . --no-build-isolation
+```
+
+#### 安装 VLLM 及相关库
+用 conda 环境安装 VLLM 及相关库：
+```bash
+git clone https://gitcode.com/vllm-project/vllm.git
+cd vllm
+git checkout v0.15.2rc0
+python use_existing_torch.py   # 指向已经安装的pytorch
+pip install -r requirements/build.txt
+taskset -c 0-31 pip install -e . --no-build-isolation # 编译 vllm 非常吃内存，建议用 taskset -c 限制下编译的核心数
 ```
 
 #### 启动 VLLM 服务
@@ -272,17 +325,12 @@ vllm bench serve \
 --model /home/Qwen3-8B \
 --dataset-path /home/ShareGPT.json \
 --burstiness 1 \
---input-len 2048 \
---output-len 1 \
 --request-rate 10 \
 --max-concurrency 4 \
 --save-result \
 --result-dir ./results \
 --host localhost \
---port 7070 \
---num-clients 80 \
---num-rounds 4 \
---save-detailed
+--port 7070 
 ```
 参数说明：
 | 参数 | 说明 |

@@ -15,6 +15,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, List, Optional
+from mooncake.store import MooncakeDistributedStore, ReplicateConfig, get_alloc_func_addr, get_free_func_addr
 
 
 LOG = logging.getLogger("store_kv_bench")
@@ -254,16 +255,14 @@ class StoreSession:
         args: argparse.Namespace,
         lane_id: int,
         payload_factory: PayloadFactory,
-        store_module,
         store_obj,
         zcopy: Optional["ZcopyBufferView"] = None,
     ):
         self.args = args
         self.lane_id = lane_id
         self.payload_factory = payload_factory
-        self._store_module = store_module
         self.store = store_obj
-        self.config = self._store_module.ReplicateConfig()
+        self.config = ReplicateConfig()
         self.config.replica_num = args.memory_replica_num
         self.config.nof_replica_num = args.nof_replica_num
         self._zcopy = zcopy
@@ -380,8 +379,7 @@ class StoreSession:
 
 
 class ZcopyBufferPool:
-    def __init__(self, store_module, store_obj, value_size: int, slots: int):
-        self.store_module = store_module
+    def __init__(self, store_obj, value_size: int, slots: int):
         self.store = store_obj
         self.value_size = value_size
         self.slots = slots
@@ -391,16 +389,16 @@ class ZcopyBufferPool:
         self._registered = False
         self.base_ptr = 0
 
-        alloc_addr = getattr(self.store_module, "get_alloc_func_addr", None)
-        free_addr = getattr(self.store_module, "get_free_func_addr", None)
+        alloc_addr = get_alloc_func_addr()
+        free_addr = get_free_func_addr()
         if alloc_addr is None or free_addr is None:
             raise RuntimeError("store module does not expose hugepage alloc/free helpers")
 
         self._alloc_fn = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)(
-            self.store_module.get_alloc_func_addr()
+            get_alloc_func_addr()
         )
         self._free_fn = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(
-            self.store_module.get_free_func_addr()
+            get_free_func_addr()
         )
 
         raw_ptr = self._alloc_fn(self.total_size)
@@ -472,11 +470,9 @@ class ZcopyBufferView:
 
 class StoreRuntime:
     def __init__(self, args: argparse.Namespace, lane_count: int):
-        import store  # type: ignore
 
         self.lane_count = lane_count
-        self.store_module = store
-        self.store = store.MooncakeDistributedStore()
+        self.store = MooncakeDistributedStore()
         setup_ret = self.store.setup(
             args.local_hostname,
             args.metadata_server,
@@ -493,7 +489,7 @@ class StoreRuntime:
         if args.io_api == "zcopy":
             slots = max(1, args.batch_size) * lane_count
             self.zcopy_pool = ZcopyBufferPool(
-                self.store_module, self.store, args.value_size, slots
+                self.store, args.value_size, slots
             )
 
     def make_session(
@@ -512,7 +508,6 @@ class StoreRuntime:
             args,
             lane_id,
             payload_factory,
-            self.store_module,
             self.store,
             zcopy_view,
         )

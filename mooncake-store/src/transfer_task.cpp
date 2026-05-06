@@ -461,10 +461,10 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                     SpdkNofTask *task = nof_qos->head[i];
                     SpdkNofSubTask *sub_task;
                     while (task->remaining_lba > 0 && avail_blocks > 0) {
-                        int submit_lba_count = std::min(avail_blocks, 
+                        uint32_t submit_lba_count = std::min(avail_blocks, 
                             std::min(task->remaining_lba, nof_qos->blocks_per_chunk));
                         int lba_off = task->lba_count - task->remaining_lba;
-                        int submit_lba= task->lba + lba_off;
+                        uint64_t submit_lba= task->lba + lba_off;
                         void *submit_ptr = reinterpret_cast<void *>
                             (reinterpret_cast<char *>(task->ptr) + lba_off * block_size);
 

@@ -181,7 +181,9 @@ python3 -m mooncake.mooncake_ssd_register \
 
 在 Mooncake 服务节点进行
 
-### 6.1 解注册指定 SSD 盘
+### 6.1 解注册 SSD 盘
+
+解注册指定 SSD 盘：
 
 ```bash
 python3 -m mooncake.mooncake_ssd_unregister \
@@ -195,6 +197,23 @@ python3 -m mooncake.mooncake_ssd_unregister \
 | ------------------------- | ----------------------------- |
 | `--master_server_address` | master 地址，默认端口 50051   |
 | `--spdk_target_info`      | 解注册盘的 ip、ns 和 nqn 信息 |
+
+全量解注册 Target 上的所有 SSD 盘：
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister \
+    --master_server_address=192.168.65.81:50051 \
+    --spdk_target_info="ip:192.168.65.56 path:/home/spdk"
+```
+
+**说明**：
+
+- 当 `--spdk_target_info` 中包含 `path` 且不指定 `ns` 时，工具会通过 SSH
+  连接到 SSD 池节点，执行 `nvmf_get_subsystems` 查询当前 Target 上的所有
+  namespace，并逐个从 Mooncake master 解注册。
+- 如果只指定 `ip`，工具无法查询 Target 上的实际 namespace，只会解注册默认
+  `nsid=1`。
+- 如果同时指定 `ns`，则只解注册指定 namespace，不执行全量解注册。
 
 ### 6.2 获取 Target 端盘信息
 

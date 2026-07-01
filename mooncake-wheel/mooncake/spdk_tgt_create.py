@@ -3,6 +3,7 @@
 # Usage: python3 -m mooncake.spdk_tgt_create --spdk_target_info="ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0,0000:02:00.0" --spdk_target_info="ip:192.168.65.57 path:/home/spdk"
 
 import argparse
+import json
 import logging
 import paramiko
 import re
@@ -93,11 +94,11 @@ class SPDKTgtCreator:
                         # Parse PCI devices separated by commas
                         if value:
                             # Split by commas and strip whitespace
-                            pci_list = [dev.strip() for dev in value.split(',') if dev.strip()]
+                            pci_list = self._split_pci_devices(value)
                             target['pci_devices'].extend(pci_list)
                         state = 'pci'
                     elif state == 'pci':
-                        pci_list = [dev.strip() for dev in part.split(',') if dev.strip()]
+                        pci_list = self._split_pci_devices(part)
                         target['pci_devices'].extend(pci_list)
                 else:
                     # This is a continuation of the current state
@@ -105,7 +106,7 @@ class SPDKTgtCreator:
                         # Path might contain spaces (unlikely but possible)
                         target['path'] += ' ' + part
                     elif state == 'pci':
-                        pci_list = [dev.strip() for dev in part.split(',') if dev.strip()]
+                        pci_list = self._split_pci_devices(part)
                         target['pci_devices'].extend(pci_list)
 
             # Validate required fields
@@ -113,12 +114,42 @@ class SPDKTgtCreator:
                 raise ValueError("Each spdk_target_info must contain 'ip' field")
             if not target['path']:
                 raise ValueError("Each spdk_target_info must contain 'path' field")
+            target['pci_devices'] = self._dedupe_pci_devices(target['pci_devices'])
 
             target_configs.append(target)
             pci_info = target['pci_devices'] if target['pci_devices'] else 'auto-discover'
             self.logger.info(f"Parsed target: IP={target['ip']}, Path={target['path']}, PCI devices={pci_info}")
 
         return target_configs
+
+    def _split_pci_devices(self, value: str) -> List[str]:
+        """
+        Extract PCI addresses even when users type non-ASCII separators.
+        """
+        pci_pattern = re.compile(
+            r'(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]'
+        )
+        matches = pci_pattern.findall(value)
+        if matches:
+            return matches
+
+        normalized = value.replace('，', ',')
+        return [dev.strip() for dev in normalized.split(',') if dev.strip()]
+
+    def _dedupe_pci_devices(self, pci_devices: List[str]) -> List[str]:
+        """
+        Preserve input order while dropping duplicate PCI addresses.
+        """
+        seen = set()
+        deduped = []
+        for pci in pci_devices:
+            normalized = pci.lower()
+            if normalized in seen:
+                self.logger.info(f"Skipping duplicate PCI device in input: {pci}")
+                continue
+            seen.add(normalized)
+            deduped.append(pci)
+        return deduped
 
     def _ssh_connect(self, ip: str, username: str = 'root', password: str = None, key_file: str = None) -> paramiko.SSHClient:
         """
@@ -169,6 +200,22 @@ class SPDKTgtCreator:
             raise RuntimeError(f"Command execution failed: {error or output}")
 
         return output, error
+
+    def _rpc_script(self, spdk_path: str) -> str:
+        return f"{spdk_path}/scripts/rpc.py"
+
+    def _rpc_json(self, ssh: paramiko.SSHClient, spdk_path: str, command: str) -> Any:
+        output, _ = self._execute_command(ssh, f"{self._rpc_script(spdk_path)} {command}")
+        if not output.strip():
+            return None
+        return json.loads(output)
+
+    def _is_spdk_tgt_running(self, ssh: paramiko.SSHClient) -> bool:
+        try:
+            self._execute_command(ssh, "pgrep -x nvmf_tgt", log_errors=False)
+            return True
+        except RuntimeError:
+            return False
 
     def _discover_nvme_pci_devices(self, ssh: paramiko.SSHClient) -> List[str]:
         """
@@ -288,14 +335,9 @@ done"""
         """
         Start the SPDK NVMF target service in the background.
         """
-        # Check if tgt is already running
-        try:
-            self._execute_command(ssh, "pgrep -x nvmf_tgt", log_errors=False)
-            self.logger.info("SPDK tgt service is already running, stopping it first")
-            self._execute_command(ssh, "pkill -x nvmf_tgt")
-            time.sleep(2)  # Give it time to stop
-        except RuntimeError:
-            self.logger.debug("SPDK tgt service is not running, will start it")
+        if self._is_spdk_tgt_running(ssh):
+            self.logger.info("SPDK tgt service is already running")
+            return
 
         # Start tgt in the background using absolute path
         self.logger.info(f"Starting SPDK tgt service with core mask {self.core_mask}")
@@ -327,14 +369,58 @@ done"""
             formatted_options.extend([flag, shlex.quote(str(value))])
         return ' '.join(formatted_options)
 
-    def _create_transport(self, ssh: paramiko.SSHClient, spdk_path: str) -> None:
+    def _create_transport(
+        self,
+        ssh: paramiko.SSHClient,
+        spdk_path: str,
+        log_errors: bool = True,
+    ) -> None:
         """
         Create NVMe-oF transport for SPDK.
         """
         self.logger.info(f"Creating {self.transport_options['trtype']} transport")
         rpc_script = f"{spdk_path}/scripts/rpc.py"
         transport_options = self._format_transport_options()
-        self._execute_command(ssh, f"{rpc_script} nvmf_create_transport {transport_options}")
+        self._execute_command(
+            ssh,
+            f"{rpc_script} nvmf_create_transport {transport_options}",
+            log_errors=log_errors,
+        )
+
+    def _ensure_transport(self, ssh: paramiko.SSHClient, spdk_path: str) -> None:
+        """
+        Create the NVMe-oF transport if it does not already exist.
+        """
+        try:
+            self._create_transport(ssh, spdk_path, log_errors=False)
+        except RuntimeError as e:
+            message = str(e).lower()
+            if "exist" not in message and "already" not in message:
+                self.logger.error(f"Failed to create {self.transport_options['trtype']} transport: {e}")
+                raise
+            self.logger.info(f"{self.transport_options['trtype']} transport already exists, reusing it")
+
+    def _get_bdevs(self, ssh: paramiko.SSHClient, spdk_path: str) -> List[Dict[str, Any]]:
+        bdevs = self._rpc_json(ssh, spdk_path, "bdev_get_bdevs")
+        return bdevs or []
+
+    def _find_bdev_for_pci(self, bdevs: List[Dict[str, Any]], pci: str) -> Optional[str]:
+        pci_lower = pci.lower()
+        pci_without_domain = pci_lower[-7:]
+        for bdev in bdevs:
+            serialized = json.dumps(bdev, sort_keys=True).lower()
+            if pci_lower in serialized or pci_without_domain in serialized:
+                return bdev.get("name")
+        return None
+
+    def _next_nvme_controller_name(self, bdevs: List[Dict[str, Any]]) -> str:
+        max_index = -1
+        for bdev in bdevs:
+            name = bdev.get("name", "")
+            match = re.match(r"^Nvme(\d+)n\d+$", name)
+            if match:
+                max_index = max(max_index, int(match.group(1)))
+        return f"Nvme{max_index + 1}"
 
     def _create_bdevs(self, ssh: paramiko.SSHClient, spdk_path: str, pci_devices: List[str]) -> List[str]:
         """
@@ -342,12 +428,21 @@ done"""
         """
         bdevs = []
         rpc_script = f"{spdk_path}/scripts/rpc.py"
-        for i, pci in enumerate(pci_devices):
-            bdev_name = f"Nvme{i}"
+        existing_bdevs = self._get_bdevs(ssh, spdk_path)
+        for pci in pci_devices:
+            existing_bdev = self._find_bdev_for_pci(existing_bdevs, pci)
+            if existing_bdev:
+                self.logger.info(f"PCI {pci} is already attached as bdev {existing_bdev}")
+                bdevs.append(existing_bdev)
+                continue
+
+            bdev_name = self._next_nvme_controller_name(existing_bdevs)
             self.logger.info(f"Creating bdev {bdev_name} for PCI {pci}")
             self._execute_command(ssh, f"{rpc_script} bdev_nvme_attach_controller -b {bdev_name} -t PCIe -a {pci}")
-            bdevs.append(f"{bdev_name}n1")
-            self.logger.info(f"Attached PCI {pci} as bdev {bdev_name}n1")
+            attached_bdev = f"{bdev_name}n1"
+            bdevs.append(attached_bdev)
+            existing_bdevs.append({"name": attached_bdev, "pci_address": pci})
+            self.logger.info(f"Attached PCI {pci} as bdev {attached_bdev}")
         return bdevs
 
     def _create_subsystem(self, ssh: paramiko.SSHClient, spdk_path: str) -> str:
@@ -360,12 +455,34 @@ done"""
         self._execute_command(ssh, f"{rpc_script} nvmf_create_subsystem {subsystem_nqn} -a -s SPDK00000000000001 -m 12")
         return subsystem_nqn
 
+    def _get_subsystems(self, ssh: paramiko.SSHClient, spdk_path: str) -> List[Dict[str, Any]]:
+        subsystems = self._rpc_json(ssh, spdk_path, "nvmf_get_subsystems")
+        return subsystems or []
+
+    def _find_subsystem(self, ssh: paramiko.SSHClient, spdk_path: str, subsystem_nqn: str) -> Optional[Dict[str, Any]]:
+        for subsystem in self._get_subsystems(ssh, spdk_path):
+            if subsystem.get("nqn") == subsystem_nqn:
+                return subsystem
+        return None
+
+    def _ensure_subsystem(self, ssh: paramiko.SSHClient, spdk_path: str) -> str:
+        subsystem_nqn = "nqn.2016-06.io.spdk:cnode1"
+        if self._find_subsystem(ssh, spdk_path, subsystem_nqn):
+            self.logger.info(f"Subsystem {subsystem_nqn} already exists, reusing it")
+            return subsystem_nqn
+        return self._create_subsystem(ssh, spdk_path)
+
     def _add_namespaces(self, ssh: paramiko.SSHClient, spdk_path: str, subsystem_nqn: str, bdevs: List[str]) -> None:
         """
         Add namespaces to the subsystem.
         """
         rpc_script = f"{spdk_path}/scripts/rpc.py"
         for bdev in bdevs:
+            subsystem = self._find_subsystem(ssh, spdk_path, subsystem_nqn)
+            namespaces = subsystem.get("namespaces", []) if subsystem else []
+            if any(namespace.get("bdev_name") == bdev for namespace in namespaces):
+                self.logger.info(f"Namespace {bdev} already exists in subsystem {subsystem_nqn}")
+                continue
             self.logger.info(f"Adding namespace {bdev} to subsystem {subsystem_nqn}")
             self._execute_command(ssh, f"{rpc_script} nvmf_subsystem_add_ns {subsystem_nqn} {bdev}")
 
@@ -374,9 +491,24 @@ done"""
         Add a listener to the subsystem.
         """
         trtype = self.transport_options['trtype']
+        subsystem = self._find_subsystem(ssh, spdk_path, subsystem_nqn)
+        listen_addresses = subsystem.get("listen_addresses", []) if subsystem else []
+        for address in listen_addresses:
+            if (str(address.get("trtype", "")).lower() == str(trtype).lower()
+                    and str(address.get("traddr", "")) == str(ip)
+                    and str(address.get("trsvcid", "")) == "4420"):
+                self.logger.info(f"{trtype} listener on {ip}:4420 already exists")
+                return
+
         self.logger.info(f"Adding {trtype} listener on {ip}:4420")
         rpc_script = f"{spdk_path}/scripts/rpc.py"
-        self._execute_command(ssh, f"{rpc_script} nvmf_subsystem_add_listener {subsystem_nqn} -t {shlex.quote(str(trtype))} -a {ip} -s 4420")
+        try:
+            self._execute_command(ssh, f"{rpc_script} nvmf_subsystem_add_listener {subsystem_nqn} -t {shlex.quote(str(trtype))} -a {ip} -s 4420")
+        except RuntimeError as e:
+            message = str(e).lower()
+            if "exist" not in message and "already" not in message:
+                raise
+            self.logger.info(f"{trtype} listener on {ip}:4420 already exists")
 
     def deploy_target(self, target_config: Dict[str, Any]) -> bool:
         """
@@ -408,17 +540,20 @@ done"""
                 )
                 self.logger.info(f"Target {ip} will expose PCI devices: {', '.join(pci_devices)}")
 
-                # Start tgt service
-                self._start_spdk_tgt(ssh, spdk_path)
+                target_already_running = self._is_spdk_tgt_running(ssh)
+                if target_already_running:
+                    self.logger.info("SPDK tgt service is running, hot-adding PCI devices without restart")
+                else:
+                    self._start_spdk_tgt(ssh, spdk_path)
 
                 # Create transport
-                self._create_transport(ssh, spdk_path)
+                self._ensure_transport(ssh, spdk_path)
 
                 # Create bdevs
                 bdevs = self._create_bdevs(ssh, spdk_path, pci_devices)
 
                 # Create subsystem
-                subsystem_nqn = self._create_subsystem(ssh, spdk_path)
+                subsystem_nqn = self._ensure_subsystem(ssh, spdk_path)
 
                 # Add namespaces
                 self._add_namespaces(ssh, spdk_path, subsystem_nqn, bdevs)

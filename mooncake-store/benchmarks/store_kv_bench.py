@@ -321,7 +321,7 @@ class StoreSession:
             lengths = self._get_lengths_zcopy(keys, len(object_ids))
             for slot, (object_id, length) in enumerate(zip(object_ids, lengths)):
                 if length < 0:
-                    if self.store.isExist(keys[slot]) == 0:
+                    if self.store.is_exist(keys[slot]) == 0:
                         misses += 1
                         errors["MISS"] += 1
                     else:

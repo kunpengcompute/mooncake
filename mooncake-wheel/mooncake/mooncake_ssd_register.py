@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import re
+import shlex
 from typing import List, Dict, Any
 
 import paramiko
@@ -66,17 +67,17 @@ class MooncakeNoFRegister:
         """
         unique_configs = []
         seen_keys = set()
-        
+
         for config in self.config_list:
             # Generate unique key directly without calling _get_ssd_unique_key
             key = (config['nqn'], config['nsid'], config['traddr'], config['trsvcid'])
             if key not in seen_keys:
                 seen_keys.add(key)
                 unique_configs.append(config)
-        
+
         if len(unique_configs) < len(self.config_list):
             logging.info(f"Removed {len(self.config_list) - len(unique_configs)} duplicate SSD configuration(s)")
-        
+
         self.config_list = unique_configs
 
 
@@ -98,30 +99,36 @@ class MooncakeNoFRegister:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            # Connect with default key and user
-            ssh.connect(ip, port=22, username='root', timeout=10)
-            
+            ssh.connect(
+                ip,
+                port=int(self.cli_config.get('port', 22)),
+                username=self.cli_config.get('username', 'root'),
+                password=self.cli_config.get('password'),
+                key_filename=self.cli_config.get('key_file'),
+                timeout=10
+            )
+
             # Try multiple possible paths to find the RPC script
             possible_paths = [
                 path,  # Direct path provided by user
                 f"{path}/spdk"  # Common case: spdk is a subdirectory
             ]
-            
+
             for test_path in possible_paths:
-                full_command = f"cd {test_path} && ls -la scripts/rpc.py"
+                full_command = f"cd {shlex.quote(test_path)} && test -f scripts/rpc.py"
                 stdin, stdout, stderr = ssh.exec_command(full_command, timeout=5)
-                error = stderr.read().decode('utf-8')
-                if not error:
+                if stdout.channel.recv_exit_status() == 0:
                     # Found the script, execute the actual command
-                    full_command = f"cd {test_path} && {command}"
+                    full_command = f"cd {shlex.quote(test_path)} && {command}"
                     stdin, stdout, stderr = ssh.exec_command(full_command, timeout=30)
+                    exit_status = stdout.channel.recv_exit_status()
                     output = stdout.read().decode('utf-8')
                     error = stderr.read().decode('utf-8')
-                    if error:
+                    if exit_status != 0:
                         logging.error(f"SSH command error on {ip}: {error}")
-                        raise RuntimeError(f"SSH command failed: {error}")
+                        raise RuntimeError(f"SSH command failed: {error or output}")
                     return output
-            
+
             # If we get here, none of the paths worked
             raise RuntimeError(f"Could not find scripts/rpc.py in any of the possible paths: {possible_paths}")
         finally:
@@ -132,64 +139,64 @@ class MooncakeNoFRegister:
         Get SSD info from remote SPDK targets
         """
         ssd_configs = []
-        
+
         for target_info in self.spdk_targets:
             target = self._parse_spdk_target_info(target_info)
             ip = target.get('ip')
             path = target.get('path')
-            
+
             if not ip or not path:
                 logging.error(f"Invalid target info: {target_info}")
                 continue
-            
+
             logging.info(f"Getting SSD info from target: {ip} (path: {path})")
-            
+
             try:
                 # Get subsystems info
                 subsystems_cmd = "./scripts/rpc.py nvmf_get_subsystems"
                 subsystems_output = self._execute_ssh_command(ip, subsystems_cmd, path)
                 subsystems = json.loads(subsystems_output)
-                
+
                 # Process each subsystem
                 for subsystem in subsystems:
                     if subsystem.get('subtype') != 'NVMe':
                         continue
-                    
+
                     nqn = subsystem.get('nqn')
                     listen_addresses = subsystem.get('listen_addresses', [])
-                    
+
                     if not nqn or not listen_addresses:
                         continue
-                    
+
                     # Get transport info from first listen address
                     traddr = listen_addresses[0].get('traddr')
                     trsvcid = listen_addresses[0].get('trsvcid')
-                    
+
                     if not traddr or not trsvcid:
                         continue
-                    
+
                     # Process each namespace
                     namespaces = subsystem.get('namespaces', [])
                     for namespace in namespaces:
                         nsid = namespace.get('nsid')
                         bdev_name = namespace.get('bdev_name')
-                        
+
                         if not nsid or not bdev_name:
                             continue
-                        
+
                         # Get bdev info to calculate size
-                        bdev_cmd = f"./scripts/rpc.py bdev_get_bdevs -b {bdev_name}"
+                        bdev_cmd = f"./scripts/rpc.py bdev_get_bdevs -b {shlex.quote(bdev_name)}"
                         bdev_output = self._execute_ssh_command(ip, bdev_cmd, path)
                         bdevs = json.loads(bdev_output)
-                        
+
                         if not bdevs:
                             continue
-                        
+
                         bdev = bdevs[0]
                         block_size = bdev.get('block_size', 512)
                         num_blocks = bdev.get('num_blocks', 0)
                         size = block_size * num_blocks
-                        
+
                         # Create SSD config
                         ssd_config = {
                             'nqn': nqn,
@@ -201,17 +208,17 @@ class MooncakeNoFRegister:
                             'master_server_address': master_server_address,
                             'metadata_server': ''
                         }
-                        
+
                         ssd_configs.append(ssd_config)
                         logging.info(f"Found SSD: nqn={nqn}, nsid={nsid}, traddr={traddr}, size={size}")
-                        
+
             except Exception as e:
                 logging.error(f"Failed to get SSD info from {ip}: {e}")
                 continue
-        
+
         if not ssd_configs:
             raise RuntimeError("No SSD information found from remote targets")
-        
+
         return ssd_configs
 
     def _setup_logging(self):
@@ -241,7 +248,7 @@ class MooncakeNoFRegister:
                     cfg["size"],
                     cfg["master_server_address"]
                 )
-                
+
                 if ret != 0:
                     raise RuntimeError(f"Registration failed with code {ret}")
 
@@ -251,7 +258,7 @@ class MooncakeNoFRegister:
             except Exception as e:
                 # Check if the error is due to the segment already existing on the server
                 if "SEGMENT_ALREADY_EXISTS" in str(e) or "segment already exists" in str(e):
-                    logging.info("SSD %d/%d (nqn=%s, traddr=%s) already registered on server, skipping", 
+                    logging.info("SSD %d/%d (nqn=%s, traddr=%s) already registered on server, skipping",
                                 i + 1, total, cfg.get("nqn"), cfg.get("traddr"))
                     skipped_count += 1
                 else:
@@ -277,6 +284,14 @@ def parse_arguments():
     parser.add_argument('--spdk_target_info', action='append',
                         help='SPDK target information (e.g., "ip:192.168.65.56 path:/home")',
                         required=True)
+    parser.add_argument('--username', type=str, default='root',
+                        help='SSH username for target nodes (default: root)')
+    parser.add_argument('--port', type=int, default=22,
+                        help='SSH port for target nodes (default: 22)')
+    parser.add_argument('--password', type=str,
+                        help='SSH password for target nodes')
+    parser.add_argument('--key-file', type=str,
+                        help='SSH private key file path')
     parser.add_argument('-D', '--define', action='append',
                         help='Override configuration fields globally (e.g., -Dtrsvcid=4420)',
                         default=[])
@@ -297,6 +312,12 @@ def main():
     # Add master_server_address to cli_config if provided
     if args.master_server_address:
         cli_config['master_server_address'] = args.master_server_address
+    cli_config['username'] = args.username
+    cli_config['port'] = args.port
+    if args.password:
+        cli_config['password'] = args.password
+    if args.key_file:
+        cli_config['key_file'] = args.key_file
 
     register = MooncakeNoFRegister(cli_config, args.spdk_target_info)
     success = register.start_ssd_service()

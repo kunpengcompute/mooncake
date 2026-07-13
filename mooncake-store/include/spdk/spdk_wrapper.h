@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stack>
 #include <string>
 #include <vector>
@@ -45,11 +46,21 @@ public:
 
     std::string GetControllerKey(const std::string &tr_str);
 
+    std::vector<uint32_t> GetActiveNamespaces(const std::string &tr_str);
+
+    uint64_t GetNamespaceCapacityBytes(const nof_seg_handle *seg_handle);
+
+    void RecordNamespaceAttributeChanged(struct spdk_nvme_ctrlr *ctrlr);
+
+    std::vector<std::string> ConsumeNamespaceAttributeChangedControllers();
+
     void InvalidateNofController(const std::string &tr_str);
     void InvalidateNofController(nof_seg_handle *seg);
 
     /** @brief Open a NoF segment. */
     nof_seg_handle *OpenNofSegment(const std::string &tr_str);
+
+    void CloseNofSegment(const std::string &tr_str);
 
     uint32_t GetBlockSize(const nof_seg_handle *seg_handle);
 
@@ -110,6 +121,8 @@ private:
     std::mutex admin_poll_mutex_;
     std::map<struct spdk_nvme_ctrlr *, std::chrono::steady_clock::time_point>
         last_admin_poll_;
+    std::mutex namespace_events_mutex_;
+    std::set<std::string> namespace_changed_ctrlrs_;
     std::map<std::string, std::unique_ptr<ProbeBuffer>> probe_buffers_;
     std::mutex probe_buffers_mutex_;
     std::vector<std::unique_ptr<ProbeRequestContext>> probe_request_contexts_;

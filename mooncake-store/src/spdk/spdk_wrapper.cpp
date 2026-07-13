@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <set>
 #include <thread>
 #include "spdk/spdk_wrapper.h"
 
@@ -156,6 +157,15 @@ void LogActiveNamespaces(struct spdk_nvme_ctrlr *ctrlr) {
               << active_ns << "]";
 }
 
+std::string BuildControllerKey(const struct spdk_nvme_transport_id *trid) {
+    if (!trid) {
+        return "";
+    }
+    return std::string(trid->traddr) + "|" + std::string(trid->trsvcid) +
+           "|" + std::string(trid->subnqn) + "|" +
+           std::to_string(static_cast<int>(trid->trtype));
+}
+
 void NofAerCallback(void *cb_arg, const struct spdk_nvme_cpl *cpl) {
     auto *ctrlr = reinterpret_cast<struct spdk_nvme_ctrlr *>(cb_arg);
     const struct spdk_nvme_transport_id *trid =
@@ -184,6 +194,7 @@ void NofAerCallback(void *cb_arg, const struct spdk_nvme_cpl *cpl) {
 
     if (ctrlr && event.bits.async_event_type == SPDK_NVME_ASYNC_EVENT_TYPE_NOTICE &&
         event.bits.async_event_info == SPDK_NVME_ASYNC_EVENT_NS_ATTR_CHANGED) {
+        SpdkWrapper::GetInstance().RecordNamespaceAttributeChanged(ctrlr);
         LogActiveNamespaces(ctrlr);
     }
 }
@@ -411,6 +422,52 @@ std::string SpdkWrapper::GetControllerKey(const std::string &tr_str) {
         return "";
     }
     return tr.ctrlr_key;
+}
+
+void SpdkWrapper::RecordNamespaceAttributeChanged(
+    struct spdk_nvme_ctrlr *ctrlr) {
+    const struct spdk_nvme_transport_id *trid =
+        ctrlr ? spdk_nvme_ctrlr_get_transport_id(ctrlr) : nullptr;
+    std::string ctrlr_key = BuildControllerKey(trid);
+    if (ctrlr_key.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(namespace_events_mutex_);
+    namespace_changed_ctrlrs_.insert(ctrlr_key);
+}
+
+std::vector<std::string>
+SpdkWrapper::ConsumeNamespaceAttributeChangedControllers() {
+    std::lock_guard<std::mutex> lock(namespace_events_mutex_);
+    std::vector<std::string> changed_ctrlrs(namespace_changed_ctrlrs_.begin(),
+                                            namespace_changed_ctrlrs_.end());
+    namespace_changed_ctrlrs_.clear();
+    return changed_ctrlrs;
+}
+
+std::vector<uint32_t> SpdkWrapper::GetActiveNamespaces(
+    const std::string &tr_str) {
+    tr_info tr;
+    if (ParseTransPortStr(tr_str, &tr) != 0) {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(ctrlrs_mutex);
+    auto it = connected_ctrlrs.find(tr.ctrlr_key);
+    if (it == connected_ctrlrs.end() || !it->second || !it->second->ctrlr ||
+        spdk_nvme_ctrlr_is_failed(it->second->ctrlr)) {
+        return {};
+    }
+
+    std::vector<uint32_t> active_namespaces;
+    for (uint32_t nsid =
+             spdk_nvme_ctrlr_get_first_active_ns(it->second->ctrlr);
+         nsid != 0;
+         nsid = spdk_nvme_ctrlr_get_next_active_ns(it->second->ctrlr, nsid)) {
+        active_namespaces.push_back(nsid);
+    }
+    return active_namespaces;
 }
 
 int32_t SpdkWrapper::NvmePollAdminCompletions(nof_seg_handle *seg) {
@@ -731,6 +788,40 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
     return nullptr;
 }
 
+void SpdkWrapper::CloseNofSegment(const std::string &tr_str) {
+    tr_info tr;
+    if (ParseTransPortStr(tr_str, &tr) != 0) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(ctrlrs_mutex);
+    auto ctrlr_it = connected_ctrlrs.find(tr.ctrlr_key);
+    if (ctrlr_it == connected_ctrlrs.end() || !ctrlr_it->second) {
+        return;
+    }
+
+    ctrlr_info *info = ctrlr_it->second;
+    std::lock_guard<std::mutex> ns_lock(info->ns_mutex);
+    auto seg_it = info->ns_seg.find(tr.ns);
+    if (seg_it == info->ns_seg.end()) {
+        return;
+    }
+
+    nof_seg_handle *seg = seg_it->second;
+    if (seg) {
+        if (seg->qpair) {
+            spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
+            seg->qpair = nullptr;
+        }
+        seg->ns = nullptr;
+        delete seg;
+    }
+    info->ns_seg.erase(seg_it);
+    LOG(INFO) << "close nof segment handle"
+              << ", ctrlr_key=" << tr.ctrlr_key
+              << ", nsid=" << tr.ns;
+}
+
 uint32_t SpdkWrapper::GetBlockSize(const nof_seg_handle *seg_handle)
 {
     if (!seg_handle || !seg_handle->ns) {
@@ -738,6 +829,14 @@ uint32_t SpdkWrapper::GetBlockSize(const nof_seg_handle *seg_handle)
     }
 
     return spdk_nvme_ns_get_sector_size(seg_handle->ns);
+}
+
+uint64_t SpdkWrapper::GetNamespaceCapacityBytes(
+    const nof_seg_handle *seg_handle) {
+    if (!seg_handle || !seg_handle->ns) {
+        return 0;
+    }
+    return spdk_nvme_ns_get_size(seg_handle->ns);
 }
 
 int SpdkWrapper::SubmitRequest(const nof_seg_handle *seg_handle, void *ptr, uint64_t lba, uint32_t lba_count, int op, 

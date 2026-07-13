@@ -2313,7 +2313,108 @@ void MasterService::HandleNoFNamespaceAttributeChanges(
                          << ", reason=no_mounted_segment_for_controller";
             continue;
         }
+        TryUnmountRemovedNoFNamespaces(ctrlr_key, ctrlr_it->second);
         TryMountAddedNoFNamespaces(ctrlr_key, ctrlr_it->second);
+    }
+#endif
+}
+
+bool MasterService::TryUnmountNoFSegmentByNamespaceChange(
+    const MountedNoFSegmentSnapshot& snapshot,
+    const std::string& error_reason) {
+    size_t metrics_dec_capacity = 0;
+    {
+        auto nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
+        ErrorCode err = nof_segment_access.PrepareUnmountSegment(
+            snapshot.segment_id, metrics_dec_capacity);
+        if (err == ErrorCode::SEGMENT_NOT_FOUND ||
+            err == ErrorCode::UNAVAILABLE_IN_CURRENT_STATUS) {
+            std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+            nof_heartbeat_states_.erase(snapshot.segment_id);
+            VLOG(1) << "segment_id=" << snapshot.segment_id
+                    << ", action=skip_nof_namespace_removed_unmount"
+                    << ", reason=" << toString(err);
+            return false;
+        }
+        if (err != ErrorCode::OK) {
+            LOG(ERROR) << "segment_id=" << snapshot.segment_id
+                       << ", segment_name=" << snapshot.segment.name
+                       << ", error=prepare_unmount_nof_namespace_removed_failed"
+                       << ", reason=" << err;
+            return false;
+        }
+    }
+
+    ClearInvalidHandles();
+
+    {
+        auto nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
+        ErrorCode err = nof_segment_access.CommitUnmountSegment(
+            snapshot.segment_id, snapshot.client_id, metrics_dec_capacity);
+        if (err != ErrorCode::OK && err != ErrorCode::SEGMENT_NOT_FOUND) {
+            LOG(ERROR) << "segment_id=" << snapshot.segment_id
+                       << ", segment_name=" << snapshot.segment.name
+                       << ", error=commit_unmount_nof_namespace_removed_failed"
+                       << ", reason=" << err;
+            return false;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
+        nof_heartbeat_states_.erase(snapshot.segment_id);
+    }
+    SpdkWrapper::GetInstance().CloseNofSegment(snapshot.segment.te_endpoint);
+    LOG(INFO) << "segment_id=" << snapshot.segment_id
+              << ", client_id=" << snapshot.client_id
+              << ", segment_name=" << snapshot.segment.name
+              << ", endpoint=" << snapshot.segment.te_endpoint
+              << ", action=unmount_nof_segment_by_namespace_removed"
+              << ", reason=" << error_reason;
+    return true;
+}
+
+void MasterService::TryUnmountRemovedNoFNamespaces(
+    const std::string& ctrlr_key,
+    const std::vector<MountedNoFSegmentSnapshot>& ctrlr_segments) {
+#ifndef USE_NOF
+    (void)ctrlr_key;
+    (void)ctrlr_segments;
+#else
+    if (ctrlr_segments.empty()) {
+        return;
+    }
+
+    const auto& template_snapshot = ctrlr_segments.front();
+    std::vector<uint32_t> active_nsids =
+        SpdkWrapper::GetInstance().GetActiveNamespaces(
+            template_snapshot.segment.te_endpoint);
+    std::set<uint32_t> active_nsids_set(active_nsids.begin(),
+                                        active_nsids.end());
+    if (active_nsids.empty()) {
+        LOG(WARNING) << "ctrlr_key=" << ctrlr_key
+                     << ", endpoint="
+                     << template_snapshot.segment.te_endpoint
+                     << ", action=nof_namespace_remove_skip"
+                     << ", reason=empty_active_namespace_list";
+        return;
+    }
+
+    for (const auto& snapshot : ctrlr_segments) {
+        auto nsid = ExtractNoFNamespaceId(snapshot.segment.te_endpoint);
+        if (!nsid.has_value()) {
+            LOG(WARNING) << "ctrlr_key=" << ctrlr_key
+                         << ", endpoint=" << snapshot.segment.te_endpoint
+                         << ", action=nof_namespace_remove_skip"
+                         << ", reason=parse_nsid_failed";
+            continue;
+        }
+        if (active_nsids_set.contains(*nsid)) {
+            continue;
+        }
+
+        TryUnmountNoFSegmentByNamespaceChange(
+            snapshot, "namespace_removed:nsid=" + std::to_string(*nsid));
     }
 #endif
 }

@@ -622,6 +622,12 @@ class MasterService {
     void TryMountAddedNoFNamespaces(
         const std::string& ctrlr_key,
         const std::vector<MountedNoFSegmentSnapshot>& ctrlr_segments);
+    void TryUnmountRemovedNoFNamespaces(
+        const std::string& ctrlr_key,
+        const std::vector<MountedNoFSegmentSnapshot>& ctrlr_segments);
+    bool TryUnmountNoFSegmentByNamespaceChange(
+        const MountedNoFSegmentSnapshot& snapshot,
+        const std::string& error_reason);
 
     tl::expected<void, ErrorCode> PushOffloadingQueue(const std::string& key,
                                                       const Replica& replica);

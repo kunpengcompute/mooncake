@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -35,17 +36,19 @@ public:
 
     void Free(void *ptr);
 
-    int64_t NvmePollProcessCompletion(nof_seg_handle *seg, uint32_t complete_per_seg);
+    int64_t NvmePollProcessCompletion(nof_seg_handle *seg,
+                                      uint32_t complete_per_seg);
 
-    /**
-     * @brief 获取传输通道
-     *
-     * 连接控制器
-     * 
-     * @param tr_str transport description
-     * @return nof_seg handle the async operation, or nullptr
-     * failure
-     */
+    int32_t NvmePollAdminCompletions(nof_seg_handle *seg);
+
+    bool IsConnectionError(int32_t ret) const;
+
+    std::string GetControllerKey(const std::string &tr_str);
+
+    void InvalidateNofController(const std::string &tr_str);
+    void InvalidateNofController(nof_seg_handle *seg);
+
+    /** @brief Open a NoF segment. */
     nof_seg_handle *OpenNofSegment(const std::string &tr_str);
 
     uint32_t GetBlockSize(const nof_seg_handle *seg_handle);
@@ -96,11 +99,17 @@ private:
     void RecycleProbeRequestContext(ProbeRequestContext *ctx);
     void ReplenishProbeRequestContextPoolLocked(size_t count);
     static void ProbeReadComplete(void *ctx, const struct spdk_nvme_cpl *cpl);
+    void DropNofControllerLocked(const std::string &ctrlr_key, bool detach);
+    void CleanupStaleNofControllersLocked(const std::string &ctrlr_key);
 
     bool initialized;
     std::mutex init_mutex;
     std::map<std::string, ctrlr_info*> connected_ctrlrs;
     std::mutex ctrlrs_mutex;
+    std::map<std::string, std::vector<ctrlr_info *>> stale_ctrlrs_;
+    std::mutex admin_poll_mutex_;
+    std::map<struct spdk_nvme_ctrlr *, std::chrono::steady_clock::time_point>
+        last_admin_poll_;
     std::map<std::string, std::unique_ptr<ProbeBuffer>> probe_buffers_;
     std::mutex probe_buffers_mutex_;
     std::vector<std::unique_ptr<ProbeRequestContext>> probe_request_contexts_;

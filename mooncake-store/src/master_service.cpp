@@ -27,6 +27,10 @@ bool HasExpectedReplicaAllocation(const ReplicateConfig& config,
            allocated_nof_replicas == config.nof_replica_num;
 }
 
+bool IsNoFControllerErrorReason(const std::string& reason) {
+    return reason.rfind("controller_error:", 0) == 0;
+}
+
 }  // namespace
 
 MasterService::MasterService() : MasterService(MasterServiceConfig()) {}
@@ -2380,6 +2384,7 @@ void MasterService::NofHeartbeatThreadFunc() {
                 it->second.last_error_reason = error_reason;
                 it->second.next_probe_at = failure_time + nof_heartbeat_interval_sec_;
                 should_unmount =
+                    IsNoFControllerErrorReason(error_reason) ||
                     failure_time - it->second.last_success_at >= alive_timeout;
             }
         }
@@ -2391,6 +2396,30 @@ void MasterService::NofHeartbeatThreadFunc() {
                      << ", failure_count=" << failure_count
                      << ", latency_ms=" << latency_ms
                      << ", reason=" << error_reason;
+
+        if (IsNoFControllerErrorReason(error_reason)) {
+            LOG(WARNING) << "segment_id=" << probe_target->segment_id
+                         << ", segment_name=" << probe_target->segment.name
+                         << ", endpoint=" << probe_target->segment.te_endpoint
+                         << ", action=nof_controller_failure_unmount";
+            std::string failed_ctrlr_key =
+                SpdkWrapper::GetInstance().GetControllerKey(
+                    probe_target->segment.te_endpoint);
+            if (!failed_ctrlr_key.empty()) {
+                for (const auto& snapshot : mounted_segments) {
+                    if (snapshot.status != SegmentStatus::OK) {
+                        continue;
+                    }
+                    std::string ctrlr_key =
+                        SpdkWrapper::GetInstance().GetControllerKey(
+                            snapshot.segment.te_endpoint);
+                    if (ctrlr_key == failed_ctrlr_key) {
+                        TryUnmountNoFSegmentByHeartbeat(snapshot, error_reason);
+                    }
+                }
+                continue;
+            }
+        }
 
         if (should_unmount) {
             TryUnmountNoFSegmentByHeartbeat(*probe_target, error_reason);

@@ -1,10 +1,13 @@
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <functional>
+#include <vector>
 #include <set>
 #include <thread>
 #include "spdk/spdk_wrapper.h"
@@ -208,6 +211,24 @@ uint64_t GetAdminPollIntervalMs() {
     return interval_ms;
 }
 
+void FillProbePattern(void *buf, uint32_t size, const std::string &tr_str,
+                      uint64_t seq) {
+    if (!buf || size == 0) {
+        return;
+    }
+
+    auto *bytes = static_cast<uint8_t *>(buf);
+    const uint64_t endpoint_hash = std::hash<std::string>{}(tr_str);
+    uint64_t state = 0x4d434e4f46505242ULL ^ endpoint_hash ^ seq;
+    for (uint32_t i = 0; i < size; ++i) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        bytes[i] = static_cast<uint8_t>((state >> 56) ^ (i & 0xff));
+    }
+
+    const char magic[] = "MCNOFPRB";
+    std::memcpy(bytes, magic, std::min<uint32_t>(sizeof(magic) - 1, size));
+}
+
 }  // namespace
 
 struct nof_seg_handle {
@@ -358,18 +379,21 @@ void SpdkWrapper::ProbeReadComplete(void *ctx,
     if (spdk_nvme_cpl_is_error(cpl)) {
         {
             std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
+            const bool namespace_failure =
+                probe_ctx->owner &&
+                probe_ctx->owner->IsNamespaceFailureStatus(&cpl->status);
             probe_ctx->error_reason =
-                std::string("completion_error:") +
-                spdk_nvme_cpl_get_status_string(&cpl->status);
+                std::string(namespace_failure ? "namespace_io_error:"
+                                              : "completion_error:") +
+                "sct=" + std::to_string(cpl->status.sct) +
+                ",sc=" + std::to_string(cpl->status.sc) +
+                ",status=" + spdk_nvme_cpl_get_status_string(&cpl->status);
         }
         probe_ctx->success.store(false, std::memory_order_release);
     } else {
         probe_ctx->success.store(true, std::memory_order_release);
     }
     probe_ctx->done.store(true, std::memory_order_release);
-    if (probe_ctx->owner != nullptr) {
-        probe_ctx->owner->RecycleProbeRequestContext(probe_ctx);
-    }
 }
 
 void SpdkWrapper::ReplenishProbeRequestContextPoolLocked(size_t count) {
@@ -414,6 +438,24 @@ bool SpdkWrapper::IsConnectionError(int32_t ret) const {
     int err = -ret;
     return err == ENXIO || err == EIO || err == ECONNRESET ||
            err == ENODEV || err == EPIPE || err == ETIMEDOUT;
+}
+
+bool SpdkWrapper::IsNamespaceFailureStatus(
+    const struct spdk_nvme_status *status) const {
+    if (!status) {
+        return false;
+    }
+
+    if (status->sct == SPDK_NVME_SCT_MEDIA_ERROR) {
+        return true;
+    }
+
+    if (status->sct != SPDK_NVME_SCT_GENERIC) {
+        return false;
+    }
+
+    return status->sc == SPDK_NVME_SC_INTERNAL_DEVICE_ERROR ||
+           status->sc == SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT;
 }
 
 std::string SpdkWrapper::GetControllerKey(const std::string &tr_str) {
@@ -701,6 +743,12 @@ int SpdkWrapper::ConnectController(const struct spdk_nvme_transport_id *trid, ct
 }
 
 nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
+    if (!InitializeEnv()) {
+        LOG(ERROR) << "open nof segment failed: spdk env init failed"
+                   << ", endpoint=" << tr_str;
+        return nullptr;
+    }
+
     tr_info tr;
     int ret = ParseTransPortStr(tr_str, &tr);
     if (ret != 0) {
@@ -822,6 +870,85 @@ void SpdkWrapper::CloseNofSegment(const std::string &tr_str) {
               << ", nsid=" << tr.ns;
 }
 
+void SpdkWrapper::CloseNofSegment(nof_seg_handle *seg) {
+    if (!seg || !seg->ns) {
+        return;
+    }
+
+    struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(seg->ns);
+    if (!ctrlr) {
+        seg->qpair = nullptr;
+        seg->ns = nullptr;
+        return;
+    }
+    uint32_t nsid = spdk_nvme_ns_get_id(seg->ns);
+
+    std::lock_guard<std::mutex> lock(ctrlrs_mutex);
+    for (auto &[ctrlr_key, info] : connected_ctrlrs) {
+        if (!info || info->ctrlr != ctrlr) {
+            continue;
+        }
+
+        std::lock_guard<std::mutex> ns_lock(info->ns_mutex);
+        auto seg_it = info->ns_seg.find(nsid);
+        if (seg_it == info->ns_seg.end() || seg_it->second != seg) {
+            seg->qpair = nullptr;
+            seg->ns = nullptr;
+            return;
+        }
+
+        if (seg->qpair) {
+            spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
+            seg->qpair = nullptr;
+        }
+        seg->ns = nullptr;
+        info->ns_seg.erase(seg_it);
+        LOG(INFO) << "close nof segment handle"
+                  << ", ctrlr_key=" << ctrlr_key
+                  << ", nsid=" << nsid;
+        return;
+    }
+
+    seg->qpair = nullptr;
+    seg->ns = nullptr;
+}
+
+void SpdkWrapper::AbandonNofSegment(nof_seg_handle *seg) {
+    if (!seg || !seg->ns) {
+        return;
+    }
+
+    struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(seg->ns);
+    if (!ctrlr) {
+        seg->qpair = nullptr;
+        seg->ns = nullptr;
+        return;
+    }
+    uint32_t nsid = spdk_nvme_ns_get_id(seg->ns);
+
+    std::lock_guard<std::mutex> lock(ctrlrs_mutex);
+    for (auto &[ctrlr_key, info] : connected_ctrlrs) {
+        if (!info || info->ctrlr != ctrlr) {
+            continue;
+        }
+
+        std::lock_guard<std::mutex> ns_lock(info->ns_mutex);
+        auto seg_it = info->ns_seg.find(nsid);
+        if (seg_it != info->ns_seg.end() && seg_it->second == seg) {
+            info->ns_seg.erase(seg_it);
+        }
+        seg->qpair = nullptr;
+        seg->ns = nullptr;
+        LOG(WARNING) << "abandon nof segment handle without freeing qpair"
+                     << ", ctrlr_key=" << ctrlr_key
+                     << ", nsid=" << nsid;
+        return;
+    }
+
+    seg->qpair = nullptr;
+    seg->ns = nullptr;
+}
+
 uint32_t SpdkWrapper::GetBlockSize(const nof_seg_handle *seg_handle)
 {
     if (!seg_handle || !seg_handle->ns) {
@@ -915,66 +1042,100 @@ bool SpdkWrapper::ProbeNofSegment(const std::string &tr_str,
     if (!probe_buffer || !probe_buffer->ptr) {
         return false;
     }
+    std::lock_guard<std::mutex> probe_buffer_lock(probe_buffer->mutex);
 
-    ProbeRequestContext *probe_ctx = AcquireProbeRequestContext();
-    int ret = SubmitRequest(seg_handle, probe_buffer->ptr, 0, 1, 0,
-                            ProbeReadComplete, probe_ctx);
-    if (ret != 0) {
-        RecycleProbeRequestContext(probe_ctx);
-        if (IsConnectionError(ret)) {
-            InvalidateNofController(seg_handle);
+    const uint64_t seq = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    std::vector<uint8_t> expected(block_size);
+    FillProbePattern(expected.data(), block_size, tr_str, seq);
+
+    auto run_probe_io = [&](int op, const char *phase) -> bool {
+        ProbeRequestContext *probe_ctx = AcquireProbeRequestContext();
+        int ret = SubmitRequest(seg_handle, probe_buffer->ptr, 0, 1, op,
+                                ProbeReadComplete, probe_ctx);
+        if (ret != 0) {
+            RecycleProbeRequestContext(probe_ctx);
+            if (IsConnectionError(ret)) {
+                InvalidateNofController(seg_handle);
+            }
+            if (error_reason) {
+                *error_reason = IsConnectionError(ret)
+                                    ? "controller_error:" + std::to_string(ret)
+                                    : std::string("submit_fail:") + phase;
+            }
+            return false;
         }
+
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout_ms);
+        while (!probe_ctx->done.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            int32_t admin_ret = NvmePollAdminCompletions(seg_handle);
+            if (admin_ret < 0) {
+                LOG(ERROR) << "poll admin completion error during probe: ret "
+                           << admin_ret;
+                if (IsConnectionError(admin_ret)) {
+                    InvalidateNofController(seg_handle);
+                    RecycleProbeRequestContext(probe_ctx);
+                    if (error_reason) {
+                        *error_reason =
+                            "controller_error:" + std::to_string(admin_ret);
+                    }
+                    return false;
+                }
+            }
+            int64_t poll_ret = NvmePollProcessCompletion(seg_handle, 0);
+            if (poll_ret < 0 &&
+                IsConnectionError(static_cast<int32_t>(poll_ret))) {
+                InvalidateNofController(seg_handle);
+                RecycleProbeRequestContext(probe_ctx);
+                if (error_reason) {
+                    *error_reason =
+                        "controller_error:" + std::to_string(poll_ret);
+                }
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        const bool done = probe_ctx->done.load(std::memory_order_acquire);
+        bool ok = done && probe_ctx->success.load(std::memory_order_acquire);
+        if (!ok && error_reason) {
+            if (!done) {
+                *error_reason = std::string("completion_timeout:") + phase;
+            } else {
+                std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
+                *error_reason = probe_ctx->error_reason.empty()
+                                    ? std::string("completion_error:") + phase
+                                    : probe_ctx->error_reason;
+            }
+        }
+
+        if (!done) {
+            return false;
+        }
+        RecycleProbeRequestContext(probe_ctx);
+        return ok;
+    };
+
+    std::memcpy(probe_buffer->ptr, expected.data(), block_size);
+    if (!run_probe_io(1, "write_probe")) {
+        return false;
+    }
+
+    std::memset(probe_buffer->ptr, 0, block_size);
+    if (!run_probe_io(0, "read_probe")) {
+        return false;
+    }
+
+    if (std::memcmp(probe_buffer->ptr, expected.data(), block_size) != 0) {
         if (error_reason) {
-            *error_reason = IsConnectionError(ret)
-                                ? "controller_error:" + std::to_string(ret)
-                                : "submit_fail";
+            *error_reason = "namespace_io_error:probe_mismatch";
         }
         return false;
     }
 
-    auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (!probe_ctx->done.load(std::memory_order_acquire) &&
-           std::chrono::steady_clock::now() < deadline) {
-        int32_t admin_ret = NvmePollAdminCompletions(seg_handle);
-        if (admin_ret < 0) {
-            LOG(ERROR) << "poll admin completion error during probe: ret "
-                       << admin_ret;
-            if (IsConnectionError(admin_ret)) {
-                InvalidateNofController(seg_handle);
-                if (error_reason) {
-                    *error_reason =
-                        "controller_error:" + std::to_string(admin_ret);
-                }
-                return false;
-            }
-        }
-        int64_t poll_ret = NvmePollProcessCompletion(seg_handle, 0);
-        if (poll_ret < 0 && IsConnectionError(static_cast<int32_t>(poll_ret))) {
-            InvalidateNofController(seg_handle);
-            if (error_reason) {
-                *error_reason =
-                    "controller_error:" + std::to_string(poll_ret);
-            }
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    bool ok = probe_ctx->done.load(std::memory_order_acquire) &&
-              probe_ctx->success.load(std::memory_order_acquire);
-    if (!ok && error_reason) {
-        if (!probe_ctx->done.load(std::memory_order_acquire)) {
-            *error_reason = "completion_timeout";
-        } else {
-            std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
-            *error_reason = probe_ctx->error_reason.empty()
-                                ? "completion_error"
-                                : probe_ctx->error_reason;
-        }
-    }
-
-    return ok;
+    return true;
 }
 
 }  // namespace mooncake

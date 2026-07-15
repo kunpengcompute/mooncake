@@ -382,13 +382,13 @@ static bool HasBufferedTask(
     return false;
 }
 
-static void FailSpdkNofSegmentTasks(nof_seg_handle *seg_handle,
-                                    SpdkNofQos *nof_qos,
-                                    int64_t *total_outstanding_io,
-                                    int work_idx,
-                                    const std::string& reason) {
+static int64_t FailSpdkNofSegmentTasks(nof_seg_handle *seg_handle,
+                                       SpdkNofQos *nof_qos,
+                                       int64_t *total_outstanding_io,
+                                       int work_idx,
+                                       const std::string& reason) {
     if (!nof_qos) {
-        return;
+        return 0;
     }
 
     int64_t failed_outstanding = 0;
@@ -425,6 +425,7 @@ static void FailSpdkNofSegmentTasks(nof_seg_handle *seg_handle,
                << " failed_tasks=" << tasks.size()
                << " failed_outstanding_io=" << failed_outstanding
                << " reason=" << reason;
+    return failed_outstanding;
 }
 
 constexpr int kSpdkNofSubTaskChunkSize = 4096;

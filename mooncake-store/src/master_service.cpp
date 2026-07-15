@@ -34,6 +34,14 @@ bool IsNoFControllerErrorReason(const std::string& reason) {
     return reason.rfind("controller_error:", 0) == 0;
 }
 
+bool IsNoFNamespaceIoFailureReason(const std::string& reason) {
+    return reason.rfind("namespace_io_error:", 0) == 0;
+}
+
+bool IsNoFCompletionTimeoutReason(const std::string& reason) {
+    return reason.rfind("completion_timeout", 0) == 0;
+}
+
 std::optional<uint32_t> ExtractNoFNamespaceId(const std::string& endpoint) {
     static const std::regex ns_regex(R"((^|\s)ns:(\d+)(\s|$))");
     std::smatch match;
@@ -56,6 +64,86 @@ std::string BuildNoFEndpointWithNamespace(const std::string& endpoint,
                                   std::regex_constants::format_first_only);
     }
     return endpoint + " ns:" + std::to_string(nsid);
+}
+
+tl::expected<NoFSegment, ErrorCode> ReserveNoFProbeArea(
+    const NoFSegment& segment) {
+#ifndef USE_NOF
+    (void)segment;
+    return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
+#else
+    NoFSegment adjusted = segment;
+    nof_seg_handle* seg_handle =
+        SpdkWrapper::GetInstance().OpenNofSegment(segment.te_endpoint);
+    if (!seg_handle) {
+        LOG(ERROR) << "NoF segment mount: "
+                   << "segment_name=" << segment.name
+                   << ", endpoint=" << segment.te_endpoint
+                   << ", error=open_for_probe_reservation_failed";
+        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+
+    uint32_t block_size = SpdkWrapper::GetInstance().GetBlockSize(seg_handle);
+    uint64_t capacity =
+        SpdkWrapper::GetInstance().GetNamespaceCapacityBytes(seg_handle);
+    if (block_size == INVALID_BLOCK_SIZE || block_size == 0 || capacity == 0) {
+        LOG(ERROR) << "NoF segment mount: "
+                   << "segment_name=" << segment.name
+                   << ", endpoint=" << segment.te_endpoint
+                   << ", block_size=" << block_size
+                   << ", capacity=" << capacity
+                   << ", error=invalid_namespace_geometry";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
+    const uint64_t probe_bytes = block_size;
+    if (capacity <= probe_bytes || segment.base >= capacity) {
+        LOG(ERROR) << "NoF segment mount: "
+                   << "segment_name=" << segment.name
+                   << ", endpoint=" << segment.te_endpoint
+                   << ", base=" << segment.base
+                   << ", size=" << segment.size
+                   << ", capacity=" << capacity
+                   << ", probe_bytes=" << probe_bytes
+                   << ", error=namespace_too_small_for_probe_area";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
+    uint64_t requested_end = capacity;
+    if (segment.size < capacity - segment.base) {
+        requested_end = segment.base + segment.size;
+    }
+    const uint64_t data_base = std::max<uint64_t>(segment.base, probe_bytes);
+    if (requested_end <= data_base) {
+        LOG(ERROR) << "NoF segment mount: "
+                   << "segment_name=" << segment.name
+                   << ", endpoint=" << segment.te_endpoint
+                   << ", base=" << segment.base
+                   << ", size=" << segment.size
+                   << ", capacity=" << capacity
+                   << ", probe_bytes=" << probe_bytes
+                   << ", error=no_capacity_after_probe_reservation";
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
+    adjusted.base = static_cast<uintptr_t>(data_base);
+    adjusted.size = static_cast<size_t>(requested_end - data_base);
+    if (adjusted.base != segment.base || adjusted.size != segment.size) {
+        LOG(INFO) << "NoF segment mount: "
+                  << "segment_name=" << segment.name
+                  << ", endpoint=" << segment.te_endpoint
+                  << ", original_base=" << segment.base
+                  << ", original_size=" << segment.size
+                  << ", adjusted_base=" << adjusted.base
+                  << ", adjusted_size=" << adjusted.size
+                  << ", block_size=" << block_size
+                  << ", capacity=" << capacity
+                  << ", probe_bytes=" << probe_bytes
+                  << ", action=reserve_nof_probe_area";
+    }
+
+    return adjusted;
+#endif
 }
 
 }  // namespace
@@ -265,7 +353,12 @@ auto MasterService::MountNoFSegment(const NoFSegment& segment, const UUID& clien
     LOG(INFO) << "NoF segment mount: " << "client_id=" << client_id
               << ", action=mount_segment, segment_name=" << segment.name;
 
-    auto err = nof_segment_access.MountSegment(segment, client_id);
+    auto adjusted_segment = ReserveNoFProbeArea(segment);
+    if (!adjusted_segment) {
+        return tl::make_unexpected(adjusted_segment.error());
+    }
+
+    auto err = nof_segment_access.MountSegment(*adjusted_segment, client_id);
     if (err == ErrorCode::SEGMENT_ALREADY_EXISTS) {
         // Return OK because this is an idempotent operation
         return {};
@@ -332,7 +425,17 @@ auto MasterService::ReMountNoFSegment(const std::vector<NoFSegment>& segments,
 #else
     ScopedNoFSegmentAccess nof_segment_access = nof_segment_manager_.getNoFSegmentAccess();
 
-    ErrorCode err = nof_segment_access.ReMountSegment(segments, client_id);
+    std::vector<NoFSegment> adjusted_segments;
+    adjusted_segments.reserve(segments.size());
+    for (const auto& segment : segments) {
+        auto adjusted_segment = ReserveNoFProbeArea(segment);
+        if (!adjusted_segment) {
+            return tl::make_unexpected(adjusted_segment.error());
+        }
+        adjusted_segments.push_back(*adjusted_segment);
+    }
+
+    ErrorCode err = nof_segment_access.ReMountSegment(adjusted_segments, client_id);
     if (err != ErrorCode::OK) {
         return tl::make_unexpected(err);
     }
@@ -2495,7 +2598,7 @@ void MasterService::TryMountAddedNoFNamespaces(
 
         NoFSegment new_segment;
         new_segment.id = generate_uuid();
-        new_segment.base = template_snapshot.segment.base;
+        new_segment.base = 0;
         new_segment.size = static_cast<size_t>(capacity);
         new_segment.name = endpoint;
         new_segment.te_endpoint = endpoint;
@@ -2634,7 +2737,7 @@ void MasterService::NofHeartbeatThreadFunc() {
         }
 
         MasterMetricManager::instance().inc_nof_heartbeat_failure_total();
-        if (error_reason == "completion_timeout") {
+        if (IsNoFCompletionTimeoutReason(error_reason)) {
             MasterMetricManager::instance().inc_nof_heartbeat_timeout_total();
         }
 
@@ -2664,6 +2767,17 @@ void MasterService::NofHeartbeatThreadFunc() {
                      << ", failure_count=" << failure_count
                      << ", latency_ms=" << latency_ms
                      << ", reason=" << error_reason;
+
+        if (IsNoFNamespaceIoFailureReason(error_reason)) {
+            LOG(WARNING) << "segment_id=" << probe_target->segment_id
+                         << ", segment_name=" << probe_target->segment.name
+                         << ", endpoint=" << probe_target->segment.te_endpoint
+                         << ", action=nof_namespace_io_failure_unmount"
+                         << ", reason=" << error_reason;
+            TryUnmountNoFSegmentByNamespaceChange(*probe_target,
+                                                  error_reason);
+            continue;
+        }
 
         if (IsNoFControllerErrorReason(error_reason)) {
             LOG(WARNING) << "segment_id=" << probe_target->segment_id

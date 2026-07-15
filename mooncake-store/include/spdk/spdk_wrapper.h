@@ -44,6 +44,8 @@ public:
 
     bool IsConnectionError(int32_t ret) const;
 
+    bool IsNamespaceFailureStatus(const struct spdk_nvme_status *status) const;
+
     std::string GetControllerKey(const std::string &tr_str);
 
     std::vector<uint32_t> GetActiveNamespaces(const std::string &tr_str);
@@ -61,6 +63,8 @@ public:
     nof_seg_handle *OpenNofSegment(const std::string &tr_str);
 
     void CloseNofSegment(const std::string &tr_str);
+    void CloseNofSegment(nof_seg_handle *seg);
+    void AbandonNofSegment(nof_seg_handle *seg);
 
     uint32_t GetBlockSize(const nof_seg_handle *seg_handle);
 
@@ -74,6 +78,7 @@ private:
     struct ProbeBuffer {
         void *ptr{nullptr};
         uint32_t size{0};
+        std::mutex mutex;
 
         ProbeBuffer() = default;
         ProbeBuffer(const ProbeBuffer&) = delete;

@@ -31,8 +31,7 @@ target_link_libraries(
 # Add NoF worker pool benchmark executable
 if(USE_NOF)
   add_executable(nof_worker_pool_bench nof_worker_pool_bench.cpp)
-  target_include_directories(nof_worker_pool_bench PRIVATE ${SPDK_INCLUDE_DIR}
-                                                          ${DPDK_INCLUDE_DIR})
+  target_include_directories(nof_worker_pool_bench PRIVATE ${SPDK_INCLUDE_DIR})
   target_link_libraries(nof_worker_pool_bench PRIVATE mooncake_store glog::glog
                                                        gflags::gflags)
 endif()

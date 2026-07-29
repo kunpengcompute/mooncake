@@ -58,6 +58,18 @@ if (STORE_USE_K8S_LEASE)
 endif()
 
 if (USE_NOF)
+  set(SPDK_ROOT
+      "/usr/local"
+      CACHE PATH "SPDK installation prefix")
+  set(SPDK_INCLUDE_DIR
+      "${SPDK_ROOT}/include"
+      CACHE PATH "SPDK include directory")
+  set(SPDK_PKG_CONFIG_DIR
+      "${SPDK_ROOT}/lib/pkgconfig"
+      CACHE PATH "Directory containing installed SPDK pkg-config files")
+  message(STATUS "SPDK root: ${SPDK_ROOT}")
+  message(STATUS "SPDK include directory: ${SPDK_INCLUDE_DIR}")
+  message(STATUS "SPDK pkg-config directory: ${SPDK_PKG_CONFIG_DIR}")
   add_compile_definitions(USE_NOF)
 else()
   message(STATUS "USE_NOF=OFF, NoF SSD pool support is disabled")

@@ -47,8 +47,11 @@ pip install mooncake-transfer-engine-non-cuda
 
 **Build with NVMe-oF SSD Pool**
 
-To enable the NVMe-oF SSD pool, install the SPDK dependencies and build
-Mooncake with `USE_NOF` enabled:
+To enable the NVMe-oF SSD pool, install SPDK 26.01 from the
+[`boostkit/spdk`](https://gitcode.com/boostkit/spdk.git) branch
+`v26.01_sp_nof_ub` and build Mooncake with `USE_NOF` enabled. The dependency
+installer installs SPDK under `/usr/local`, which the Mooncake build detects
+automatically:
 
 ```bash
 bash dependencies.sh --with-spdk

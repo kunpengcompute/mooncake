@@ -157,76 +157,99 @@ if(USE_NOF)
   add_subdirectory(spdk)
   list(APPEND MOONCAKE_STORE_SOURCES ${SPDK_WRAPPER_SOURCES})
 
-  set(SPDK_INCLUDE_DIR
-      "/usr/local/include"
-      CACHE PATH "SPDK include directory")
-  set(DPDK_INCLUDE_DIR
-      "/usr/local/include"
-      CACHE PATH "DPDK include directory")
-  set(SPDK_LIB_DIR
-      "/usr/local/lib"
-      CACHE PATH "SPDK static library directory")
-  set(DPDK_LIB_DIR
-      "/usr/local/lib"
-      CACHE PATH "DPDK static library directory")
+  if(NOT EXISTS "${SPDK_INCLUDE_DIR}/spdk/env.h" OR
+     NOT EXISTS "${SPDK_INCLUDE_DIR}/spdk/nvme.h")
+    message(
+      FATAL_ERROR
+        "SPDK headers were not found under ${SPDK_INCLUDE_DIR}. "
+        "Run dependencies.sh --with-spdk before enabling USE_NOF.")
+  endif()
 
+  find_package(PkgConfig REQUIRED)
+
+  set(_spdk_pkg_config_path "${SPDK_PKG_CONFIG_DIR}")
+  if(DEFINED ENV{PKG_CONFIG_PATH} AND NOT "$ENV{PKG_CONFIG_PATH}" STREQUAL "")
+    set(_spdk_pkg_config_path
+        "${_spdk_pkg_config_path}:$ENV{PKG_CONFIG_PATH}")
+  endif()
+  set(_spdk_pkg_config_command
+      ${CMAKE_COMMAND} -E env
+      "PKG_CONFIG_PATH=${_spdk_pkg_config_path}"
+      ${PKG_CONFIG_EXECUTABLE})
+
+  execute_process(
+    COMMAND ${_spdk_pkg_config_command} --variable=pcfiledir spdk_nvme
+    RESULT_VARIABLE _spdk_pcfiledir_result
+    OUTPUT_VARIABLE _spdk_detected_pcfiledir
+    ERROR_VARIABLE _spdk_pcfiledir_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _spdk_pcfiledir_result EQUAL 0 OR
+     "${_spdk_detected_pcfiledir}" STREQUAL "")
+    message(
+      FATAL_ERROR
+        "Failed to find SPDK under ${SPDK_ROOT}: ${_spdk_pcfiledir_error} "
+        "Run dependencies.sh --with-spdk before enabling USE_NOF.")
+  endif()
+  get_filename_component(_spdk_expected_pcfiledir "${SPDK_PKG_CONFIG_DIR}"
+                         REALPATH)
+  get_filename_component(_spdk_detected_pcfiledir
+                         "${_spdk_detected_pcfiledir}" REALPATH)
+  if(NOT "${_spdk_expected_pcfiledir}" STREQUAL
+         "${_spdk_detected_pcfiledir}")
+    message(
+      FATAL_ERROR
+        "SPDK pkg-config metadata was found in ${_spdk_detected_pcfiledir}, "
+        "but ${_spdk_expected_pcfiledir} was requested. Reinstall SPDK with "
+        "dependencies.sh --with-spdk.")
+  endif()
+
+  execute_process(
+    COMMAND ${_spdk_pkg_config_command} --cflags spdk_nvme spdk_env_dpdk
+    RESULT_VARIABLE _spdk_cflags_result
+    OUTPUT_VARIABLE _spdk_cflags
+    ERROR_VARIABLE _spdk_cflags_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _spdk_cflags_result EQUAL 0)
+    message(
+      FATAL_ERROR
+        "Failed to query SPDK compiler flags: ${_spdk_cflags_error}")
+  endif()
+
+  execute_process(
+    COMMAND ${_spdk_pkg_config_command} --libs spdk_nvme spdk_env_dpdk
+    RESULT_VARIABLE _spdk_libs_result
+    OUTPUT_VARIABLE _spdk_libs
+    ERROR_VARIABLE _spdk_libs_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _spdk_libs_result EQUAL 0)
+    message(FATAL_ERROR "Failed to query SPDK libraries: ${_spdk_libs_error}")
+  endif()
+
+  execute_process(
+    COMMAND ${_spdk_pkg_config_command} --libs --static spdk_syslibs
+    RESULT_VARIABLE _spdk_syslibs_result
+    OUTPUT_VARIABLE _spdk_syslibs
+    ERROR_VARIABLE _spdk_syslibs_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _spdk_syslibs_result EQUAL 0)
+    message(
+      FATAL_ERROR "Failed to query SPDK system libraries: ${_spdk_syslibs_error}")
+  endif()
+
+  separate_arguments(SPDK_CFLAGS UNIX_COMMAND "${_spdk_cflags}")
+  separate_arguments(SPDK_LIBS UNIX_COMMAND "${_spdk_libs}")
+  separate_arguments(SPDK_SYSTEM_LIBS UNIX_COMMAND "${_spdk_syslibs}")
+
+  # SPDK uses constructor functions to register transports, so its static
+  # libraries must be linked as whole archives. pkg-config keeps this list
+  # compatible with the selected SPDK and bundled DPDK versions.
   set(SPDK_STATIC_LIBS
       -Wl,--whole-archive
-      ${SPDK_LIB_DIR}/libspdk_event.a
-      ${SPDK_LIB_DIR}/libspdk_rdma.a
-      ${SPDK_LIB_DIR}/libspdk_nvme.a
-      ${SPDK_LIB_DIR}/libspdk_sock_posix.a
+      -Wl,-Bstatic
+      ${SPDK_LIBS}
+      -Wl,-Bdynamic
       -Wl,--no-whole-archive
-      ${SPDK_LIB_DIR}/libspdk_vfio_user.a
-      ${SPDK_LIB_DIR}/libspdk_dma.a
-      ${SPDK_LIB_DIR}/libspdk_init.a
-      ${SPDK_LIB_DIR}/libspdk_env_dpdk.a
-      ${SPDK_LIB_DIR}/libspdk_log.a
-      ${SPDK_LIB_DIR}/libspdk_util.a
-      ${SPDK_LIB_DIR}/libspdk_blob.a
-      ${SPDK_LIB_DIR}/libspdk_blobfs.a
-      ${SPDK_LIB_DIR}/libspdk_bdev.a
-      ${SPDK_LIB_DIR}/libspdk_conf.a
-      ${SPDK_LIB_DIR}/libspdk_json.a
-      ${SPDK_LIB_DIR}/libspdk_jsonrpc.a
-      ${SPDK_LIB_DIR}/libspdk_sock.a
-      ${SPDK_LIB_DIR}/libspdk_thread.a
-      ${SPDK_LIB_DIR}/libspdk_trace.a
-      ${SPDK_LIB_DIR}/libspdk_vmd.a
-      ${SPDK_LIB_DIR}/libspdk_rpc.a
-      ${DPDK_LIB_DIR}/librte_eal.a
-      ${DPDK_LIB_DIR}/librte_mempool.a
-      ${DPDK_LIB_DIR}/librte_ring.a
-      ${DPDK_LIB_DIR}/librte_bus_pci.a
-      ${DPDK_LIB_DIR}/librte_pci.a
-      ${DPDK_LIB_DIR}/librte_timer.a
-      ${DPDK_LIB_DIR}/librte_telemetry.a
-      ${DPDK_LIB_DIR}/librte_kvargs.a
-      ${DPDK_LIB_DIR}/librte_mbuf.a
-      -Wl,--whole-archive
-      ${DPDK_LIB_DIR}/librte_mempool_ring.a
-      -Wl,--no-whole-archive
-      ${DPDK_LIB_DIR}/librte_power.a
-      ${DPDK_LIB_DIR}/librte_ethdev.a
-      ${DPDK_LIB_DIR}/librte_net.a
-      ${DPDK_LIB_DIR}/librte_vhost.a
-      ${DPDK_LIB_DIR}/librte_cryptodev.a
-      ${DPDK_LIB_DIR}/librte_hash.a
-      ${DPDK_LIB_DIR}/librte_rcu.a
-      pthread
-      dl
-      numa
-      rt
-      m
-      uuid
-      crypto
-      aio
-      z
-      elf
-      ibverbs
-      rdmacm
-      ssl
-      bsd)
+      ${SPDK_SYSTEM_LIBS})
 endif()
 
 # The cache_allocator library
@@ -234,8 +257,8 @@ include_directories(${Python3_INCLUDE_DIRS})
 add_library(mooncake_store ${MOONCAKE_STORE_SOURCES})
 target_include_directories(mooncake_store PUBLIC ${XXHASH_INCLUDE_DIR})
 if(USE_NOF)
-  target_include_directories(mooncake_store PRIVATE ${SPDK_INCLUDE_DIR}
-                                                    ${DPDK_INCLUDE_DIR})
+  target_include_directories(mooncake_store PUBLIC ${SPDK_INCLUDE_DIR})
+  target_compile_options(mooncake_store PUBLIC ${SPDK_CFLAGS})
 endif()
 target_link_libraries(mooncake_store PUBLIC ${XXHASH_LIBRARY})
 if(USE_SPDK_GPU_DMABUF)

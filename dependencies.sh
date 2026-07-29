@@ -25,6 +25,9 @@ REPO_ROOT=`pwd`
 GITHUB_PROXY=${GITHUB_PROXY:-"https://github.com"}
 GOVER=1.25.9
 OS_RELEASE_FILE=${OS_RELEASE_FILE:-/etc/os-release}
+SPDK_REPOSITORY="https://gitcode.com/boostkit/spdk.git"
+SPDK_BRANCH="v26.01_sp_nof_ub"
+SPDK_INSTALL_PREFIX="/usr/local"
 
 # Function to print section headers
 print_section() {
@@ -98,7 +101,7 @@ for arg in "$@"; do
             echo -e "Usage: ./dependencies.sh [OPTIONS]"
             echo -e "\nOptions:"
             echo -e "  -y, --yes       Skip confirmation and install all dependencies"
-            echo -e "  --with-spdk     Install SPDK for NVMe-oF support"
+            echo -e "  --with-spdk     Install SPDK ${SPDK_BRANCH} for NVMe-oF support"
             echo -e "  -h, --help      Show this help message and exit"
             exit 0
             ;;
@@ -113,7 +116,7 @@ echo -e "  - System packages (build tools, libraries)"
 echo -e "  - Git submodules (including pybind11 and yalantinglibs)"
 echo -e "  - Go $GOVER"
 if [ "$INSTALL_SPDK" = true ]; then
-    echo -e "  - SPDK (for NVMe-oF support)"
+    echo -e "  - SPDK ${SPDK_BRANCH} (for NVMe-oF support)"
 fi
 echo
 
@@ -209,8 +212,7 @@ elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS
                      pkgconf-pkg-config \
                      elfutils-libelf-devel \
                      patchelf  \
-                     xxhash-devel \
-                     libbsd-devel"
+                     xxhash-devel"
 
     yum install -y $SYSTEM_PACKAGES
     check_success "Failed to install system packages"
@@ -381,17 +383,12 @@ if [ "$INSTALL_SPDK" = true ]; then
     fi
 
     # Clone SPDK
-    echo "Cloning SPDK from ${GITHUB_PROXY}/spdk/spdk.git..."
-    git clone ${GITHUB_PROXY}/spdk/spdk.git
+    echo "Cloning SPDK branch ${SPDK_BRANCH} from ${SPDK_REPOSITORY}..."
+    git clone --branch "${SPDK_BRANCH}" --single-branch "${SPDK_REPOSITORY}" spdk
     check_success "Failed to clone SPDK"
 
     cd spdk
     check_success "Failed to change to SPDK directory"
-
-    # Checkout specific version
-    echo "Checking out SPDK version v23.01.1..."
-    git checkout v23.01.1
-    check_success "Failed to checkout SPDK version v23.01.1"
 
     # Initialize submodules
     echo "Initializing SPDK submodules..."
@@ -404,8 +401,8 @@ if [ "$INSTALL_SPDK" = true ]; then
     check_success "Failed to install SPDK dependencies"
 
     # Configure SPDK with RDMA support
-    echo "Configuring SPDK with RDMA support..."
-    ./configure --with-rdma
+    echo "Configuring SPDK with RDMA support (install prefix: ${SPDK_INSTALL_PREFIX})..."
+    ./configure --with-rdma --prefix="${SPDK_INSTALL_PREFIX}"
     check_success "Failed to configure SPDK"
 
     # Build SPDK
@@ -418,14 +415,7 @@ if [ "$INSTALL_SPDK" = true ]; then
     make install
     check_success "Failed to install SPDK"
 
-    # Copy DPDK libraries to system library path
-    if ls dpdk/build/lib/*.a >/dev/null 2>&1; then
-        echo "Copying DPDK libraries to /usr/local/lib..."
-        cp dpdk/build/lib/*.a /usr/local/lib/
-        check_success "Failed to copy DPDK libraries"
-    fi
-
-    print_success "SPDK installed successfully"
+    print_success "SPDK ${SPDK_BRANCH} installed successfully under ${SPDK_INSTALL_PREFIX}"
     cd "${REPO_ROOT}"
 fi
 
@@ -441,7 +431,7 @@ echo -e "  ${GREEN}✓${NC} yalantinglibs"
 echo -e "  ${GREEN}✓${NC} Git submodules"
 echo -e "  ${GREEN}✓${NC} Go $GOVER"
 if [ "$INSTALL_SPDK" = true ]; then
-    echo -e "  ${GREEN}✓${NC} SPDK (v23.01.1)"
+    echo -e "  ${GREEN}✓${NC} SPDK (${SPDK_BRANCH})"
 fi
 echo
 echo -e "You can now build and run Mooncake."

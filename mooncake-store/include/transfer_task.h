@@ -355,7 +355,7 @@ struct SpdkNofQos;
  */
 struct SpdkNofTask {
     nof_seg_handle* seg_handle;
-    void* ptr;
+    std::vector<Slice> slices;
     uint64_t lba;
     uint32_t lba_count;
     int remaining_lba;
@@ -369,10 +369,11 @@ struct SpdkNofTask {
     SpdkNofQos* nof_qos;
     SpdkNofTask* nxt;
 
-    SpdkNofTask(nof_seg_handle* handle, void* buf, uint64_t off, uint32_t len,
-                int op_code, std::shared_ptr<SpdkNofOperationState> s)
+    SpdkNofTask(nof_seg_handle* handle, std::vector<Slice> buffers,
+                uint64_t off, uint32_t len, int op_code,
+                std::shared_ptr<SpdkNofOperationState> s)
         : seg_handle(handle),
-          ptr(buf),
+          slices(std::move(buffers)),
           lba(off),
           lba_count(len),
           remaining_lba(lba_count),
@@ -390,7 +391,15 @@ struct SpdkNofTask {
 struct SpdkNofSubTask {
     SpdkNofTask* task;
     int submit_lba_count;
+    // This sub-request covers a byte range within task->slices. The remaining
+    // fields are the restartable cursor consumed by SPDK readv/writev.
+    uint64_t payload_byte_offset;
+    uint32_t payload_byte_length;
+    uint32_t sgl_remaining;
+    size_t sgl_index;
+    size_t sgl_offset;
     std::stack<SpdkNofSubTask*>* sub_task_pool;
+    struct spdk_nvme_ns_cmd_ext_io_opts io_opts;
 };
 
 constexpr int kDefaultSpdkNofSubmitChunkBytes = (1 << 17);    // 128k
@@ -549,8 +558,7 @@ class TransferSubmitter {
      */
     std::optional<TransferFuture> submit(const Replica::Descriptor& replica,
                                          std::vector<Slice>& slices,
-                                         TransferRequest::OpCode op_code,
-                                         void* ptr = nullptr, size_t size = 0);
+                                         TransferRequest::OpCode op_code);
 
     /**
      * @brief Submit a range read: read [src_offset, src_offset+size) from
@@ -629,7 +637,8 @@ class TransferSubmitter {
      * @brief Submit SPDK NVMe-oF operation asynchronously
      */
     std::optional<TransferFuture> submitSpdkNofOperation(
-        const AllocatedBuffer::Descriptor& handle, void* ptr, size_t size,
+        const AllocatedBuffer::Descriptor& handle,
+        const std::vector<Slice>& slices,
         const TransferRequest::OpCode op_code);
 #endif
 

@@ -170,6 +170,18 @@ size_t sum_buffer_handle_sizes(
     return total;
 }
 
+std::string resolve_register_buffer_location(void *buffer) {
+#if defined(USE_CUDA)
+    int device_id = -1;
+    if (gpu_staging::IsDevicePointer(buffer, &device_id) && device_id >= 0) {
+        return "cuda:" + std::to_string(device_id);
+    }
+#else
+    (void)buffer;
+#endif
+    return kWildcardLocation;
+}
+
 PreparedRangedReadRequest prepare_ranged_read_request(
     size_t buffer_count, const std::vector<std::vector<std::string>> &all_keys,
     const std::vector<std::vector<std::vector<size_t>>> &all_dst_offsets,
@@ -3033,8 +3045,8 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
         LOG(ERROR) << "Client is not initialized";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
-    auto result = client_->RegisterLocalMemory(buffer, size, kWildcardLocation,
-                                               false, true);
+    auto result = client_->RegisterLocalMemory(
+        buffer, size, resolve_register_buffer_location(buffer), false, true);
     if (!result) {
         return result;
     }
@@ -4942,8 +4954,9 @@ RealClient::batch_get_into_multi_buffers_internal(
         const auto &buffers = all_buffers[i];
         std::vector<Slice> key_slices;
         key_slices.reserve(buffers.size());
-        if (replica.is_memory_replica()) {
-            // MEMORY: RDMA from remote memory directly to GPU (GPUDirect).
+        if (replica.is_memory_replica() || replica.is_nof_replica()) {
+            // MEMORY and NOF_SSD both transfer directly to scatter-gather GPU
+            // buffers. The NoF path converts these slices into an NVMe SGL.
             for (size_t j = 0; j < buffers.size(); ++j) {
                 key_slices.emplace_back(Slice{buffers[j], sizes[j]});
             }

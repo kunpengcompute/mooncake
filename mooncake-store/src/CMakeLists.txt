@@ -238,6 +238,18 @@ if(USE_NOF)
                                                     ${DPDK_INCLUDE_DIR})
 endif()
 target_link_libraries(mooncake_store PUBLIC ${XXHASH_LIBRARY})
+if(USE_SPDK_GPU_DMABUF)
+  if(NOT USE_NOF)
+    message(FATAL_ERROR "USE_SPDK_GPU_DMABUF requires USE_NOF")
+  endif()
+  find_package(CUDAToolkit REQUIRED)
+  find_library(CUDA_DRIVER_LIB cuda REQUIRED)
+  target_compile_definitions(mooncake_store PUBLIC USE_SPDK_GPU_DMABUF
+                                                  PRIVATE USE_CUDA)
+  target_include_directories(mooncake_store PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(mooncake_store PUBLIC ${CUDA_DRIVER_LIB}
+                                      PRIVATE CUDA::cudart)
+endif()
 if(STORE_USE_REDIS)
   target_include_directories(mooncake_store
                              PRIVATE ${MOONCAKE_STORE_HIREDIS_INCLUDE_DIR})

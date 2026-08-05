@@ -1,8 +1,10 @@
 #include "master_service.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <random>
 #include <shared_mutex>

@@ -1,5 +1,7 @@
 project(MooncakeStore VERSION 2.0.0)
 
+option(USE_SPDK_GPU_DMABUF "Enable SPDK GPU dma-buf memory domain support" OFF)
+
 # Extract version components for C++ usage
 set(MOONCAKE_STORE_VERSION ${PROJECT_VERSION})
 

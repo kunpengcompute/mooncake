@@ -5,8 +5,16 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include <thread>
 #include "spdk/spdk_wrapper.h"
+
+#if defined(USE_SPDK_GPU_DMABUF)
+#include <spdk/gpu_dmabuf.h>
+#define MOONCAKE_HAS_SPDK_GPU_DMABUF 1
+#else
+#define MOONCAKE_HAS_SPDK_GPU_DMABUF 0
+#endif
 
 namespace mooncake {
 namespace {
@@ -85,6 +93,8 @@ void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
 struct nof_seg_handle {
     struct spdk_nvme_qpair *qpair;
     struct spdk_nvme_ns *ns;
+    struct spdk_nvme_ctrlr *ctrlr;
+    struct spdk_memory_domain *rdma_domain;
 };
 
 struct tr_info {
@@ -130,11 +140,43 @@ bool SpdkWrapper::InitializeEnv() {
 
     // Mark SPDK as initialized.
     initialized.store(true, std::memory_order_release);
+
+    bool enable_gpu_dmabuf = false;
+    uint64_t cuda_device_id = 0;
+    if (ParseEnvBool("MC_SPDK_GPU_DMABUF", &enable_gpu_dmabuf) &&
+        enable_gpu_dmabuf) {
+        int device_id = -1;
+        if (ParseEnvU64("MC_SPDK_GPU_DMABUF_DEVICE_ID", &cuda_device_id)) {
+            device_id = static_cast<int>(cuda_device_id);
+        }
+        rc = CreateGpuDmabufDomain(device_id);
+        if (rc != 0) {
+            LOG(ERROR) << "Failed to create SPDK GPU dma-buf domain, rc="
+                       << rc;
+            spdk_env_fini();
+            initialized.store(false, std::memory_order_release);
+            return false;
+        }
+        LOG(INFO) << "SPDK GPU dma-buf domain enabled, cuda_device_id="
+                  << device_id;
+    }
     return true;
 }
 
 void SpdkWrapper::Cleanup() {
     if (initialized.load(std::memory_order_acquire)) {
+        {
+            std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+            if (gpu_dmabuf_domain_ != nullptr) {
+#if MOONCAKE_HAS_SPDK_GPU_DMABUF
+                spdk_gpu_dmabuf_memory_domain_destroy(gpu_dmabuf_domain_);
+#endif
+                gpu_dmabuf_domain_ = nullptr;
+            }
+            gpu_memory_regions_.clear();
+            gpu_dmabuf_enabled_.store(false, std::memory_order_release);
+        }
+
         {
             std::lock_guard<std::mutex> lock(ctrlrs_mutex);
             for (auto &[_, info] : connected_ctrlrs) {
@@ -168,6 +210,183 @@ void SpdkWrapper::Cleanup() {
         spdk_env_fini();
         initialized.store(false, std::memory_order_release);
     }
+}
+
+bool SpdkWrapper::IsGpuDmabufEnabled() const {
+    return gpu_dmabuf_enabled_.load(std::memory_order_acquire);
+}
+
+int SpdkWrapper::CreateGpuDmabufDomain(int cuda_device_id) {
+#if MOONCAKE_HAS_SPDK_GPU_DMABUF
+    {
+        std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+        if (gpu_dmabuf_domain_ == nullptr) {
+            struct spdk_gpu_dmabuf_memory_domain_opts opts;
+            spdk_gpu_dmabuf_memory_domain_get_opts(&opts);
+            opts.cuda_device_id = cuda_device_id;
+
+            int rc =
+                spdk_gpu_dmabuf_memory_domain_create(&gpu_dmabuf_domain_,
+                                                     &opts);
+            if (rc != 0) {
+                gpu_dmabuf_domain_ = nullptr;
+                gpu_dmabuf_enabled_.store(false, std::memory_order_release);
+                return rc;
+            }
+        }
+        gpu_dmabuf_enabled_.store(true, std::memory_order_release);
+    }
+
+    return 0;
+#else
+    (void)cuda_device_id;
+    return -ENOTSUP;
+#endif
+}
+
+int SpdkWrapper::InitializeGpuDmabufDomain(int cuda_device_id) {
+    if (!InitializeEnv()) {
+        return -ENODEV;
+    }
+
+    return CreateGpuDmabufDomain(cuda_device_id);
+}
+
+int SpdkWrapper::RegisterGpuBuffer(const nof_seg_handle *seg_handle, void *ptr,
+                                   size_t size) {
+    if (!IsGpuDmabufEnabled()) {
+        return -ENOTSUP;
+    }
+    if (!seg_handle || !seg_handle->rdma_domain || !ptr || size == 0) {
+        return -EINVAL;
+    }
+    if (!IsGpuMemoryRegionRegistered(ptr, size)) {
+        return 0;
+    }
+
+#if MOONCAKE_HAS_SPDK_GPU_DMABUF
+    return spdk_gpu_dmabuf_memory_domain_register(
+        gpu_dmabuf_domain_, seg_handle->rdma_domain, ptr, size);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+int SpdkWrapper::RegisterGpuMemoryRegion(void *ptr, size_t size) {
+    if (!IsGpuDmabufEnabled()) {
+        return 0;
+    }
+    if (!ptr || size == 0) {
+        return -EINVAL;
+    }
+
+    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+    if (size > std::numeric_limits<uintptr_t>::max() - addr) {
+        return -EINVAL;
+    }
+    uintptr_t end = addr + size;
+
+    {
+        std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+        auto next = gpu_memory_regions_.upper_bound(addr);
+        if (next != gpu_memory_regions_.begin()) {
+            auto prev = std::prev(next);
+            uintptr_t prev_addr = prev->first;
+            size_t prev_size = prev->second;
+            uintptr_t prev_end = prev_addr + prev_size;
+            if (addr >= prev_addr && end <= prev_end) {
+                return 0;
+            }
+            if (addr < prev_end) {
+                return -EINVAL;
+            }
+        }
+        if (next != gpu_memory_regions_.end() && end > next->first) {
+            return -EINVAL;
+        }
+
+        gpu_memory_regions_[addr] = size;
+    }
+
+    std::vector<nof_seg_handle *> seg_handles;
+    {
+        std::lock_guard<std::mutex> lock(ctrlrs_mutex);
+        for (auto &[_, info] : connected_ctrlrs) {
+            if (!info) {
+                continue;
+            }
+            std::lock_guard<std::mutex> ns_lock(info->ns_mutex);
+            for (auto &[_, seg] : info->ns_seg) {
+                if (seg && seg->rdma_domain != nullptr) {
+                    seg_handles.push_back(seg.get());
+                }
+            }
+        }
+    }
+
+    for (nof_seg_handle *seg_handle : seg_handles) {
+        int rc = RegisterGpuBuffer(seg_handle, ptr, size);
+        if (rc != 0) {
+            {
+                std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+                auto it = gpu_memory_regions_.find(addr);
+                if (it != gpu_memory_regions_.end() && it->second == size) {
+                    gpu_memory_regions_.erase(it);
+                }
+            }
+            InvalidateGpuBuffer(ptr, size);
+            return rc;
+        }
+    }
+    return 0;
+}
+
+bool SpdkWrapper::IsGpuMemoryRegionRegistered(void *ptr, size_t size) {
+    if (!ptr || size == 0) {
+        return false;
+    }
+
+    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+    std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+    auto it = gpu_memory_regions_.upper_bound(addr);
+    if (it == gpu_memory_regions_.begin()) {
+        return false;
+    }
+    --it;
+
+    uintptr_t region_addr = it->first;
+    size_t region_size = it->second;
+    size_t offset = addr - region_addr;
+    return offset <= region_size && size <= region_size - offset;
+}
+
+void SpdkWrapper::UnregisterGpuMemoryRegion(void *ptr) {
+    if (!ptr) {
+        return;
+    }
+
+    size_t size = 0;
+    {
+        std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+        auto it = gpu_memory_regions_.find(reinterpret_cast<uintptr_t>(ptr));
+        if (it == gpu_memory_regions_.end()) {
+            return;
+        }
+        size = it->second;
+        gpu_memory_regions_.erase(it);
+    }
+
+    InvalidateGpuBuffer(ptr, size);
+}
+
+void SpdkWrapper::InvalidateGpuBuffer(void *ptr, size_t size) {
+    if (!IsGpuDmabufEnabled() || !ptr || size == 0) {
+        return;
+    }
+
+#if MOONCAKE_HAS_SPDK_GPU_DMABUF
+    spdk_gpu_dmabuf_memory_domain_invalidate(gpu_dmabuf_domain_, ptr, size);
+#endif
 }
 
 void *SpdkWrapper::Alloc(size_t size, size_t align, int socket_id) {
@@ -303,6 +522,10 @@ int SpdkWrapper::ConnectController(const struct spdk_nvme_transport_id *trid,
 }
 
 nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
+    if (!InitializeEnv()) {
+        return nullptr;
+    }
+
     tr_info tr;
     int ret = ParseTransPortStr(tr_str, &tr);
     if (ret != 0) {
@@ -355,6 +578,46 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
         auto new_seg = std::make_unique<nof_seg_handle>();
         new_seg->qpair = qpair;
         new_seg->ns = ns;
+        new_seg->ctrlr = info->ctrlr;
+        new_seg->rdma_domain = nullptr;
+        struct spdk_memory_domain *domains[8] = {};
+        int domain_count =
+            spdk_nvme_ctrlr_get_memory_domains(info->ctrlr, domains, 8);
+        if (domain_count < 0 && IsGpuDmabufEnabled()) {
+            LOG(WARNING) << "Failed to query SPDK controller memory domains, rc="
+                         << domain_count;
+        }
+        for (int i = 0; i < domain_count && i < 8; ++i) {
+            if (domains[i] != nullptr &&
+                spdk_memory_domain_get_dma_device_type(domains[i]) ==
+                    SPDK_DMA_DEVICE_TYPE_RDMA) {
+                new_seg->rdma_domain = domains[i];
+                break;
+            }
+        }
+        if (IsGpuDmabufEnabled() && new_seg->rdma_domain == nullptr) {
+            LOG(WARNING) << "SPDK GPU dma-buf enabled but controller has no "
+                         << "RDMA memory domain";
+        }
+        if (new_seg->rdma_domain != nullptr && IsGpuDmabufEnabled()) {
+            std::vector<std::pair<void *, size_t>> regions;
+            {
+                std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+                regions.reserve(gpu_memory_regions_.size());
+                for (auto &[addr, size] : gpu_memory_regions_) {
+                    regions.emplace_back(reinterpret_cast<void *>(addr), size);
+                }
+            }
+
+            for (auto &[addr, size] : regions) {
+                ret = RegisterGpuBuffer(new_seg.get(), addr, size);
+                if (ret != 0) {
+                    LOG(WARNING)
+                        << "Failed to pre-register GPU buffer for SPDK NoF, ptr="
+                        << addr << ", size=" << size << ", ret=" << ret;
+                }
+            }
+        }
         seg_handle = new_seg.get();
         ns_seg[tr.ns] = std::move(new_seg);
     }
@@ -388,6 +651,69 @@ int SpdkWrapper::SubmitRequest(const nof_seg_handle *seg_handle, void *ptr,
                                       cb_ctx, 0);
     }
     return -1;
+}
+
+int SpdkWrapper::SubmitRequestVExt(
+    const nof_seg_handle *seg_handle, uint64_t lba, uint32_t lba_count, int op,
+    spdk_nvme_cmd_cb cb_fn, void *cb_ctx,
+    spdk_nvme_req_reset_sgl_cb reset_sgl_fn,
+    spdk_nvme_req_next_sge_cb next_sge_fn,
+    struct spdk_nvme_ns_cmd_ext_io_opts *io_opts) {
+    if (!seg_handle || !lba_count || !seg_handle->qpair || !seg_handle->ns ||
+        !reset_sgl_fn || !next_sge_fn) {
+        return -EINVAL;
+    }
+
+    struct spdk_nvme_ns_cmd_ext_io_opts *opts = nullptr;
+    if (IsGpuDmabufEnabled() && gpu_dmabuf_domain_ != nullptr) {
+        if (io_opts == nullptr) {
+            return -EINVAL;
+        }
+
+        uint32_t block_size = spdk_nvme_ns_get_sector_size(seg_handle->ns);
+        size_t remaining = static_cast<size_t>(lba_count) * block_size;
+        if (block_size == 0 || remaining / block_size != lba_count) {
+            return -EINVAL;
+        }
+
+        reset_sgl_fn(cb_ctx, 0);
+        while (remaining > 0) {
+            void *address = nullptr;
+            uint32_t length = 0;
+            int rc = next_sge_fn(cb_ctx, &address, &length);
+            if (rc != 0 || address == nullptr || length == 0 ||
+                length > remaining ||
+                !IsGpuMemoryRegionRegistered(address, length)) {
+                LOG(ERROR)
+                    << "SPDK GPU dma-buf vector submit uses an invalid or "
+                       "unregistered segment, ptr="
+                    << address << ", size=" << length;
+                return -EINVAL;
+            }
+            remaining -= length;
+        }
+        reset_sgl_fn(cb_ctx, 0);
+
+        std::memset(io_opts, 0, sizeof(*io_opts));
+        io_opts->size = sizeof(*io_opts);
+        io_opts->memory_domain = gpu_dmabuf_domain_;
+        io_opts->memory_domain_ctx = nullptr;
+        io_opts->io_flags = 0;
+        opts = io_opts;
+    }
+
+    struct spdk_nvme_qpair *qpair = seg_handle->qpair;
+    struct spdk_nvme_ns *ns = seg_handle->ns;
+    if (op == kSpdkNofOpRead) {
+        return spdk_nvme_ns_cmd_readv_ext(
+            ns, qpair, lba, lba_count, cb_fn, cb_ctx, reset_sgl_fn,
+            next_sge_fn, opts);
+    } else if (op == kSpdkNofOpWrite) {
+        return spdk_nvme_ns_cmd_writev_ext(
+            ns, qpair, lba, lba_count, cb_fn, cb_ctx, reset_sgl_fn,
+            next_sge_fn, opts);
+    }
+    return -EINVAL;
 }
 
 SpdkWrapper::ProbeBuffer *SpdkWrapper::GetOrCreateProbeBuffer(

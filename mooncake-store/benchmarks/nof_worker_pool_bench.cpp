@@ -550,7 +550,8 @@ void SubmitSlot(Slot &slot, EndpointContext &endpoint, size_t endpoint_index,
     slot.measure = measure_now;
     slot.submit_time = Clock::now();
 
-    mooncake::SpdkNofTask task(endpoint.seg_handle, slot.buffer, lba,
+    std::vector<mooncake::Slice> slices{{slot.buffer, slot.buffer_size}};
+    mooncake::SpdkNofTask task(endpoint.seg_handle, std::move(slices), lba,
                                static_cast<uint32_t>(endpoint.io_blocks), op,
                                slot.state);
     pool.submitTask(std::move(task));

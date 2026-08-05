@@ -38,6 +38,9 @@
 #include "rpc_types.h"
 #include "local_hot_cache.h"
 #include "gpu_staging_utils.h"
+#ifdef USE_NOF
+#include "spdk/spdk_wrapper.h"
+#endif
 
 namespace mooncake {
 
@@ -81,52 +84,76 @@ int GetCurrentNumaSocketId() {
 }
 #endif
 
-struct ContiguousSliceRange {
-    void* ptr = nullptr;
-    size_t size = 0;
-};
-
-std::optional<ContiguousSliceRange> GetContiguousSliceRange(
-    std::span<const Slice> slices) {
-    if (slices.empty()) {
-        return std::nullopt;
-    }
-
-    uintptr_t expected_ptr = 0;
-    uintptr_t start_ptr = 0;
-    size_t total_size = 0;
-    for (size_t i = 0; i < slices.size(); ++i) {
-        const auto& slice = slices[i];
-        if (slice.ptr == nullptr) {
-            return std::nullopt;
-        }
-
-        const auto current_ptr = reinterpret_cast<uintptr_t>(slice.ptr);
-        if (i == 0) {
-            start_ptr = current_ptr;
-            expected_ptr = current_ptr;
-        } else if (current_ptr != expected_ptr) {
-            return std::nullopt;
-        }
-
-        if (slice.size > std::numeric_limits<size_t>::max() - total_size) {
-            return std::nullopt;
-        }
-        if (slice.size > std::numeric_limits<uintptr_t>::max() - current_ptr) {
-            return std::nullopt;
-        }
-
-        total_size += slice.size;
-        expected_ptr = current_ptr + slice.size;
-    }
-
-    if (total_size == 0) {
-        return std::nullopt;
-    }
-
-    return ContiguousSliceRange{.ptr = reinterpret_cast<void*>(start_ptr),
-                                .size = total_size};
+#ifdef USE_NOF
+bool IsCudaLocationForSpdk(const std::string& location) {
+    return location.rfind("cuda:", 0) == 0;
 }
+
+bool IsSpdkGpuDmabufRequested() {
+    const char* value = std::getenv("MC_SPDK_GPU_DMABUF");
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+
+    char* end_ptr = nullptr;
+    errno = 0;
+    unsigned long long parsed = std::strtoull(value, &end_ptr, 10);
+    return errno == 0 && end_ptr != value &&
+           (end_ptr == nullptr || *end_ptr == '\0') && parsed != 0;
+}
+
+bool ParseEnvSize(const char* name, size_t* out) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+
+    char* end_ptr = nullptr;
+    errno = 0;
+    unsigned long long parsed = std::strtoull(value, &end_ptr, 10);
+    if (errno != 0 || end_ptr == value ||
+        (end_ptr != nullptr && *end_ptr != '\0') ||
+        parsed > std::numeric_limits<size_t>::max()) {
+        LOG(WARNING) << "Invalid " << name << "=" << value
+                     << ", ignoring store replica override";
+        return false;
+    }
+
+    *out = static_cast<size_t>(parsed);
+    return true;
+}
+
+ReplicateConfig ApplyStoreReplicaOverrideFromEnv(const ReplicateConfig& config) {
+    ReplicateConfig resolved = config;
+
+    if (config.replica_num != 1 || config.nof_replica_num != 0) {
+        return resolved;
+    }
+
+    size_t replica_num = resolved.replica_num;
+    size_t nof_replica_num = resolved.nof_replica_num;
+    bool has_replica_override =
+        ParseEnvSize("MC_STORE_REPLICA_NUM", &replica_num);
+    bool has_nof_override =
+        ParseEnvSize("MC_STORE_NOF_REPLICA_NUM", &nof_replica_num);
+
+    if (!has_replica_override && !has_nof_override) {
+        return resolved;
+    }
+
+    if (replica_num == 0 && nof_replica_num == 0) {
+        LOG(WARNING) << "Ignoring invalid store replica override: "
+                     << "MC_STORE_REPLICA_NUM=" << replica_num
+                     << ", MC_STORE_NOF_REPLICA_NUM=" << nof_replica_num
+                     << ". At least one replica count must be > 0";
+        return resolved;
+    }
+
+    resolved.replica_num = replica_num;
+    resolved.nof_replica_num = nof_replica_num;
+    return resolved;
+}
+#endif
 
 struct ReplicaTransferSummary {
     size_t allocated_memory_replicas = 0;
@@ -1361,20 +1388,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
 
         // Submit transfer operation asynchronously
         std::optional<TransferFuture> future;
-        if (replica.is_nof_replica()) {
-            auto contiguous_range = GetContiguousSliceRange(slices_it->second);
-            if (!contiguous_range.has_value()) {
-                LOG(ERROR) << "NoF transfer requires contiguous slices";
-                results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
-                continue;
-            }
-            future = transfer_submitter_->submit(
-                replica, slices_it->second, TransferRequest::READ,
-                contiguous_range->ptr, contiguous_range->size);
-        } else {
-            future = transfer_submitter_->submit(replica, slices_it->second,
-                                                 TransferRequest::READ);
-        }
+        future = transfer_submitter_->submit(replica, slices_it->second,
+                                             TransferRequest::READ);
         if (!future) {
             // Release cache block if submit failed
             if (hot_cache_ && cache_used) {
@@ -1486,6 +1501,9 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
     }
 
     ReplicateConfig client_cfg = config;
+#ifdef USE_NOF
+    client_cfg = ApplyStoreReplicaOverrideFromEnv(client_cfg);
+#endif
     if (protocol_ == "cxl") {
         client_cfg.preferred_segment = local_hostname_;
     }
@@ -1558,7 +1576,7 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
     }
 
     const auto finalize_decision =
-        DetermineFinalizeDecision(config, transfer_summary);
+        DetermineFinalizeDecision(client_cfg, transfer_summary);
 
     if (finalize_decision.end_type.has_value()) {
         auto end_result =
@@ -1998,25 +2016,8 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                                               ? ReplicaType::MEMORY
                                               : ReplicaType::NOF_SSD;
                 std::optional<TransferFuture> submit_result;
-                if (replica.is_nof_replica()) {
-                    auto contiguous_range = GetContiguousSliceRange(op.slices);
-                    if (!contiguous_range.has_value()) {
-                        std::string failure_context =
-                            "NoF transfer requires contiguous slices for "
-                            "replica " +
-                            std::to_string(replica_idx);
-                        op.transfer_summary.RecordFailure(
-                            replica_type, ErrorCode::INVALID_PARAMS);
-                        op.AppendFailureContext(failure_context);
-                        continue;
-                    }
-                    submit_result = transfer_submitter_->submit(
-                        replica, op.slices, TransferRequest::WRITE,
-                        contiguous_range->ptr, contiguous_range->size);
-                } else {
-                    submit_result = transfer_submitter_->submit(
-                        replica, op.slices, TransferRequest::WRITE);
-                }
+                submit_result = transfer_submitter_->submit(
+                    replica, op.slices, TransferRequest::WRITE);
 
                 if (!submit_result) {
                     std::string failure_context =
@@ -2518,6 +2519,9 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     std::vector<std::vector<Slice>>& batched_slices,
     const ReplicateConfig& config) {
     ReplicateConfig client_cfg = config;
+#ifdef USE_NOF
+    client_cfg = ApplyStoreReplicaOverrideFromEnv(client_cfg);
+#endif
     if (protocol_ == "cxl") {
         client_cfg.preferred_segment = local_hostname_;
     }
@@ -2921,6 +2925,29 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
             addr, length, location, remote_accessible, update_metadata) != 0) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
+#ifdef USE_NOF
+    if (IsCudaLocationForSpdk(location) && IsSpdkGpuDmabufRequested()) {
+        if (!SpdkWrapper::GetInstance().InitializeEnv()) {
+            (void)this->transfer_engine_->unregisterLocalMemory(
+                addr, update_metadata);
+            LOG(ERROR) << "Failed to initialize SPDK env for GPU dma-buf "
+                       << "memory registration, addr=" << addr
+                       << ", length=" << length;
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        }
+        int spdk_rc =
+            SpdkWrapper::GetInstance().RegisterGpuMemoryRegion(addr, length);
+        if (spdk_rc != 0) {
+            SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
+            (void)this->transfer_engine_->unregisterLocalMemory(
+                addr, update_metadata);
+            LOG(ERROR) << "Failed to register CUDA buffer with SPDK GPU "
+                       << "dma-buf domain, addr=" << addr
+                       << ", length=" << length << ", rc=" << spdk_rc;
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        }
+    }
+#endif
     return {};
 }
 
@@ -2930,6 +2957,9 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
         0) {
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
+#ifdef USE_NOF
+    SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
+#endif
     return {};
 }
 
@@ -3397,19 +3427,7 @@ ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,
     }
 
     std::optional<TransferFuture> future;
-    if (replica_descriptor.is_nof_replica()) {
-        auto contiguous_range = GetContiguousSliceRange(slices);
-        if (!contiguous_range.has_value()) {
-            LOG(ERROR) << "NoF transfer requires contiguous slices";
-            return ErrorCode::INVALID_PARAMS;
-        }
-        future = transfer_submitter_->submit(replica_descriptor, slices,
-                                             op_code, contiguous_range->ptr,
-                                             contiguous_range->size);
-    } else {
-        future =
-            transfer_submitter_->submit(replica_descriptor, slices, op_code);
-    }
+    future = transfer_submitter_->submit(replica_descriptor, slices, op_code);
     if (!future) {
         LOG(ERROR) << "Failed to submit transfer operation";
         return ErrorCode::TRANSFER_FAIL;

@@ -1383,21 +1383,6 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
         io_slices.push_back(Slice{scratch, padding_size});
     }
 
-    if (transfer_metric_ != nullptr) {
-        const bool is_gpu =
-            memory_kind.value() == SpdkNofMemoryKind::GPU_DMABUF;
-        if (is_gpu && padding_size == 0) {
-            transfer_metric_->nof_gpu_aligned_requests.inc();
-        } else if (is_gpu) {
-            transfer_metric_->nof_gpu_nonaligned_requests.inc();
-        } else if (padding_size == 0) {
-            transfer_metric_->nof_host_aligned_requests.inc();
-        } else {
-            transfer_metric_->nof_host_nonaligned_requests.inc();
-        }
-        transfer_metric_->nof_padding_bytes.inc(padding_size);
-    }
-
     auto state = std::make_shared<SpdkNofOperationState>();
     SpdkNofTask task(
         seg_handle, std::move(io_slices), handle.buffer_address_ / block_size,

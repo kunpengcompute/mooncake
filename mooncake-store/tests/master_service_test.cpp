@@ -58,6 +58,7 @@ class MasterServiceTest : public ::testing::Test {
         segment.name = std::move(name);
         segment.base = base;
         segment.size = size;
+        segment.block_size = 512;
         segment.te_endpoint = std::move(endpoint);
         return segment;
     }
@@ -504,6 +505,50 @@ TEST_F(MasterServiceTest, PutStartInvalidParams) {
 }
 
 #ifdef USE_NOF
+TEST_F(MasterServiceTest, NoFMountValidatesPoolBlockGeometry) {
+    std::unique_ptr<MasterService> service_(new MasterService());
+    const UUID client_id = generate_uuid();
+
+    auto invalid = MakeNoFSegment("nof_invalid", "nof_invalid_endpoint");
+    invalid.block_size = 0;
+    auto invalid_result = service_->MountNoFSegment(invalid, client_id);
+    ASSERT_FALSE(invalid_result.has_value());
+    EXPECT_EQ(invalid_result.error(), ErrorCode::INVALID_PARAMS);
+
+    auto first = MakeNoFSegment("nof_4k", "nof_4k_endpoint");
+    first.block_size = 4096;
+    ASSERT_TRUE(service_->MountNoFSegment(first, client_id).has_value());
+
+    auto mismatched = MakeNoFSegment("nof_512", "nof_512_endpoint");
+    mismatched.block_size = 512;
+    auto mismatch_result = service_->MountNoFSegment(mismatched, client_id);
+    ASSERT_FALSE(mismatch_result.has_value());
+    EXPECT_EQ(mismatch_result.error(), ErrorCode::INVALID_PARAMS);
+}
+
+TEST_F(MasterServiceTest, PutStartRoundsNoFAllocationButKeepsObjectSize) {
+    std::unique_ptr<MasterService> service_(new MasterService());
+    const UUID client_id = generate_uuid();
+    NoFSegment nof_segment = MakeNoFSegment();
+    ASSERT_TRUE(service_->MountNoFSegment(nof_segment, client_id).has_value());
+
+    ReplicateConfig config;
+    config.replica_num = 0;
+    config.nof_replica_num = 1;
+    constexpr uint64_t kObjectSize = 1025;
+    auto put_start = service_->PutStart(client_id, "nof_unaligned", "default",
+                                        kObjectSize, config);
+    ASSERT_TRUE(put_start.has_value());
+    ASSERT_EQ(put_start->size(), 1u);
+    ASSERT_TRUE((*put_start)[0].is_nof_replica());
+
+    const auto& descriptor = (*put_start)[0].get_nof_descriptor();
+    EXPECT_EQ(descriptor.object_size, kObjectSize);
+    EXPECT_EQ(descriptor.logical_size(), kObjectSize);
+    EXPECT_EQ(descriptor.block_size, 512u);
+    EXPECT_EQ(descriptor.buffer_descriptor.size_, 1536u);
+}
+
 TEST_F(MasterServiceTest, PutEndAllCompletesMemoryAndNoFReplicas) {
     std::unique_ptr<MasterService> service_(new MasterService());
     [[maybe_unused]] const auto mem_context = PrepareSimpleSegment(*service_);

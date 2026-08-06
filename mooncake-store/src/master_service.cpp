@@ -1441,34 +1441,52 @@ auto MasterService::AllocateAndInsertMetadata(
     }
 
 #ifdef USE_NOF
-    if (config.nof_replica_num > 0 &&
-        nof_segment_manager_.getMountedSegmentCount() > 0) {
-        ScopedAllocatorAccess allocator_access =
-            nof_segment_manager_.getAllocatorAccess();
+    if (config.nof_replica_num > 0) {
+        auto allocator_access = nof_segment_manager_.getAllocatorAccess();
         const auto& allocator_manager = allocator_access.getAllocatorManager();
+        const uint32_t nof_block_size = allocator_access.getBlockSize();
 
-        std::vector<std::string> preferred_segments =
-            config.preferred_nof_segments;
-
-        auto allocation_result = allocation_strategy_->Allocate(
-            allocator_manager, value_length, config.nof_replica_num,
-            preferred_segments, std::set<std::string>(), ReplicaType::NOF_SSD);
-
-        if (!allocation_result.has_value()) {
-            VLOG(1) << "Failed to allocate nof replicas for key=" << key
-                    << ", error: " << allocation_result.error();
-            if (allocation_result.error() == ErrorCode::INVALID_PARAMS) {
-                return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
-            }
-            if (write_mode != ReplicaWriteMode::FLEXIBLE_DUAL_REPLICA) {
-                MasterMetricManager::instance().inc_put_start_alloc_failures();
-                need_nof_eviction_ = true;
-                return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
-            }
+        if (allocator_access.getMountedSegmentCount() == 0) {
+            // Keep the common replica-count validation below responsible for
+            // reporting that the requested NoF replica was unavailable.
+        } else if (nof_block_size == 0 ||
+                   value_length > std::numeric_limits<uint64_t>::max() -
+                                      (nof_block_size - 1)) {
+            LOG(ERROR) << "Invalid NoF allocation geometry: value_length="
+                       << value_length
+                       << ", block_size=" << nof_block_size;
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
         } else {
-            allocated_nof_replicas = allocation_result->size();
-            for (auto& replica : allocation_result.value()) {
-                replicas.push_back(std::move(replica));
+            const uint64_t nof_allocation_length =
+                ((value_length + nof_block_size - 1) / nof_block_size) *
+                nof_block_size;
+
+            std::vector<std::string> preferred_segments =
+                config.preferred_nof_segments;
+
+            auto allocation_result = allocation_strategy_->Allocate(
+                allocator_manager, nof_allocation_length,
+                config.nof_replica_num, preferred_segments,
+                std::set<std::string>(), ReplicaType::NOF_SSD);
+
+            if (!allocation_result.has_value()) {
+                VLOG(1) << "Failed to allocate nof replicas for key=" << key
+                        << ", error: " << allocation_result.error();
+                if (allocation_result.error() == ErrorCode::INVALID_PARAMS) {
+                    return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+                }
+                if (write_mode != ReplicaWriteMode::FLEXIBLE_DUAL_REPLICA) {
+                    MasterMetricManager::instance()
+                        .inc_put_start_alloc_failures();
+                    need_nof_eviction_ = true;
+                    return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+                }
+            } else {
+                allocated_nof_replicas = allocation_result->size();
+                for (auto& replica : allocation_result.value()) {
+                    replica.set_nof_metadata(value_length, nof_block_size);
+                    replicas.push_back(std::move(replica));
+                }
             }
         }
     }

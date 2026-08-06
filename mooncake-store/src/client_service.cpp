@@ -3471,7 +3471,7 @@ ErrorCode Client::TransferRead(const Replica::Descriptor& replica_descriptor,
         total_size = mem_desc.buffer_descriptor.size_;
     } else if (replica_descriptor.is_nof_replica()) {
         auto& nof_desc = replica_descriptor.get_nof_descriptor();
-        total_size = nof_desc.buffer_descriptor.size_;
+        total_size = nof_desc.logical_size();
     } else if (replica_descriptor.is_disk_replica()) {
         auto& disk_desc = replica_descriptor.get_disk_descriptor();
         total_size = disk_desc.object_size;

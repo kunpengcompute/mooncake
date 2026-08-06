@@ -9,6 +9,35 @@
 
 namespace mooncake {
 
+namespace {
+
+class RestoredNoFBufferAllocator final : public BufferAllocatorBase {
+   public:
+    explicit RestoredNoFBufferAllocator(std::string transport_endpoint)
+        : transport_endpoint_(std::move(transport_endpoint)) {}
+
+    std::unique_ptr<AllocatedBuffer> allocate(size_t) override {
+        return nullptr;
+    }
+    void deallocate(AllocatedBuffer *) override {}
+    size_t capacity() const override { return kAllocatorUnknownFreeSpace; }
+    size_t size() const override { return 0; }
+    std::string getSegmentName() const override {
+        return transport_endpoint_;
+    }
+    std::string getTransportEndpoint() const override {
+        return transport_endpoint_;
+    }
+    size_t getLargestFreeRegion() const override {
+        return kAllocatorUnknownFreeSpace;
+    }
+
+   private:
+    std::string transport_endpoint_;
+};
+
+}  // namespace
+
 // Node serialization size constants for offset_allocator::__Allocator
 constexpr size_t OFFSET_ALLOCATOR_NODE_BOOL_SIZE = 1;
 constexpr size_t OFFSET_ALLOCATOR_NODE_UINT32_COUNT = 6;
@@ -683,6 +712,25 @@ tl::expected<void, SerializationError> Serializer<Replica>::serialize(
             }
             break;
         }
+        case ReplicaType::NOF_SSD: {
+            const auto *nof_data = std::get_if<NoFReplicaData>(&replica.data_);
+            if (!nof_data || !nof_data->buffer) {
+                return tl::unexpected(SerializationError(
+                    ErrorCode::DESERIALIZE_FAIL,
+                    "serialize_msgpack Replica missing NoFReplicaData"));
+            }
+            const auto descriptor = nof_data->buffer->get_descriptor();
+            // Format: [physical_size, address, protocol, endpoint,
+            //          logical_size, block_size]
+            packer.pack_array(6);
+            packer.pack(static_cast<uint64_t>(descriptor.size_));
+            packer.pack(static_cast<uint64_t>(descriptor.buffer_address_));
+            packer.pack(descriptor.protocol_);
+            packer.pack(descriptor.transport_endpoint_);
+            packer.pack(static_cast<uint64_t>(nof_data->object_size));
+            packer.pack(static_cast<uint32_t>(nof_data->block_size));
+            break;
+        }
         case ReplicaType::DISK: {
             const auto *disk_data =
                 std::get_if<DiskReplicaData>(&replica.data_);
@@ -766,6 +814,40 @@ auto Serializer<Replica>::deserialize(const msgpack::object &obj,
             }
             replica = std::make_shared<Replica>(
                 std::move(buffer_result.value()), status);
+            break;
+        }
+        case static_cast<int8_t>(ReplicaType::NOF_SSD): {
+            const auto &payload = array_items[3];
+            if (payload.type != msgpack::type::ARRAY ||
+                (payload.via.array.size != 4 &&
+                 payload.via.array.size != 6)) {
+                return tl::unexpected(SerializationError(
+                    ErrorCode::DESERIALIZE_FAIL,
+                    "deserialize_msgpack Replica NOF_SSD payload is not "
+                    "valid array[4] or array[6]"));
+            }
+
+            auto *payload_items = payload.via.array.ptr;
+            const uint64_t physical_size = payload_items[0].as<uint64_t>();
+            const uintptr_t address =
+                static_cast<uintptr_t>(payload_items[1].as<uint64_t>());
+            (void)payload_items[2].as<std::string>();  // protocol
+            std::string endpoint = payload_items[3].as<std::string>();
+            const uint64_t object_size = payload.via.array.size == 6
+                                             ? payload_items[4].as<uint64_t>()
+                                             : physical_size;
+            const uint32_t block_size = payload.via.array.size == 6
+                                            ? payload_items[5].as<uint32_t>()
+                                            : 0;
+
+            auto allocator =
+                std::make_shared<RestoredNoFBufferAllocator>(endpoint);
+            auto buffer = std::make_unique<AllocatedBuffer>(
+                allocator, reinterpret_cast<void *>(address), physical_size);
+            replica = std::make_shared<Replica>(std::move(buffer), status,
+                                                ReplicaType::NOF_SSD);
+            replica->set_nof_metadata(object_size, block_size);
+            replica->set_nof_allocator_keepalive(std::move(allocator));
             break;
         }
         case static_cast<int8_t>(ReplicaType::DISK): {

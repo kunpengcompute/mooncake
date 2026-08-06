@@ -43,7 +43,7 @@ class MooncakeNoFRegister:
                 for key, value in self.cli_config.items():
                     if key in config:
                         # Convert trsvcid/nsid to int if needed
-                        if key in ("trsvcid", "nsid"):
+                        if key in ("trsvcid", "nsid", "block_size"):
                             try:
                                 config[key] = int(value)
                             except ValueError:
@@ -205,6 +205,7 @@ class MooncakeNoFRegister:
                             'trsvcid': int(trsvcid),  # Ensure trsvcid is integer
                             'base': 0,
                             'size': size,
+                            'block_size': block_size,
                             'master_server_address': master_server_address,
                             'metadata_server': ''
                         }
@@ -246,7 +247,8 @@ class MooncakeNoFRegister:
                     cfg["trsvcid"],
                     cfg["base"],
                     cfg["size"],
-                    cfg["master_server_address"]
+                    cfg["master_server_address"],
+                    cfg["block_size"]
                 )
 
                 if ret != 0:

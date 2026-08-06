@@ -81,8 +81,7 @@ static void nvmf_reset_sgl(void* ctx, uint32_t offset) {
     uint64_t absolute_offset = sub_task->payload_byte_offset + offset;
     const auto& slices = sub_task->task->slices;
     while (sub_task->sgl_index < slices.size()) {
-
-            const auto& slice = slices[sub_task->sgl_index];
+        const auto& slice = slices[sub_task->sgl_index];
         if (absolute_offset < slice.size) {
             sub_task->sgl_offset = static_cast<size_t>(absolute_offset);
             return;
@@ -507,6 +506,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                                 task->seg_handle, submit_lba, submit_lba_count,
                                 task->op, nvmf_io_complete, sub_task,
                                 nvmf_reset_sgl, nvmf_next_sge,
+                                task->memory_kind,
                                 &sub_task->io_opts);
                         if (ret != 0) {
                             LOG(ERROR) << "work " << work_idx << ", seg "
@@ -1244,6 +1244,8 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
     const std::vector<Slice>& slices,
     const TransferRequest::OpCode op_code) {
     size_t size = 0;
+    std::optional<SpdkNofMemoryKind> memory_kind;
+    auto& wrapper = SpdkWrapper::GetInstance();
     for (const auto& slice : slices) {
         if (slice.ptr == nullptr || slice.size == 0 ||
             slice.size > std::numeric_limits<size_t>::max() - size) {
@@ -1251,6 +1253,22 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
                        << ", size=" << slice.size;
             return std::nullopt;
         }
+
+        SpdkNofMemoryKind slice_memory_kind;
+        int classify_rc = wrapper.ClassifyMemoryRegion(
+            slice.ptr, slice.size, &slice_memory_kind);
+        if (classify_rc != 0) {
+            LOG(ERROR) << "Invalid NoF slice memory range ptr=" << slice.ptr
+                       << ", size=" << slice.size
+                       << ", classify_rc=" << classify_rc;
+            return std::nullopt;
+        }
+        if (memory_kind.has_value() &&
+            memory_kind.value() != slice_memory_kind) {
+            LOG(ERROR) << "NoF request mixes host and GPU memory slices";
+            return std::nullopt;
+        }
+        memory_kind = slice_memory_kind;
         size += slice.size;
     }
 
@@ -1264,14 +1282,14 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
     }
 
     nof_seg_handle* seg_handle =
-        SpdkWrapper::GetInstance().OpenNofSegment(handle.transport_endpoint_);
+        wrapper.OpenNofSegment(handle.transport_endpoint_);
     if (!seg_handle) {
         LOG(ERROR) << "Failed to open NoF segment endpoint="
                    << handle.transport_endpoint_;
         return std::nullopt;
     }
 
-    uint32_t block_size = SpdkWrapper::GetInstance().GetBlockSize(seg_handle);
+    uint32_t block_size = wrapper.GetBlockSize(seg_handle);
     if (block_size == INVALID_BLOCK_SIZE ||
         handle.buffer_address_ % block_size != 0 || size % block_size != 0 ||
         size / block_size >
@@ -1284,7 +1302,8 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
 
     auto state = std::make_shared<SpdkNofOperationState>();
     SpdkNofTask task(seg_handle, slices, handle.buffer_address_ / block_size,
-                     static_cast<uint32_t>(size / block_size), op_code, state);
+                     static_cast<uint32_t>(size / block_size), op_code,
+                     memory_kind.value(), state);
     spdk_nvmf_pool_->submitTask(std::move(task));
 
     VLOG(1) << "SPDK NoF transfer submitted to " << handle.transport_endpoint_;

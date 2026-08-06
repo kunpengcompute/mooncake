@@ -362,6 +362,7 @@ struct SpdkNofTask {
     int outstanding_sub_io;
     int op;   // kSpdkNofOpRead or kSpdkNofOpWrite
     int idx;  // subop idx
+    SpdkNofMemoryKind memory_kind;
     bool failed;
     bool on_chain;
     std::shared_ptr<SpdkNofOperationState> state;
@@ -371,6 +372,7 @@ struct SpdkNofTask {
 
     SpdkNofTask(nof_seg_handle* handle, std::vector<Slice> buffers,
                 uint64_t off, uint32_t len, int op_code,
+                SpdkNofMemoryKind task_memory_kind,
                 std::shared_ptr<SpdkNofOperationState> s)
         : seg_handle(handle),
           slices(std::move(buffers)),
@@ -380,6 +382,7 @@ struct SpdkNofTask {
           outstanding_sub_io(0),
           op(op_code),
           idx(0),
+          memory_kind(task_memory_kind),
           failed(false),
           on_chain(false),
           state(std::move(s)),

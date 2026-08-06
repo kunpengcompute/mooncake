@@ -360,6 +360,45 @@ bool SpdkWrapper::IsGpuMemoryRegionRegistered(void *ptr, size_t size) {
     return offset <= region_size && size <= region_size - offset;
 }
 
+int SpdkWrapper::ClassifyMemoryRegion(void *ptr, size_t size,
+                                      SpdkNofMemoryKind *memory_kind) {
+    if (!ptr || size == 0 || !memory_kind) {
+        return -EINVAL;
+    }
+
+    uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+    if (size > std::numeric_limits<uintptr_t>::max() - addr) {
+        return -EINVAL;
+    }
+    uintptr_t end = addr + size;
+
+    std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+    auto next = gpu_memory_regions_.upper_bound(addr);
+    if (next != gpu_memory_regions_.begin()) {
+        auto current = std::prev(next);
+        uintptr_t region_addr = current->first;
+        size_t region_size = current->second;
+        if (region_size > std::numeric_limits<uintptr_t>::max() - region_addr) {
+            return -EINVAL;
+        }
+        uintptr_t region_end = region_addr + region_size;
+        if (addr >= region_addr && end <= region_end) {
+            *memory_kind = SpdkNofMemoryKind::GPU_DMABUF;
+            return 0;
+        }
+        if (addr < region_end) {
+            return -ERANGE;
+        }
+    }
+
+    if (next != gpu_memory_regions_.end() && end > next->first) {
+        return -ERANGE;
+    }
+
+    *memory_kind = SpdkNofMemoryKind::HOST_DMA;
+    return 0;
+}
+
 void SpdkWrapper::UnregisterGpuMemoryRegion(void *ptr) {
     if (!ptr) {
         return;
@@ -658,6 +697,7 @@ int SpdkWrapper::SubmitRequestVExt(
     spdk_nvme_cmd_cb cb_fn, void *cb_ctx,
     spdk_nvme_req_reset_sgl_cb reset_sgl_fn,
     spdk_nvme_req_next_sge_cb next_sge_fn,
+    SpdkNofMemoryKind memory_kind,
     struct spdk_nvme_ns_cmd_ext_io_opts *io_opts) {
     if (!seg_handle || !lba_count || !seg_handle->qpair || !seg_handle->ns ||
         !reset_sgl_fn || !next_sge_fn) {
@@ -665,8 +705,9 @@ int SpdkWrapper::SubmitRequestVExt(
     }
 
     struct spdk_nvme_ns_cmd_ext_io_opts *opts = nullptr;
-    if (IsGpuDmabufEnabled() && gpu_dmabuf_domain_ != nullptr) {
-        if (io_opts == nullptr) {
+    if (memory_kind == SpdkNofMemoryKind::GPU_DMABUF) {
+        if (!IsGpuDmabufEnabled() || gpu_dmabuf_domain_ == nullptr ||
+            io_opts == nullptr) {
             return -EINVAL;
         }
 
@@ -700,6 +741,8 @@ int SpdkWrapper::SubmitRequestVExt(
         io_opts->memory_domain_ctx = nullptr;
         io_opts->io_flags = 0;
         opts = io_opts;
+    } else if (memory_kind != SpdkNofMemoryKind::HOST_DMA) {
+        return -EINVAL;
     }
 
     struct spdk_nvme_qpair *qpair = seg_handle->qpair;

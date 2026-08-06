@@ -20,6 +20,11 @@ constexpr int kSpdkNofOpRead = 0;
 constexpr int kSpdkNofOpWrite = 1;
 constexpr int kSpdkNofOpNum = 2;
 
+enum class SpdkNofMemoryKind : uint8_t {
+    HOST_DMA = 0,
+    GPU_DMABUF = 1,
+};
+
 struct nof_seg_handle;
 struct tr_info;
 struct ctrlr_info;
@@ -55,6 +60,14 @@ class SpdkWrapper {
 
     void InvalidateGpuBuffer(void *ptr, size_t size);
 
+    /**
+     * Classify a complete buffer range for task-level memory-domain selection.
+     * Returns 0 for a host range or a fully registered GPU range. A range that
+     * only partially overlaps a registered GPU region is rejected.
+     */
+    int ClassifyMemoryRegion(void *ptr, size_t size,
+                             SpdkNofMemoryKind *memory_kind);
+
     /** @brief Open a NoF segment. */
     nof_seg_handle *OpenNofSegment(const std::string &tr_str);
 
@@ -69,6 +82,7 @@ class SpdkWrapper {
         int op, spdk_nvme_cmd_cb cb_fn, void *cb_ctx,
         spdk_nvme_req_reset_sgl_cb reset_sgl_fn,
         spdk_nvme_req_next_sge_cb next_sge_fn,
+        SpdkNofMemoryKind memory_kind,
         struct spdk_nvme_ns_cmd_ext_io_opts *io_opts);
 
     bool ProbeNofSegment(const std::string &tr_str, uint32_t timeout_ms,

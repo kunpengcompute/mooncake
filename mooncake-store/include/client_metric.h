@@ -117,6 +117,26 @@ struct TransferMetric {
                          "Get transfer latency (us)", kLatencyBucket, labels),
           put_latency_us("mooncake_transfer_put_latency",
                          "Put transfer latency (us)", kLatencyBucket, labels),
+          nof_host_aligned_requests(
+              "mooncake_nof_host_aligned_requests_total",
+              "Aligned host NoF requests", labels),
+          nof_host_nonaligned_requests(
+              "mooncake_nof_host_nonaligned_requests_total",
+              "Non-aligned host NoF requests", labels),
+          nof_gpu_aligned_requests(
+              "mooncake_nof_gpu_aligned_requests_total",
+              "Aligned GPU NoF requests", labels),
+          nof_gpu_nonaligned_requests(
+              "mooncake_nof_gpu_nonaligned_requests_total",
+              "Non-aligned GPU NoF requests", labels),
+          nof_padding_bytes("mooncake_nof_padding_bytes_total",
+                            "NoF tail padding bytes", labels),
+          nof_scratch_acquire_failures(
+              "mooncake_nof_scratch_acquire_failures_total",
+              "NoF scratch pool acquisition failures", labels),
+          nof_mixed_memory_rejections(
+              "mooncake_nof_mixed_memory_rejections_total",
+              "NoF requests rejected for mixed memory domains", labels),
           start_time_(std::chrono::steady_clock::now()) {}
 
     ylt::metric::counter_t total_read_bytes;
@@ -125,6 +145,13 @@ struct TransferMetric {
     ylt::metric::histogram_t batch_get_latency_us;
     ylt::metric::histogram_t get_latency_us;
     ylt::metric::histogram_t put_latency_us;
+    ylt::metric::counter_t nof_host_aligned_requests;
+    ylt::metric::counter_t nof_host_nonaligned_requests;
+    ylt::metric::counter_t nof_gpu_aligned_requests;
+    ylt::metric::counter_t nof_gpu_nonaligned_requests;
+    ylt::metric::counter_t nof_padding_bytes;
+    ylt::metric::counter_t nof_scratch_acquire_failures;
+    ylt::metric::counter_t nof_mixed_memory_rejections;
 
     void serialize(std::string& str) {
         total_read_bytes.serialize(str);
@@ -133,6 +160,13 @@ struct TransferMetric {
         batch_get_latency_us.serialize(str);
         get_latency_us.serialize(str);
         put_latency_us.serialize(str);
+        nof_host_aligned_requests.serialize(str);
+        nof_host_nonaligned_requests.serialize(str);
+        nof_gpu_aligned_requests.serialize(str);
+        nof_gpu_nonaligned_requests.serialize(str);
+        nof_padding_bytes.serialize(str);
+        nof_scratch_acquire_failures.serialize(str);
+        nof_mixed_memory_rejections.serialize(str);
     }
 
     std::string summary_metrics(bool include_bandwidth = true) {

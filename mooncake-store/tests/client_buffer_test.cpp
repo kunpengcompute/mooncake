@@ -304,6 +304,34 @@ TEST_F(ClientBufferTest, CalculateTotalSizeMemoryReplica) {
     EXPECT_EQ(total_size, 4096);
 }
 
+TEST_F(ClientBufferTest, CalculateTotalSizeNoFUsesLogicalObjectSize) {
+    Replica::Descriptor replica;
+    NoFDescriptor nof_desc;
+    nof_desc.buffer_descriptor.size_ = 1536;
+    nof_desc.object_size = 1025;
+    nof_desc.block_size = 512;
+    replica.descriptor_variant = nof_desc;
+    replica.status = ReplicaStatus::COMPLETE;
+
+    EXPECT_EQ(calculate_total_size(replica), 1025u);
+
+    std::vector<char> buffer(1025);
+    std::vector<Slice> slices;
+    EXPECT_EQ(allocateSlices(slices, replica, buffer.data()), 0);
+    ASSERT_EQ(slices.size(), 1u);
+    EXPECT_EQ(slices[0].size, 1025u);
+}
+
+TEST_F(ClientBufferTest, CalculateTotalSizeLegacyNoFFallsBackToAllocation) {
+    Replica::Descriptor replica;
+    NoFDescriptor nof_desc;
+    nof_desc.buffer_descriptor.size_ = 512;
+    replica.descriptor_variant = nof_desc;
+    replica.status = ReplicaStatus::COMPLETE;
+
+    EXPECT_EQ(calculate_total_size(replica), 512u);
+}
+
 // Test calculate_total_size function with disk replica
 TEST_F(ClientBufferTest, CalculateTotalSizeDiskReplica) {
     // Create a disk replica descriptor

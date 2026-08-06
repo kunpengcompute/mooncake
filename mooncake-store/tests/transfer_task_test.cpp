@@ -204,6 +204,34 @@ TEST_F(TransferTaskTest, BuildSpdkNofLogicalSlicesRejectsSmallCapacity) {
     EXPECT_TRUE(output.empty());
     EXPECT_FALSE(BuildSpdkNofLogicalSlices(input, 0, &output));
 }
+
+TEST_F(TransferTaskTest, LocateSpdkNofSglOffsetCrossesTailScratch) {
+    std::vector<char> first(3);
+    std::vector<char> second(5);
+    std::vector<char> scratch(8);
+    const std::vector<Slice> slices{{first.data(), first.size()},
+                                    {second.data(), second.size()},
+                                    {scratch.data(), scratch.size()}};
+    size_t index = 0;
+    size_t offset = 0;
+
+    EXPECT_TRUE(LocateSpdkNofSglOffset(slices, 0, &index, &offset));
+    EXPECT_EQ(index, 0u);
+    EXPECT_EQ(offset, 0u);
+    EXPECT_TRUE(LocateSpdkNofSglOffset(slices, 3, &index, &offset));
+    EXPECT_EQ(index, 1u);
+    EXPECT_EQ(offset, 0u);
+    EXPECT_TRUE(LocateSpdkNofSglOffset(slices, 8, &index, &offset));
+    EXPECT_EQ(index, 2u);
+    EXPECT_EQ(offset, 0u);
+    EXPECT_TRUE(LocateSpdkNofSglOffset(slices, 15, &index, &offset));
+    EXPECT_EQ(index, 2u);
+    EXPECT_EQ(offset, 7u);
+    EXPECT_TRUE(LocateSpdkNofSglOffset(slices, 16, &index, &offset));
+    EXPECT_EQ(index, slices.size());
+    EXPECT_EQ(offset, 0u);
+    EXPECT_FALSE(LocateSpdkNofSglOffset(slices, 17, &index, &offset));
+}
 #endif
 
 // Test TransferStrategy enum and stream operator

@@ -415,6 +415,10 @@ bool BuildSpdkNofLogicalSlices(const std::vector<Slice>& input,
                                uint64_t logical_size,
                                std::vector<Slice>* output);
 
+bool LocateSpdkNofSglOffset(const std::vector<Slice>& slices,
+                            uint64_t absolute_offset, size_t* slice_index,
+                            size_t* slice_offset);
+
 struct SpdkNofQos {
     int inflight_blocks[kSpdkNofOpNum];
     int blocks_per_chunk;

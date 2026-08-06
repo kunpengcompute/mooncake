@@ -79,17 +79,10 @@ static void nvmf_reset_sgl(void* ctx, uint32_t offset) {
             ? sub_task->payload_byte_length - offset
             : 0;
 
-    uint64_t absolute_offset = sub_task->payload_byte_offset + offset;
-    const auto& slices = sub_task->task->slices;
-    while (sub_task->sgl_index < slices.size()) {
-        const auto& slice = slices[sub_task->sgl_index];
-        if (absolute_offset < slice.size) {
-            sub_task->sgl_offset = static_cast<size_t>(absolute_offset);
-            return;
-        }
-        absolute_offset -= slice.size;
-        ++sub_task->sgl_index;
-    }
+    const uint64_t absolute_offset = sub_task->payload_byte_offset + offset;
+    (void)mooncake::LocateSpdkNofSglOffset(
+        sub_task->task->slices, absolute_offset, &sub_task->sgl_index,
+        &sub_task->sgl_offset);
 }
 
 static int nvmf_next_sge(void* ctx, void** address, uint32_t* length) {
@@ -194,6 +187,26 @@ bool BuildSpdkNofLogicalSlices(const std::vector<Slice>& input,
     }
     output->clear();
     return false;
+}
+
+bool LocateSpdkNofSglOffset(const std::vector<Slice>& slices,
+                            uint64_t absolute_offset, size_t* slice_index,
+                            size_t* slice_offset) {
+    if (slice_index == nullptr || slice_offset == nullptr) {
+        return false;
+    }
+
+    for (size_t i = 0; i < slices.size(); ++i) {
+        if (absolute_offset < slices[i].size) {
+            *slice_index = i;
+            *slice_offset = static_cast<size_t>(absolute_offset);
+            return true;
+        }
+        absolute_offset -= slices[i].size;
+    }
+    *slice_index = slices.size();
+    *slice_offset = 0;
+    return absolute_offset == 0;
 }
 
 SpdkNofQos::SpdkNofQos(uint32_t block_size) {
@@ -1294,6 +1307,9 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
         if (memory_kind.has_value() &&
             memory_kind.value() != slice_memory_kind) {
             LOG(ERROR) << "NoF request mixes host and GPU memory slices";
+            if (transfer_metric_ != nullptr) {
+                transfer_metric_->nof_mixed_memory_rejections.inc();
+            }
             return std::nullopt;
         }
         memory_kind = slice_memory_kind;
@@ -1359,9 +1375,27 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
                        << ", memory_kind="
                        << static_cast<int>(memory_kind.value())
                        << ", padding_size=" << padding_size;
+            if (transfer_metric_ != nullptr) {
+                transfer_metric_->nof_scratch_acquire_failures.inc();
+            }
             return std::nullopt;
         }
         io_slices.push_back(Slice{scratch, padding_size});
+    }
+
+    if (transfer_metric_ != nullptr) {
+        const bool is_gpu =
+            memory_kind.value() == SpdkNofMemoryKind::GPU_DMABUF;
+        if (is_gpu && padding_size == 0) {
+            transfer_metric_->nof_gpu_aligned_requests.inc();
+        } else if (is_gpu) {
+            transfer_metric_->nof_gpu_nonaligned_requests.inc();
+        } else if (padding_size == 0) {
+            transfer_metric_->nof_host_aligned_requests.inc();
+        } else {
+            transfer_metric_->nof_host_nonaligned_requests.inc();
+        }
+        transfer_metric_->nof_padding_bytes.inc(padding_size);
     }
 
     auto state = std::make_shared<SpdkNofOperationState>();

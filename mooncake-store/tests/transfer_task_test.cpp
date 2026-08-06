@@ -175,6 +175,37 @@ TEST_F(TransferTaskTest, IsSameProcessEndpoint) {
     EXPECT_FALSE(TransferSubmitter::isSameProcessEndpoint("host-a", "host-b"));
 }
 
+#ifdef USE_NOF
+TEST_F(TransferTaskTest, BuildSpdkNofLogicalSlicesCropsOnlyObjectTail) {
+    std::vector<char> first(100);
+    std::vector<char> second(200);
+    std::vector<char> third(300);
+    std::vector<Slice> input{{first.data(), first.size()},
+                             {second.data(), second.size()},
+                             {third.data(), third.size()}};
+    std::vector<Slice> output;
+
+    ASSERT_TRUE(BuildSpdkNofLogicalSlices(input, 450, &output));
+    ASSERT_EQ(output.size(), 3u);
+    EXPECT_EQ(output[0].ptr, first.data());
+    EXPECT_EQ(output[0].size, 100u);
+    EXPECT_EQ(output[1].ptr, second.data());
+    EXPECT_EQ(output[1].size, 200u);
+    EXPECT_EQ(output[2].ptr, third.data());
+    EXPECT_EQ(output[2].size, 150u);
+}
+
+TEST_F(TransferTaskTest, BuildSpdkNofLogicalSlicesRejectsSmallCapacity) {
+    std::vector<char> buffer(511);
+    std::vector<Slice> input{{buffer.data(), buffer.size()}};
+    std::vector<Slice> output{{buffer.data(), 1}};
+
+    EXPECT_FALSE(BuildSpdkNofLogicalSlices(input, 512, &output));
+    EXPECT_TRUE(output.empty());
+    EXPECT_FALSE(BuildSpdkNofLogicalSlices(input, 0, &output));
+}
+#endif
+
 // Test TransferStrategy enum and stream operator
 TEST_F(TransferTaskTest, TransferStrategyEnum) {
     // Test enum values

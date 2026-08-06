@@ -160,6 +160,13 @@ bool SpdkWrapper::InitializeEnv() {
         LOG(INFO) << "SPDK GPU dma-buf domain enabled, cuda_device_id="
                   << device_id;
     }
+
+    rc = InitializeHostScratch();
+    if (rc != 0) {
+        LOG(ERROR) << "Failed to initialize NoF host scratch pool, rc=" << rc;
+        Cleanup();
+        return false;
+    }
     return true;
 }
 
@@ -207,8 +214,90 @@ void SpdkWrapper::Cleanup() {
             }
             probe_buffers_.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock(host_scratch_mutex_);
+            while (!host_scratch_free_slots_.empty()) {
+                host_scratch_free_slots_.pop();
+            }
+            if (host_scratch_slab_ != nullptr) {
+                spdk_free(host_scratch_slab_);
+                host_scratch_slab_ = nullptr;
+            }
+            host_scratch_slot_size_ = 0;
+            host_scratch_read_slot_count_ = 0;
+        }
         spdk_env_fini();
         initialized.store(false, std::memory_order_release);
+    }
+}
+
+int SpdkWrapper::InitializeHostScratch() {
+    uint64_t slot_size = 4096;
+    uint64_t read_slot_count = 1024;
+    ParseEnvU64("MC_NOF_HOST_SCRATCH_SLOT_SIZE", &slot_size);
+    ParseEnvU64("MC_NOF_HOST_SCRATCH_SLOTS", &read_slot_count);
+    if (slot_size == 0 || read_slot_count == 0 ||
+        read_slot_count == std::numeric_limits<uint64_t>::max() ||
+        slot_size > std::numeric_limits<size_t>::max() /
+                        (read_slot_count + 1)) {
+        return -EINVAL;
+    }
+
+    const size_t total_size =
+        static_cast<size_t>(slot_size * (read_slot_count + 1));
+    void *slab = spdk_zmalloc(total_size, 4096, nullptr,
+                              SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+    if (slab == nullptr) {
+        return -ENOMEM;
+    }
+
+    std::lock_guard<std::mutex> lock(host_scratch_mutex_);
+    host_scratch_slab_ = slab;
+    host_scratch_slot_size_ = static_cast<size_t>(slot_size);
+    host_scratch_read_slot_count_ = static_cast<size_t>(read_slot_count);
+    for (size_t i = 1; i <= host_scratch_read_slot_count_; ++i) {
+        host_scratch_free_slots_.push(i);
+    }
+    LOG(INFO) << "Initialized NoF host scratch pool: slot_size="
+              << host_scratch_slot_size_
+              << ", read_slots=" << host_scratch_read_slot_count_;
+    return 0;
+}
+
+int SpdkWrapper::AcquireHostScratch(size_t size, bool for_write, void **ptr,
+                                    std::shared_ptr<void> *owner) {
+    if (ptr == nullptr || owner == nullptr || size == 0) {
+        return -EINVAL;
+    }
+
+    std::lock_guard<std::mutex> lock(host_scratch_mutex_);
+    if (host_scratch_slab_ == nullptr || size > host_scratch_slot_size_) {
+        return -E2BIG;
+    }
+
+    if (for_write) {
+        *ptr = host_scratch_slab_;
+        owner->reset();
+        return 0;
+    }
+    if (host_scratch_free_slots_.empty()) {
+        return -EAGAIN;
+    }
+
+    const size_t slot_index = host_scratch_free_slots_.top();
+    host_scratch_free_slots_.pop();
+    *ptr = static_cast<char *>(host_scratch_slab_) +
+           slot_index * host_scratch_slot_size_;
+    *owner = std::shared_ptr<void>(
+        *ptr, [this, slot_index](void *) { ReleaseHostScratchSlot(slot_index); });
+    return 0;
+}
+
+void SpdkWrapper::ReleaseHostScratchSlot(size_t slot_index) {
+    std::lock_guard<std::mutex> lock(host_scratch_mutex_);
+    if (host_scratch_slab_ != nullptr && slot_index != 0 &&
+        slot_index <= host_scratch_read_slot_count_) {
+        host_scratch_free_slots_.push(slot_index);
     }
 }
 

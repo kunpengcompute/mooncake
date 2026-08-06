@@ -68,6 +68,13 @@ class SpdkWrapper {
     int ClassifyMemoryRegion(void *ptr, size_t size,
                              SpdkNofMemoryKind *memory_kind);
 
+    /**
+     * Acquire a preallocated host DMA tail buffer. Write padding shares the
+     * immutable zero block; read padding receives an exclusive discard slot.
+     */
+    int AcquireHostScratch(size_t size, bool for_write, void **ptr,
+                           std::shared_ptr<void> *owner);
+
     /** @brief Open a NoF segment. */
     nof_seg_handle *OpenNofSegment(const std::string &tr_str);
 
@@ -130,6 +137,8 @@ class SpdkWrapper {
     ProbeRequestContext *AcquireProbeRequestContext();
     void RecycleProbeRequestContext(ProbeRequestContext *ctx);
     void ReplenishProbeRequestContextPoolLocked(size_t count);
+    int InitializeHostScratch();
+    void ReleaseHostScratchSlot(size_t slot_index);
     static void ProbeReadComplete(void *ctx, const struct spdk_nvme_cpl *cpl);
 
     std::atomic<bool> initialized{false};
@@ -145,6 +154,11 @@ class SpdkWrapper {
     struct spdk_memory_domain *gpu_dmabuf_domain_{nullptr};
     std::map<uintptr_t, size_t> gpu_memory_regions_;
     std::mutex gpu_dmabuf_mutex_;
+    void *host_scratch_slab_{nullptr};
+    size_t host_scratch_slot_size_{0};
+    size_t host_scratch_read_slot_count_{0};
+    std::stack<size_t> host_scratch_free_slots_;
+    std::mutex host_scratch_mutex_;
 };
 
 }  // namespace mooncake

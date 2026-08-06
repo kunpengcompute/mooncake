@@ -60,6 +60,7 @@ static int GetSpdkNofWorkerCount() {
 
 static inline void SpdkNofTaskCompletion(mooncake::SpdkNofTask* task) {
     if (task->remaining_lba == 0 && task->outstanding_sub_io == 0) {
+        task->scratch_owner.reset();
         task->state->set_completed(task->failed
                                        ? mooncake::ErrorCode::TRANSFER_FAIL
                                        : mooncake::ErrorCode::OK);
@@ -167,6 +168,34 @@ static void nvmf_io_complete(void* ctx, const struct spdk_nvme_cpl* cpl) {
 namespace mooncake {
 
 #ifdef USE_NOF
+bool BuildSpdkNofLogicalSlices(const std::vector<Slice>& input,
+                               uint64_t logical_size,
+                               std::vector<Slice>* output) {
+    if (logical_size == 0 || output == nullptr) {
+        return false;
+    }
+
+    output->clear();
+    output->reserve(input.size());
+    uint64_t remaining = logical_size;
+    for (const auto& slice : input) {
+        if (slice.ptr == nullptr || slice.size == 0) {
+            return false;
+        }
+        const size_t used = static_cast<size_t>(
+            std::min<uint64_t>(slice.size, remaining));
+        if (used != 0) {
+            output->push_back(Slice{slice.ptr, used});
+            remaining -= used;
+        }
+        if (remaining == 0) {
+            return true;
+        }
+    }
+    output->clear();
+    return false;
+}
+
 SpdkNofQos::SpdkNofQos(uint32_t block_size) {
     int block_size_int = static_cast<int>(block_size);
     if (block_size_int <= 0) {
@@ -966,9 +995,7 @@ std::optional<TransferFuture> TransferSubmitter::submit(
     } else if (replica.is_nof_replica()) {
 #ifdef USE_NOF
         auto& ssd_desc = replica.get_nof_descriptor();
-        auto& handle = ssd_desc.buffer_descriptor;
-
-        future = submitSpdkNofOperation(handle, slices, op_code);
+        future = submitSpdkNofOperation(ssd_desc, slices, op_code);
 #else
         LOG(ERROR) << "NoF transfer requested while USE_NOF is disabled";
         return std::nullopt;
@@ -1240,20 +1267,21 @@ std::optional<TransferFuture> TransferSubmitter::submitRangeRead(
 
 #ifdef USE_NOF
 std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
-    const AllocatedBuffer::Descriptor& handle,
+    const NoFDescriptor& descriptor,
     const std::vector<Slice>& slices,
     const TransferRequest::OpCode op_code) {
-    size_t size = 0;
+    const auto& handle = descriptor.buffer_descriptor;
+    const uint64_t logical_size = descriptor.logical_size();
+    std::vector<Slice> io_slices;
+    if (!BuildSpdkNofLogicalSlices(slices, logical_size, &io_slices)) {
+        LOG(ERROR) << "NoF slice capacity is smaller than logical object size "
+                   << logical_size;
+        return std::nullopt;
+    }
+
     std::optional<SpdkNofMemoryKind> memory_kind;
     auto& wrapper = SpdkWrapper::GetInstance();
-    for (const auto& slice : slices) {
-        if (slice.ptr == nullptr || slice.size == 0 ||
-            slice.size > std::numeric_limits<size_t>::max() - size) {
-            LOG(ERROR) << "Invalid NoF slice ptr=" << slice.ptr
-                       << ", size=" << slice.size;
-            return std::nullopt;
-        }
-
+    for (const auto& slice : io_slices) {
         SpdkNofMemoryKind slice_memory_kind;
         int classify_rc = wrapper.ClassifyMemoryRegion(
             slice.ptr, slice.size, &slice_memory_kind);
@@ -1269,15 +1297,13 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
             return std::nullopt;
         }
         memory_kind = slice_memory_kind;
-        size += slice.size;
     }
 
-    if (handle.transport_endpoint_.empty() || size == 0 ||
-        handle.size_ < size) {
+    if (handle.transport_endpoint_.empty() || logical_size == 0) {
         LOG(ERROR) << "Invalid NoF request endpoint="
                    << handle.transport_endpoint_
                    << ", buffer_size=" << handle.size_
-                   << ", request_size=" << size;
+                   << ", logical_size=" << logical_size;
         return std::nullopt;
     }
 
@@ -1290,20 +1316,56 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
     }
 
     uint32_t block_size = wrapper.GetBlockSize(seg_handle);
-    if (block_size == INVALID_BLOCK_SIZE ||
-        handle.buffer_address_ % block_size != 0 || size % block_size != 0 ||
-        size / block_size >
-            static_cast<size_t>(std::numeric_limits<int>::max())) {
-        LOG(ERROR) << "NoF request offset=" << handle.buffer_address_
-                   << ", slice_count=" << slices.size() << ", size=" << size
-                   << " is not aligned to block size " << block_size;
+    if (block_size == INVALID_BLOCK_SIZE || block_size == 0 ||
+        (descriptor.block_size != 0 && descriptor.block_size != block_size) ||
+        handle.buffer_address_ % block_size != 0 ||
+        logical_size > std::numeric_limits<uint64_t>::max() -
+                           (block_size - 1)) {
+        LOG(ERROR) << "Invalid NoF geometry: offset=" << handle.buffer_address_
+                   << ", descriptor_block_size=" << descriptor.block_size
+                   << ", namespace_block_size=" << block_size
+                   << ", logical_size=" << logical_size;
         return std::nullopt;
     }
 
+    const uint64_t physical_size =
+        ((logical_size + block_size - 1) / block_size) * block_size;
+    if (handle.size_ < physical_size ||
+        physical_size / block_size >
+            static_cast<size_t>(std::numeric_limits<int>::max())) {
+        LOG(ERROR) << "NoF request offset=" << handle.buffer_address_
+                   << ", slice_count=" << io_slices.size()
+                   << ", logical_size=" << logical_size
+                   << ", physical_size=" << physical_size
+                   << ", allocation_size=" << handle.size_;
+        return std::nullopt;
+    }
+
+    std::shared_ptr<void> scratch_owner;
+    const size_t padding_size =
+        static_cast<size_t>(physical_size - logical_size);
+    if (padding_size != 0) {
+        if (memory_kind.value() != SpdkNofMemoryKind::HOST_DMA) {
+            LOG(ERROR) << "GPU NoF tail padding is not initialized";
+            return std::nullopt;
+        }
+        void* scratch = nullptr;
+        const bool for_write = op_code == TransferRequest::WRITE;
+        int scratch_rc = wrapper.AcquireHostScratch(
+            padding_size, for_write, &scratch, &scratch_owner);
+        if (scratch_rc != 0) {
+            LOG(ERROR) << "Failed to acquire NoF host scratch: rc="
+                       << scratch_rc << ", padding_size=" << padding_size;
+            return std::nullopt;
+        }
+        io_slices.push_back(Slice{scratch, padding_size});
+    }
+
     auto state = std::make_shared<SpdkNofOperationState>();
-    SpdkNofTask task(seg_handle, slices, handle.buffer_address_ / block_size,
-                     static_cast<uint32_t>(size / block_size), op_code,
-                     memory_kind.value(), state);
+    SpdkNofTask task(
+        seg_handle, std::move(io_slices), handle.buffer_address_ / block_size,
+        static_cast<uint32_t>(physical_size / block_size), op_code,
+        memory_kind.value(), std::move(scratch_owner), state);
     spdk_nvmf_pool_->submitTask(std::move(task));
 
     VLOG(1) << "SPDK NoF transfer submitted to " << handle.transport_endpoint_;

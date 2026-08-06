@@ -1,6 +1,10 @@
 function(add_store_test name)
   add_executable(${name} ${ARGN})
   target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  if(USE_NOF)
+    target_include_directories(${name} PRIVATE ${SPDK_INCLUDE_DIR}
+                                               ${DPDK_INCLUDE_DIR})
+  endif()
   target_link_libraries(
     ${name}
     PUBLIC mooncake_store
@@ -18,6 +22,10 @@ endfunction()
 function(add_ha_test name)
   add_executable(${name} ${ARGN})
   target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  if(USE_NOF)
+    target_include_directories(${name} PRIVATE ${SPDK_INCLUDE_DIR}
+                                               ${DPDK_INCLUDE_DIR})
+  endif()
   target_link_libraries(
     ${name}
     PUBLIC mooncake_store

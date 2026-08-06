@@ -554,7 +554,7 @@ void SubmitSlot(Slot &slot, EndpointContext &endpoint, size_t endpoint_index,
     mooncake::SpdkNofTask task(endpoint.seg_handle, std::move(slices), lba,
                                static_cast<uint32_t>(endpoint.io_blocks), op,
                                mooncake::SpdkNofMemoryKind::HOST_DMA,
-                               slot.state);
+                               nullptr, slot.state);
     pool.submitTask(std::move(task));
     slot.active = true;
 

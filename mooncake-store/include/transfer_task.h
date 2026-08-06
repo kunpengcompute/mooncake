@@ -363,6 +363,7 @@ struct SpdkNofTask {
     int op;   // kSpdkNofOpRead or kSpdkNofOpWrite
     int idx;  // subop idx
     SpdkNofMemoryKind memory_kind;
+    std::shared_ptr<void> scratch_owner;
     bool failed;
     bool on_chain;
     std::shared_ptr<SpdkNofOperationState> state;
@@ -373,6 +374,7 @@ struct SpdkNofTask {
     SpdkNofTask(nof_seg_handle* handle, std::vector<Slice> buffers,
                 uint64_t off, uint32_t len, int op_code,
                 SpdkNofMemoryKind task_memory_kind,
+                std::shared_ptr<void> task_scratch_owner,
                 std::shared_ptr<SpdkNofOperationState> s)
         : seg_handle(handle),
           slices(std::move(buffers)),
@@ -383,6 +385,7 @@ struct SpdkNofTask {
           op(op_code),
           idx(0),
           memory_kind(task_memory_kind),
+          scratch_owner(std::move(task_scratch_owner)),
           failed(false),
           on_chain(false),
           state(std::move(s)),
@@ -407,6 +410,11 @@ struct SpdkNofSubTask {
 
 constexpr int kDefaultSpdkNofSubmitChunkBytes = (1 << 17);    // 128k
 constexpr int kDefaultSpdkNofInflightBytesLimit = (1 << 25);  // 32M
+
+bool BuildSpdkNofLogicalSlices(const std::vector<Slice>& input,
+                               uint64_t logical_size,
+                               std::vector<Slice>* output);
+
 struct SpdkNofQos {
     int inflight_blocks[kSpdkNofOpNum];
     int blocks_per_chunk;
@@ -640,7 +648,7 @@ class TransferSubmitter {
      * @brief Submit SPDK NVMe-oF operation asynchronously
      */
     std::optional<TransferFuture> submitSpdkNofOperation(
-        const AllocatedBuffer::Descriptor& handle,
+        const NoFDescriptor& descriptor,
         const std::vector<Slice>& slices,
         const TransferRequest::OpCode op_code);
 #endif

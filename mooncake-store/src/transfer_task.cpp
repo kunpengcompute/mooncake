@@ -1345,17 +1345,20 @@ std::optional<TransferFuture> TransferSubmitter::submitSpdkNofOperation(
     const size_t padding_size =
         static_cast<size_t>(physical_size - logical_size);
     if (padding_size != 0) {
-        if (memory_kind.value() != SpdkNofMemoryKind::HOST_DMA) {
-            LOG(ERROR) << "GPU NoF tail padding is not initialized";
-            return std::nullopt;
-        }
         void* scratch = nullptr;
         const bool for_write = op_code == TransferRequest::WRITE;
-        int scratch_rc = wrapper.AcquireHostScratch(
-            padding_size, for_write, &scratch, &scratch_owner);
+        int scratch_rc = memory_kind.value() == SpdkNofMemoryKind::GPU_DMABUF
+                             ? wrapper.AcquireGpuScratch(
+                                   padding_size, for_write, &scratch,
+                                   &scratch_owner)
+                             : wrapper.AcquireHostScratch(
+                                   padding_size, for_write, &scratch,
+                                   &scratch_owner);
         if (scratch_rc != 0) {
-            LOG(ERROR) << "Failed to acquire NoF host scratch: rc="
-                       << scratch_rc << ", padding_size=" << padding_size;
+            LOG(ERROR) << "Failed to acquire NoF scratch: rc=" << scratch_rc
+                       << ", memory_kind="
+                       << static_cast<int>(memory_kind.value())
+                       << ", padding_size=" << padding_size;
             return std::nullopt;
         }
         io_slices.push_back(Slice{scratch, padding_size});

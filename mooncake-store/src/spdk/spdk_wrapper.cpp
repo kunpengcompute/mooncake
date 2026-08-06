@@ -10,6 +10,7 @@
 #include "spdk/spdk_wrapper.h"
 
 #if defined(USE_SPDK_GPU_DMABUF)
+#include <cuda_runtime_api.h>
 #include <spdk/gpu_dmabuf.h>
 #define MOONCAKE_HAS_SPDK_GPU_DMABUF 1
 #else
@@ -159,6 +160,14 @@ bool SpdkWrapper::InitializeEnv() {
         }
         LOG(INFO) << "SPDK GPU dma-buf domain enabled, cuda_device_id="
                   << device_id;
+
+        rc = InitializeGpuScratch(device_id);
+        if (rc != 0) {
+            LOG(ERROR) << "Failed to initialize NoF GPU scratch pool, rc="
+                       << rc;
+            Cleanup();
+            return false;
+        }
     }
 
     rc = InitializeHostScratch();
@@ -172,6 +181,7 @@ bool SpdkWrapper::InitializeEnv() {
 
 void SpdkWrapper::Cleanup() {
     if (initialized.load(std::memory_order_acquire)) {
+        CleanupGpuScratch();
         {
             std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
             if (gpu_dmabuf_domain_ != nullptr) {
@@ -181,6 +191,7 @@ void SpdkWrapper::Cleanup() {
                 gpu_dmabuf_domain_ = nullptr;
             }
             gpu_memory_regions_.clear();
+            gpu_cuda_device_id_.store(-1, std::memory_order_release);
             gpu_dmabuf_enabled_.store(false, std::memory_order_release);
         }
 
@@ -301,6 +312,162 @@ void SpdkWrapper::ReleaseHostScratchSlot(size_t slot_index) {
     }
 }
 
+int SpdkWrapper::InitializeGpuScratch(int cuda_device_id) {
+#if MOONCAKE_HAS_SPDK_GPU_DMABUF
+    int current_device = -1;
+    cudaError_t cuda_rc = cudaGetDevice(&current_device);
+    if (cuda_rc != cudaSuccess) {
+        return -EIO;
+    }
+    const int scratch_device =
+        cuda_device_id >= 0 ? cuda_device_id : current_device;
+    if (scratch_device != current_device &&
+        cudaSetDevice(scratch_device) != cudaSuccess) {
+        return -EINVAL;
+    }
+
+    uint64_t slot_size = 4096;
+    uint64_t read_slot_count = 1024;
+    ParseEnvU64("MC_NOF_GPU_SCRATCH_SLOT_SIZE", &slot_size);
+    ParseEnvU64("MC_NOF_GPU_SCRATCH_SLOTS", &read_slot_count);
+    if (slot_size == 0 || read_slot_count == 0 ||
+        read_slot_count == std::numeric_limits<uint64_t>::max() ||
+        slot_size > std::numeric_limits<size_t>::max() /
+                        (read_slot_count + 1)) {
+        if (scratch_device != current_device) {
+            (void)cudaSetDevice(current_device);
+        }
+        return -EINVAL;
+    }
+
+    const size_t total_size =
+        static_cast<size_t>(slot_size * (read_slot_count + 1));
+    void *slab = nullptr;
+    cuda_rc = cudaMalloc(&slab, total_size);
+    if (cuda_rc == cudaSuccess) {
+        cuda_rc = cudaMemset(slab, 0, total_size);
+    }
+    if (scratch_device != current_device) {
+        (void)cudaSetDevice(current_device);
+    }
+    if (cuda_rc != cudaSuccess) {
+        if (slab != nullptr) {
+            if (scratch_device != current_device) {
+                (void)cudaSetDevice(scratch_device);
+            }
+            (void)cudaFree(slab);
+            if (scratch_device != current_device) {
+                (void)cudaSetDevice(current_device);
+            }
+        }
+        return -ENOMEM;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+        gpu_cuda_device_id_.store(scratch_device, std::memory_order_release);
+    }
+    int register_rc = RegisterGpuMemoryRegion(slab, total_size);
+    if (register_rc != 0) {
+        if (scratch_device != current_device) {
+            (void)cudaSetDevice(scratch_device);
+        }
+        (void)cudaFree(slab);
+        if (scratch_device != current_device) {
+            (void)cudaSetDevice(current_device);
+        }
+        std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+        gpu_cuda_device_id_.store(-1, std::memory_order_release);
+        return register_rc;
+    }
+
+    std::lock_guard<std::mutex> lock(gpu_scratch_mutex_);
+    gpu_scratch_slab_ = slab;
+    gpu_scratch_slot_size_ = static_cast<size_t>(slot_size);
+    gpu_scratch_read_slot_count_ = static_cast<size_t>(read_slot_count);
+    for (size_t i = 1; i <= gpu_scratch_read_slot_count_; ++i) {
+        gpu_scratch_free_slots_.push(i);
+    }
+    LOG(INFO) << "Initialized NoF GPU scratch pool: device="
+              << gpu_cuda_device_id_.load(std::memory_order_acquire)
+              << ", slot_size=" << gpu_scratch_slot_size_
+              << ", read_slots=" << gpu_scratch_read_slot_count_;
+    return 0;
+#else
+    (void)cuda_device_id;
+    return -ENOTSUP;
+#endif
+}
+
+void SpdkWrapper::CleanupGpuScratch() {
+#if MOONCAKE_HAS_SPDK_GPU_DMABUF
+    void *slab = nullptr;
+    int scratch_device = -1;
+    {
+        std::lock_guard<std::mutex> lock(gpu_scratch_mutex_);
+        slab = gpu_scratch_slab_;
+        scratch_device =
+            gpu_cuda_device_id_.load(std::memory_order_acquire);
+        gpu_scratch_slab_ = nullptr;
+        gpu_scratch_slot_size_ = 0;
+        gpu_scratch_read_slot_count_ = 0;
+        while (!gpu_scratch_free_slots_.empty()) {
+            gpu_scratch_free_slots_.pop();
+        }
+    }
+    if (slab == nullptr) {
+        return;
+    }
+
+    UnregisterGpuMemoryRegion(slab);
+    int current_device = -1;
+    (void)cudaGetDevice(&current_device);
+    if (scratch_device >= 0 && scratch_device != current_device) {
+        (void)cudaSetDevice(scratch_device);
+    }
+    (void)cudaFree(slab);
+    if (current_device >= 0 && scratch_device != current_device) {
+        (void)cudaSetDevice(current_device);
+    }
+#endif
+}
+
+int SpdkWrapper::AcquireGpuScratch(size_t size, bool for_write, void **ptr,
+                                   std::shared_ptr<void> *owner) {
+    if (ptr == nullptr || owner == nullptr || size == 0) {
+        return -EINVAL;
+    }
+
+    std::lock_guard<std::mutex> lock(gpu_scratch_mutex_);
+    if (gpu_scratch_slab_ == nullptr || size > gpu_scratch_slot_size_) {
+        return -E2BIG;
+    }
+    if (for_write) {
+        *ptr = gpu_scratch_slab_;
+        owner->reset();
+        return 0;
+    }
+    if (gpu_scratch_free_slots_.empty()) {
+        return -EAGAIN;
+    }
+
+    const size_t slot_index = gpu_scratch_free_slots_.top();
+    gpu_scratch_free_slots_.pop();
+    *ptr = static_cast<char *>(gpu_scratch_slab_) +
+           slot_index * gpu_scratch_slot_size_;
+    *owner = std::shared_ptr<void>(
+        *ptr, [this, slot_index](void *) { ReleaseGpuScratchSlot(slot_index); });
+    return 0;
+}
+
+void SpdkWrapper::ReleaseGpuScratchSlot(size_t slot_index) {
+    std::lock_guard<std::mutex> lock(gpu_scratch_mutex_);
+    if (gpu_scratch_slab_ != nullptr && slot_index != 0 &&
+        slot_index <= gpu_scratch_read_slot_count_) {
+        gpu_scratch_free_slots_.push(slot_index);
+    }
+}
+
 bool SpdkWrapper::IsGpuDmabufEnabled() const {
     return gpu_dmabuf_enabled_.load(std::memory_order_acquire);
 }
@@ -368,6 +535,22 @@ int SpdkWrapper::RegisterGpuMemoryRegion(void *ptr, size_t size) {
     if (!ptr || size == 0) {
         return -EINVAL;
     }
+
+#if MOONCAKE_HAS_SPDK_GPU_DMABUF
+    cudaPointerAttributes attributes{};
+    if (cudaPointerGetAttributes(&attributes, ptr) != cudaSuccess) {
+        return -EINVAL;
+    }
+    {
+        std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
+        const int configured_device =
+            gpu_cuda_device_id_.load(std::memory_order_acquire);
+        if (configured_device >= 0 &&
+            attributes.device != configured_device) {
+            return -EXDEV;
+        }
+    }
+#endif
 
     uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
     if (size > std::numeric_limits<uintptr_t>::max() - addr) {

@@ -9,6 +9,7 @@
 #include <optional>
 #include <ostream>
 #include <queue>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -160,7 +161,9 @@ class SpdkNofOperationState : public OperationState {
     void set_completed(ErrorCode error_code) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            assert(!result_.has_value());
+            if (result_.has_value()) {
+                return;
+            }
             result_.emplace(error_code);
         }
         cv_.notify_all();
@@ -351,10 +354,12 @@ struct SpdkNofTask {
     uint32_t lba_count;
     int remaining_lba;
     int outstanding_sub_io;
+    int abandoned_sub_io;
     int op;                 // READ => 0, WRITE => 1
     int idx;                // subop idx
     bool failed;
     bool on_chain;
+    bool abandoned;
     std::shared_ptr<SpdkNofOperationState> state;
     int64_t *io_count;
     SpdkNofQos *nof_qos;
@@ -364,8 +369,8 @@ struct SpdkNofTask {
         int op_code, std::shared_ptr<SpdkNofOperationState> s) :
         seg_handle(handle), ptr(buf), 
         lba(off), lba_count(len), 
-        remaining_lba(lba_count), outstanding_sub_io(0),
-        op(op_code), idx(0), failed(false), on_chain(false),
+        remaining_lba(lba_count), outstanding_sub_io(0), abandoned_sub_io(0),
+        op(op_code), idx(0), failed(false), on_chain(false), abandoned(false),
         state(std::move(s)), io_count(nullptr), nof_qos(nullptr), nxt(nullptr) {}
 };
 
@@ -384,6 +389,7 @@ struct SpdkNofQos {
     int inflight_blocks_limit;
     SpdkNofTask *head[kSpdkNofOpNum];
     SpdkNofTask *tail[kSpdkNofOpNum];
+    std::set<SpdkNofTask *> active_tasks;
 
     explicit SpdkNofQos(uint32_t block_size);
     
@@ -393,6 +399,7 @@ struct SpdkNofQos {
 
     void PushTask(SpdkNofTask *task) {
         int op = task->op;
+        active_tasks.insert(task);
         if (head[op] == nullptr) {
             head[op] = task;
             tail[op] = task;

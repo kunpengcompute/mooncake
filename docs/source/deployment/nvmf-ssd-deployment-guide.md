@@ -139,83 +139,178 @@ python3 -m mooncake.mooncake_store_service --config=/home/store_service.json --p
 pip install -r requirements.txt
 ```
 
-### 4.3 一键部署 SSD 池
+### 4.3 NoF SSD 管理工具说明
 
-#### 部署命令
+本文档说明 Mooncake NoF SSD 池的两个管理工具：
 
-```bash
-python3 -m mooncake.spdk_tgt_create \
-    --spdk_target_info="ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0,0000:02:00.0"
-```
+- `mooncake.mooncake_ssd_create_and_register`：创建 SPDK NVMe-oF target，并注册 SSD namespace 到 Mooncake master。
+- `mooncake.mooncake_ssd_unregister_and_remove`：从 Mooncake master 解注册 SSD namespace，并可选从 SPDK target 移除 namespace。
 
-#### 参数说明
+旧入口 `mooncake.spdk_tgt_create`、`mooncake.mooncake_ssd_register`、`mooncake.mooncake_ssd_unregister` 已删除，不再使用。
 
-| 参数   | 说明                                                 |
-| ------ | ---------------------------------------------------- |
-| `ip`   | target 节点的 IP 地址                                |
-| `path` | target 节点上 SPDK 的安装路径                        |
-| `pci`  | 需要注册到 target 的 SSD 盘 PCI 号（多个用逗号分隔） |
+## 5. 创建并注册 SSD
 
-**提示**：可在 target 节点通过 `/spdkpath/scripts/setup.sh status` 命令查看可用的 PCI 号
+### 功能
 
-## 5. NVMF-SSD 池注册
+`mooncake_ssd_create_and_register` 顺序执行两件事：
 
-在 Mooncake 服务节点进行
+1. 通过 SSH 登录 target 节点，启动或复用 SPDK `nvmf_tgt`，创建 transport、subsystem、bdev、namespace、listener。
+2. 发现 target 上的 active namespace，并注册到 Mooncake master。
 
-### 5.1 一键注册所有 SSD 盘
+### 基本用法
 
 ```bash
-python3 -m mooncake.mooncake_ssd_register \
-    --master_server_address=192.168.65.81:50051 \
-    --spdk_target_info="ip:192.168.65.56 path:/home/spdk"
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0,0000:02:00.0"
 ```
 
-#### 注册参数说明
-
-| 参数                      | 说明                        |
-| ------------------------- | --------------------------- |
-| `--master_server_address` | master 地址，默认端口 50051 |
-| `--spdk_target_info`      | target 的 ip、SPDK 路径     |
-
-## 6. NVMF-SSD 池解注册
-
-在 Mooncake 服务节点进行
-
-### 6.1 解注册 SSD 盘
-
-解注册指定 SSD 盘：
+### 多 target 用法
 
 ```bash
-python3 -m mooncake.mooncake_ssd_unregister \
-    --master_server_address=192.168.65.81:50051 \
-    --spdk_target_info="ip:192.168.65.56 ns:1 nqn:nqn.2016-06.io.spdk:cnode1"
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0" \
+  --spdk_target_info "ip:192.168.65.57 path:/home/spdk pci:0000:02:00.0"
 ```
 
-#### 解注册参数说明
-
-| 参数                      | 说明                          |
-| ------------------------- | ----------------------------- |
-| `--master_server_address` | master 地址，默认端口 50051   |
-| `--spdk_target_info`      | 解注册盘的 ip、ns 和 nqn 信息 |
-
-全量解注册 Target 上的所有 SSD 盘：
+### 只创建 target，不注册 master
 
 ```bash
-python3 -m mooncake.mooncake_ssd_unregister \
-    --master_server_address=192.168.65.81:50051 \
-    --spdk_target_info="ip:192.168.65.56 path:/home/spdk"
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0" \
+  --skip-register
 ```
 
-**说明**：
+### target 已创建，只注册 master
 
-- 当 `--spdk_target_info` 中包含 `path` 且不指定 `ns` 时，工具会通过 SSH
-  连接到 SSD 池节点，执行 `nvmf_get_subsystems` 查询当前 Target 上的所有
-  namespace，并逐个从 Mooncake master 解注册。
-- 如果只指定 `ip`，工具无法查询 Target 上的实际 namespace，只会解注册默认
-  `nsid=1`。
-- 如果同时指定 `ns`，则只解注册指定 namespace，不执行全量解注册。
+```bash
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk" \
+  --skip-create
+```
 
-### 6.2 获取 Target 端盘信息
+### target 运行中新增 SSD
+
+当 SPDK target 已经运行，需要把新 SSD 盘加入现有 target 并注册到 Mooncake master 时，指定新增盘的 PCI 号重新执行创建注册工具：
+
+```bash
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:03:00.0"
+```
+
+该命令会复用已运行的 `nvmf_tgt`、transport、subsystem 和 listener，仅对新增 PCI 盘创建 bdev、加入 namespace，并将新 namespace 注册到 master。已有 namespace 和 listener 会被识别并跳过，不会重复创建。
+
+### 参数说明
+
+| 参数 | 是否必选 | 说明 |
+| --- | --- | --- |
+| `--master_server_address` | 是 | Mooncake master 地址，例如 `192.168.65.81:50051`。 |
+| `--spdk_target_info` | 是 | target 描述，可重复指定。格式为 `ip:<target_ip> path:<spdk_path> [pci:<pci1>,<pci2>]`。 |
+| `--skip-create` | 否 | 跳过 target 创建阶段，只执行注册。 |
+| `--skip-register` | 否 | 跳过 master 注册阶段，只执行 target 创建。 |
+| `--dry-run` | 否 | 只打印流程，不执行远端操作。 |
+| `--core-mask` | 否 | 启动 `nvmf_tgt` 使用的 CPU core mask，默认 `0xff`。 |
+| `--transport-type` | 否 | NVMe-oF transport 类型，默认 `RDMA`。 |
+| `--max-queue-depth` | 否 | transport 最大队列深度，默认 `128`。 |
+| `--max-io-qpairs-per-ctrlr` | 否 | 每个 controller 最大 I/O qpair 数，默认 `127`。 |
+| `--max-io-size` | 否 | 最大 I/O 大小，默认 `4096`。 |
+| `--in-capsule-data-size` | 否 | in-capsule data size，默认 `131072`。 |
+| `--io-unit-size` | 否 | I/O unit size，默认 `131072`。 |
+| `--max-aq-depth` | 否 | admin queue depth，默认 `128`。 |
+| `--num-shared-buffers` | 否 | transport shared buffer 数量，默认 `4096`。 |
+| `--buf-cache-size` | 否 | 每个 poll group 的 buffer cache size，默认 `32`。 |
+| `--username` | 否 | SSH 用户名，默认 `root`。 |
+| `--port` | 否 | SSH 端口，默认 `22`。 |
+| `--password` | 否 | SSH 密码。 |
+| `--key-file` | 否 | SSH 私钥文件。 |
+| `-D, --define` | 否 | 注册阶段字段覆盖，例如 `-Dtrsvcid=4420`。 |
+
+## 6. 解注册并可选移除 SSD
+
+### 功能
+
+`mooncake_ssd_unregister_and_remove` 固定按照以下顺序执行：
+
+1. 先从 Mooncake master 解注册 namespace，停止该 NoF segment 继续参与分配。
+2. 如果指定 `--remove-target-namespace`，再通过 SPDK RPC 执行 `nvmf_subsystem_remove_ns`，从 target subsystem 中移除对应 namespace。
+3. 如果同时指定 `--detach-bdev`，最后执行 `bdev_nvme_detach_controller`，释放对应 SPDK NVMe bdev controller。
+
+工具不支持“只移除 target、不解注册 master”的模式，避免出现 target 盘已下线但 master 仍残留可分配元数据的风险。
+
+### 只从 master 解注册指定 namespace
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1"
+```
+
+### 解注册 target 上所有 namespace
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk"
+```
+
+### 解注册 master，并从 target 移除 namespace
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1" \
+  --remove-target-namespace
+```
+
+### 解注册 master，并从 target 移除所有 namespace
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk" \
+  --remove-target-namespace
+```
+
+### 解注册 master、移除指定 namespace，并 detach bdev
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1" \
+  --remove-target-namespace \
+  --detach-bdev
+```
+
+### 解注册 master、移除所有 namespace，并 detach bdev
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk" \
+  --remove-target-namespace \
+  --detach-bdev
+```
+
+### 参数说明
+
+| 参数 | 是否必选 | 说明 |
+| --- | --- | --- |
+| `--master_server_address` | 是 | Mooncake master 地址，例如 `192.168.65.81:50051`。 |
+| `--spdk_target_info` | 是 | target/namespace 描述，可重复指定。格式为 `ip:<target_ip> path:<spdk_path> [ns:<nsid>] [nqn:<subsystem_nqn>]`。 |
+| `--remove-target-namespace` | 否 | master 解注册成功后，从 SPDK target subsystem 中移除匹配 namespace。 |
+| `--detach-bdev` | 否 | 移除 namespace 后 detach 对应 SPDK NVMe bdev controller。必须配合 `--remove-target-namespace` 使用。 |
+| `--dry-run` | 否 | 只打印流程，不执行远端操作。 |
+| `--username` | 否 | SSH 用户名，默认 `root`。 |
+| `--port` | 否 | SSH 端口，默认 `22`。 |
+| `--password` | 否 | SSH 密码。 |
+| `--key-file` | 否 | SSH 私钥文件。 |
+| `-D, --define` | 否 | 解注册阶段字段覆盖，例如 `-Dtrsvcid=4420`。 |
+
+### 6.8 获取 Target 端盘信息
 
 进入 SSD池 节点的 SPDK 目录，执行以下命令：
 
@@ -230,6 +325,14 @@ python3 -m mooncake.mooncake_ssd_unregister \
 ```bash
 ./scripts/rpc.py bdev_get_bdevs
 ```
+
+### 6.9 使用建议
+
+- 日常扩容使用 `mooncake_ssd_create_and_register`，一个命令完成 target 创建和 master 注册。
+- target 已存在、只是 master 需要重新感知时，使用 `--skip-create`。
+- 缩容时默认只解注册 master；确认需要 target 侧同步移除时，再加 `--remove-target-namespace`。
+- `--detach-bdev` 会释放底层 SPDK bdev controller，影响更大，只建议在明确下线该盘时使用。
+- 执行高风险操作前可先加 `--dry-run` 检查匹配范围。
 
 ## 7. 性能测试
 

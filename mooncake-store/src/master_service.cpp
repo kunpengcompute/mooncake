@@ -1926,9 +1926,11 @@ MasterService::EraseMetadata(
     // becomes an orphan that only expires after 600s.
     auto offload_it = tenant_state.offloading_tasks.find(key);
     if (offload_it != tenant_state.offloading_tasks.end()) {
-        auto source = metadata.GetReplicaByID(offload_it->second.source_id);
-        if (source != nullptr) {
-            source->dec_refcnt();
+        for (const auto& task : offload_it->second) {
+            auto source = metadata.GetReplicaByID(task.source_id);
+            if (source != nullptr) {
+                source->dec_refcnt();
+            }
         }
         tenant_state.offloading_tasks.erase(offload_it);
 
@@ -2980,6 +2982,16 @@ auto MasterService::GetReplicaListByRegex(const std::string& regex_pattern,
     }
 
     std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
+
+    // Build the set of currently alive client UUIDs
+    std::unordered_set<UUID, boost::hash<UUID>> alive_clients;
+    {
+        std::shared_lock<std::shared_mutex> client_lock(client_mutex_);
+        for (const auto& [client_id, host] : client_host_id_) {
+            alive_clients.insert(client_id);
+        }
+    }
+
     const TenantId& normalized_tenant = ResolveRequestTenantId(tenant_id);
     for (size_t i = 0; i < kNumShards; ++i) {
         MetadataShardAccessorRO shard(this, i);
@@ -2991,8 +3003,10 @@ auto MasterService::GetReplicaListByRegex(const std::string& regex_pattern,
             if (std::regex_search(key, pattern)) {
                 std::vector<Replica::Descriptor> replica_list;
                 metadata.VisitReplicas(
-                    [this](const Replica& replica) {
-                        return IsReplicaReadable(replica);
+                    [this, &alive_clients](const Replica& replica) {
+                        return IsReplicaReadable(replica) &&
+                               !replica.has_stale_local_disk_client(
+                                   alive_clients);
                     },
                     [&replica_list](const Replica& replica) {
                         replica_list.emplace_back(replica.get_descriptor());
@@ -3018,6 +3032,15 @@ auto MasterService::GetOffloadEndpoints()
     -> tl::expected<std::vector<std::string>, ErrorCode> {
     std::unordered_set<std::string> unique_endpoints;
 
+    // Build the set of currently alive client UUIDs
+    std::unordered_set<UUID, boost::hash<UUID>> alive_clients;
+    {
+        std::shared_lock<std::shared_mutex> client_lock(client_mutex_);
+        for (const auto& [client_id, host] : client_host_id_) {
+            alive_clients.insert(client_id);
+        }
+    }
+
     std::shared_lock<std::shared_mutex> shared_lock(snapshot_mutex_);
     for (size_t i = 0; i < kNumShards; ++i) {
         MetadataShardAccessorRO shard(this, i);
@@ -3025,14 +3048,16 @@ auto MasterService::GetOffloadEndpoints()
             for (const auto& metadata_it : tenant_it.second.metadata) {
                 const auto& metadata = metadata_it.second;
                 metadata.VisitReplicas(
-                    [](const Replica& replica) {
+                    [&alive_clients](const Replica& replica) {
                         return replica.is_completed() &&
-                               replica.is_local_disk_replica();
+                               replica.is_local_disk_replica() &&
+                               !replica.has_stale_local_disk_client(
+                                   alive_clients);
                     },
                     [&unique_endpoints](const Replica& replica) {
+                        const auto desc = replica.get_descriptor();
                         const auto& endpoint =
-                            replica.get_descriptor()
-                                .get_local_disk_descriptor()
+                            desc.get_local_disk_descriptor()
                                 .transport_endpoint;
                         if (!endpoint.empty()) {
                             unique_endpoints.emplace(endpoint);
@@ -3069,10 +3094,20 @@ auto MasterService::GetReplicaList(const std::string& key,
         }
         const auto& metadata = accessor.Get();
 
+        // Build the set of currently alive client UUIDs
+        std::unordered_set<UUID, boost::hash<UUID>> alive_clients;
+        {
+            std::shared_lock<std::shared_mutex> client_lock(client_mutex_);
+            for (const auto& [client_id, host] : client_host_id_) {
+                alive_clients.insert(client_id);
+            }
+        }
+
         std::vector<Replica::Descriptor> replica_list;
         metadata.VisitReplicas(
-            [this](const Replica& replica) {
-                return IsReplicaReadable(replica);
+            [this, &alive_clients](const Replica& replica) {
+                return IsReplicaReadable(replica) &&
+                       !replica.has_stale_local_disk_client(alive_clients);
             },
             [&replica_list](const Replica& replica) {
                 replica_list.emplace_back(replica.get_descriptor());
@@ -3889,22 +3924,21 @@ auto MasterService::PutEnd(const UUID& client_id, const ObjectMeta& object_meta,
 
     if (enable_offload_ && !offload_on_evict_) {
         auto& tenant_state = accessor.GetTenantState();
-        bool task_created = false;
         metadata.VisitReplicas(
             [](const Replica& replica) {
                 return replica.is_completed() && replica.is_memory_replica();
             },
-            [this, &object_id, &tenant_state, &task_created](Replica& replica) {
+            [this, &object_id, &tenant_state](Replica& replica) {
                 auto result = PushOffloadingQueue(object_id, replica);
-                if (result) {
-                    if (!task_created) {
-                        replica.inc_refcnt();
-                        tenant_state.offloading_tasks.emplace(
-                            object_id.user_key,
-                            OffloadingTask{replica.id(),
-                                           std::chrono::system_clock::now()});
-                        task_created = true;
-                    }
+                if (!result) {
+                    return;
+                }
+                auto& tasks = tenant_state.offloading_tasks[object_id.user_key];
+                const auto now = std::chrono::system_clock::now();
+                for (const auto& client_id : result.value()) {
+                    replica.inc_refcnt();
+                    tasks.push_back(
+                        OffloadingTask{replica.id(), now, client_id});
                 }
             });
     }
@@ -4031,7 +4065,7 @@ auto MasterService::AddReplica(const UUID& client_id, const std::string& key,
                        client_id;
         },
         [&replica](Replica& rep) {
-            const auto& desc =
+            const auto desc =
                 replica.get_descriptor().get_local_disk_descriptor();
             rep.update_local_disk_location(desc.transport_endpoint,
                                            desc.object_size);
@@ -6106,12 +6140,23 @@ auto MasterService::OffloadObjectHeartbeat(const UUID& client_id,
             auto task_it =
                 tenant_state.offloading_tasks.find(object_id.user_key);
             if (task_it != tenant_state.offloading_tasks.end()) {
-                auto source =
-                    accessor.Get().GetReplicaByID(task_it->second.source_id);
-                if (source) {
-                    source->dec_refcnt();
+                auto& tasks = task_it->second;
+                auto offload_it =
+                    std::find_if(tasks.begin(), tasks.end(),
+                                 [&client_id](const OffloadingTask& t) {
+                                     return t.source_client_id == client_id;
+                                 });
+                if (offload_it != tasks.end()) {
+                    auto source =
+                        accessor.Get().GetReplicaByID(offload_it->source_id);
+                    if (source) {
+                        source->dec_refcnt();
+                    }
+                    tasks.erase(offload_it);
+                    if (tasks.empty()) {
+                        tenant_state.offloading_tasks.erase(task_it);
+                    }
                 }
-                tenant_state.offloading_tasks.erase(task_it);
             }
         }
     }
@@ -6210,12 +6255,23 @@ auto MasterService::NotifyOffloadSuccess(
                 auto task_it = tenant_state.offloading_tasks.find(
                     request_object_id.user_key);
                 if (task_it != tenant_state.offloading_tasks.end()) {
-                    auto source = accessor.Get().GetReplicaByID(
-                        task_it->second.source_id);
-                    if (source != nullptr) {
-                        source->dec_refcnt();
+                    auto& tasks = task_it->second;
+                    auto offload_it =
+                        std::find_if(tasks.begin(), tasks.end(),
+                                     [&client_id](const OffloadingTask& t) {
+                                         return t.source_client_id == client_id;
+                                     });
+                    if (offload_it != tasks.end()) {
+                        auto source =
+                            accessor.Get().GetReplicaByID(offload_it->source_id);
+                        if (source != nullptr) {
+                            source->dec_refcnt();
+                        }
+                        tasks.erase(offload_it);
+                        if (tasks.empty()) {
+                            tenant_state.offloading_tasks.erase(task_it);
+                        }
                     }
-                    tenant_state.offloading_tasks.erase(task_it);
                 }
             }
             continue;
@@ -6244,12 +6300,23 @@ auto MasterService::NotifyOffloadSuccess(
                 // for a master-admitted offload completion. Without this task
                 // marker, fall through to the regular registration check.
                 if (task_it != tenant_state.offloading_tasks.end()) {
-                    auto source =
-                        obj_metadata.GetReplicaByID(task_it->second.source_id);
-                    if (source != nullptr) {
-                        source->dec_refcnt();
+                    auto& tasks = task_it->second;
+                    auto offload_it =
+                        std::find_if(tasks.begin(), tasks.end(),
+                                     [&client_id](const OffloadingTask& t) {
+                                         return t.source_client_id == client_id;
+                                     });
+                    if (offload_it != tasks.end()) {
+                        auto source =
+                            obj_metadata.GetReplicaByID(offload_it->source_id);
+                        if (source != nullptr) {
+                            source->dec_refcnt();
+                        }
+                        tasks.erase(offload_it);
+                        if (tasks.empty()) {
+                            tenant_state.offloading_tasks.erase(task_it);
+                        }
                     }
-                    tenant_state.offloading_tasks.erase(task_it);
 
                     if (!obj_metadata.HasReplica(
                             &Replica::fn_is_local_disk_replica)) {
@@ -6261,27 +6328,26 @@ auto MasterService::NotifyOffloadSuccess(
                         SyncCacheTotalAccounting(obj_metadata);
                         added_new_local_disk_replica = true;
                     } else {
-                        obj_metadata.VisitReplicas(
+                        size_t updated = obj_metadata.VisitReplicas(
                             [client_id](const Replica& rep) {
                                 return rep.type() == ReplicaType::LOCAL_DISK &&
-                                       rep.get_descriptor()
-                                               .get_local_disk_descriptor()
-                                               .client_id == client_id;
+                                       rep.get_local_disk_client_id() ==
+                                           client_id;
                             },
-                            [&replica](Replica& rep) {
-                                rep.get_descriptor()
-                                    .get_local_disk_descriptor()
-                                    .transport_endpoint =
-                                    replica.get_descriptor()
-                                        .get_local_disk_descriptor()
-                                        .transport_endpoint;
-                                rep.get_descriptor()
-                                    .get_local_disk_descriptor()
-                                    .object_size =
-                                    replica.get_descriptor()
-                                        .get_local_disk_descriptor()
-                                        .object_size;
+                            [&metadata](Replica& rep) {
+                                rep.update_local_disk_location(
+                                    metadata.transport_endpoint,
+                                    metadata.data_size);
                             });
+                        if (updated == 0) {
+                            std::vector<Replica> replicas;
+                            replicas.emplace_back(std::move(replica));
+                            obj_metadata.AddReplicas(std::move(replicas));
+                            auto& shard = accessor.GetShard();
+                            shard.OnDiskReplicaAdded(obj_metadata);
+                            SyncCacheTotalAccounting(obj_metadata);
+                            added_new_local_disk_replica = true;
+                        }
                     }
                     handled_existing_object = true;
                 }
@@ -6322,12 +6388,14 @@ auto MasterService::NotifyOffloadSuccess(
     return {};
 }
 
-tl::expected<void, ErrorCode> MasterService::PushOffloadingQueue(
+tl::expected<std::vector<UUID>, ErrorCode> MasterService::PushOffloadingQueue(
     const ObjectIdentity& object_id, Replica& replica) {
     const auto& segment_names = replica.get_segment_names();
     if (segment_names.empty()) {
         return {};
     }
+    std::vector<UUID> queued_clients;
+    queued_clients.reserve(segment_names.size());
     for (const auto& segment_name_it : segment_names) {
         if (!segment_name_it.has_value()) {
             continue;
@@ -6366,8 +6434,9 @@ tl::expected<void, ErrorCode> MasterService::PushOffloadingQueue(
         if (!res.second) {
             return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);
         }
+        queued_clients.push_back(client_id_it->second);
     }
-    return {};
+    return queued_clients;
 }
 
 // Promotion-on-hit
@@ -7476,23 +7545,31 @@ void MasterService::DiscardExpiredProcessingReplicas(
 
         for (auto task_it = tenant_state.offloading_tasks.begin();
              task_it != tenant_state.offloading_tasks.end();) {
-            const auto ttl =
-                task_it->second.start_time + put_start_release_timeout_sec_;
-            if (ttl > now) {
-                task_it++;
-                continue;
-            }
+            auto& tasks = task_it->second;
             auto metadata_it = tenant_state.metadata.find(task_it->first);
-            if (metadata_it != tenant_state.metadata.end()) {
-                auto source = metadata_it->second.GetReplicaByID(
-                    task_it->second.source_id);
-                if (source != nullptr) {
-                    source->dec_refcnt();
+            for (auto t = tasks.begin(); t != tasks.end();) {
+                const auto ttl =
+                    t->start_time + put_start_release_timeout_sec_;
+                if (ttl > now) {
+                    t++;
+                    continue;
                 }
+                if (metadata_it != tenant_state.metadata.end()) {
+                    auto source = metadata_it->second.GetReplicaByID(
+                        t->source_id);
+                    if (source != nullptr) {
+                        source->dec_refcnt();
+                    }
+                }
+                LOG(WARNING) << "Offloading task expired for key: "
+                             << task_it->first << " tenant=" << tenant_it->first;
+                t = tasks.erase(t);
             }
-            LOG(WARNING) << "Offloading task expired for key: "
-                         << task_it->first << " tenant=" << tenant_it->first;
-            task_it = tenant_state.offloading_tasks.erase(task_it);
+            if (tasks.empty()) {
+                task_it = tenant_state.offloading_tasks.erase(task_it);
+            } else {
+                task_it++;
+            }
         }
 
         for (auto task_it = tenant_state.promotion_tasks.begin();
@@ -7880,10 +7957,13 @@ MasterService::EvictTenantMemoryForQuota(const TenantId& tenant_id,
                     }
                     auto result = PushOffloadingQueue(
                         MakeObjectIdentity(key, normalized_tenant), replica);
-                    if (result) {
-                        replica.inc_refcnt();
-                        tenant_state.offloading_tasks.emplace(
-                            key, OffloadingTask{replica.id(), now});
+                    if (result && !result.value().empty()) {
+                        auto& tasks = tenant_state.offloading_tasks[key];
+                        for (const auto& client_id : result.value()) {
+                            replica.inc_refcnt();
+                            tasks.push_back(
+                                OffloadingTask{replica.id(), now, client_id});
+                        }
                         queued = true;
                     }
                 });
@@ -8139,10 +8219,13 @@ void MasterService::BatchEvict(double evict_ratio_target,
                 if (queued) return;  // only need to pin one replica for offload
                 auto result = PushOffloadingQueue(
                     MakeObjectIdentity(key, tenant_id), replica);
-                if (result) {
-                    replica.inc_refcnt();
-                    tenant_state.offloading_tasks.emplace(
-                        key, OffloadingTask{replica.id(), now});
+                if (result && !result.value().empty()) {
+                    auto& tasks = tenant_state.offloading_tasks[key];
+                    for (const auto& client_id : result.value()) {
+                        replica.inc_refcnt();
+                        tasks.push_back(
+                            OffloadingTask{replica.id(), now, client_id});
+                    }
                     queued = true;
                 }
             });

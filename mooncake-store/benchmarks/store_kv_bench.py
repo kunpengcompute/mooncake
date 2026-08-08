@@ -15,7 +15,12 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, List, Optional
-from mooncake.store import MooncakeDistributedStore, ReplicateConfig, get_alloc_func_addr, get_free_func_addr
+from mooncake.store import (
+    MooncakeDistributedStore,
+    ReplicateConfig,
+    get_alloc_func_addr,
+    get_free_func_addr,
+)
 
 
 LOG = logging.getLogger("store_kv_bench")
@@ -46,6 +51,53 @@ def build_parser() -> argparse.ArgumentParser:
         default="plain",
         help="plain uses put/get/put_batch/get_batch, zcopy uses put_from/get_into/batch_put_from/batch_get_into",
     )
+    parser.add_argument(
+        "--memory-kind",
+        choices=["host", "cuda"],
+        default="host",
+        help="Backing memory for zcopy buffers. CUDA requires a GPU-enabled Mooncake build.",
+    )
+    parser.add_argument(
+        "--buffer-layout",
+        choices=["single", "multi"],
+        default="single",
+        help="Use one buffer or multiple slices for each zcopy object.",
+    )
+    parser.add_argument(
+        "--segments",
+        type=int,
+        default=3,
+        help="Number of balanced slices in multi layout when segment-sizes is omitted.",
+    )
+    parser.add_argument(
+        "--segment-sizes",
+        default="",
+        help="Comma-separated per-object slice sizes; their sum must equal value-size.",
+    )
+    parser.add_argument(
+        "--buffer-offset",
+        type=int,
+        default=0,
+        help="Byte offset from each registered slot base, useful for unaligned-address tests.",
+    )
+    parser.add_argument(
+        "--segment-gap",
+        type=int,
+        default=0,
+        help="Unused bytes between slices in multi layout, useful for non-contiguous SGL tests.",
+    )
+    parser.add_argument(
+        "--cuda-device",
+        type=int,
+        default=0,
+        help="CUDA device used when memory-kind=cuda.",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=4096,
+        help="NoF namespace block size used for physical-I/O and padding estimates.",
+    )
 
     parser.add_argument("--numjobs", type=int, default=1)
     parser.add_argument("--iodepth", type=int, default=1)
@@ -67,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--memory-replica-num", type=int, default=1)
     parser.add_argument("--nof-replica-num", type=int, default=0)
+    parser.add_argument(
+        "--preferred-segment",
+        default="",
+        help="Optional Mooncake segment name used to force a specific NoF target.",
+    )
 
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--pattern", default="")
@@ -106,6 +163,8 @@ class PhaseStats:
     misses: int = 0
     verify_failures: int = 0
     bytes_processed: int = 0
+    estimated_physical_bytes: int = 0
+    padding_bytes: int = 0
     error_counts: Counter = field(default_factory=Counter)
     start_time: float = 0.0
     end_time: float = 0.0
@@ -118,6 +177,8 @@ class RequestResult:
     kv_successes: int
     kv_failures: int
     bytes_processed: int
+    estimated_physical_bytes: int
+    padding_bytes: int
     successful_object_ids: List[int] = field(default_factory=list)
     misses: int = 0
     verify_failures: int = 0
@@ -229,6 +290,49 @@ def parse_pattern(pattern_text: str) -> bytes:
     return pattern_text.encode("utf-8")
 
 
+def parse_segment_sizes(segment_sizes_text: str) -> List[int]:
+    if not segment_sizes_text:
+        return []
+    try:
+        sizes = [int(value.strip()) for value in segment_sizes_text.split(",")]
+    except ValueError as exc:
+        raise ValueError("segment-sizes must be a comma-separated integer list") from exc
+    if not sizes or any(size <= 0 for size in sizes):
+        raise ValueError("all segment-sizes entries must be > 0")
+    return sizes
+
+
+def resolve_segment_sizes(
+    value_size: int,
+    buffer_layout: str,
+    segment_count: int,
+    segment_sizes_text: str,
+) -> List[int]:
+    explicit_sizes = parse_segment_sizes(segment_sizes_text)
+    if buffer_layout == "single":
+        if explicit_sizes:
+            raise ValueError("segment-sizes requires --buffer-layout=multi")
+        return [value_size]
+
+    if explicit_sizes:
+        if len(explicit_sizes) < 2:
+            raise ValueError("multi layout requires at least two segment sizes")
+        if sum(explicit_sizes) != value_size:
+            raise ValueError(f"segment-sizes sum={sum(explicit_sizes)} does not match " f"value-size={value_size}")
+        return explicit_sizes
+
+    if segment_count < 2:
+        raise ValueError("multi layout requires --segments >= 2")
+    if segment_count > value_size:
+        raise ValueError("segments cannot exceed value-size")
+    base_size, remainder = divmod(value_size, segment_count)
+    return [base_size + (1 if index < remainder else 0) for index in range(segment_count)]
+
+
+def align_up(value: int, alignment: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+
 def make_key(prefix: str, key_size: int, object_id: int) -> str:
     suffix = f"{object_id:016d}"
     if key_size < len(suffix):
@@ -254,10 +358,24 @@ class StoreSession:
         self.config = ReplicateConfig()
         self.config.replica_num = args.memory_replica_num
         self.config.nof_replica_num = args.nof_replica_num
+        if args.preferred_segment:
+            self.config.preferred_segment = args.preferred_segment
         self._zcopy = zcopy
 
     def close(self) -> None:
         self._zcopy = None
+
+    def _successful_byte_counts(self, successful_kvs: int, nof_copies: int) -> tuple[int, int, int]:
+        logical_bytes = successful_kvs * self.args.value_size
+        if self.args.memory_replica_num != 0 or self.args.nof_replica_num == 0:
+            return logical_bytes, logical_bytes, 0
+        physical_size = align_up(self.args.value_size, self.args.block_size)
+        estimated_physical_bytes = successful_kvs * physical_size * nof_copies
+        return (
+            logical_bytes,
+            estimated_physical_bytes,
+            successful_kvs * (physical_size - self.args.value_size) * nof_copies,
+        )
 
     def put_ids(self, object_ids: List[int]) -> RequestResult:
         keys = [make_key(self.args.key_prefix, self.args.key_size, object_id) for object_id in object_ids]
@@ -278,11 +396,16 @@ class StoreSession:
                 else:
                     errors[ret] += 1
         request_ok = len(success_ids) == len(object_ids)
+        logical_bytes, physical_bytes, padding_bytes = self._successful_byte_counts(
+            len(success_ids), self.args.nof_replica_num
+        )
         return RequestResult(
             request_ok=request_ok,
             kv_successes=len(success_ids),
             kv_failures=len(object_ids) - len(success_ids),
-            bytes_processed=len(success_ids) * self.args.value_size,
+            bytes_processed=logical_bytes,
+            estimated_physical_bytes=physical_bytes,
+            padding_bytes=padding_bytes,
             successful_object_ids=success_ids,
             error_counts=errors,
         )
@@ -329,11 +452,14 @@ class StoreSession:
                 kv_successes += 1
 
         kv_failures = len(object_ids) - kv_successes
+        logical_bytes, physical_bytes, padding_bytes = self._successful_byte_counts(kv_successes, 1)
         return RequestResult(
             request_ok=(kv_failures == 0),
             kv_successes=kv_successes,
             kv_failures=kv_failures,
-            bytes_processed=kv_successes * self.args.value_size,
+            bytes_processed=logical_bytes,
+            estimated_physical_bytes=physical_bytes,
+            padding_bytes=padding_bytes,
             misses=misses,
             verify_failures=verify_failures,
             error_counts=errors,
@@ -347,8 +473,12 @@ class StoreSession:
             return [self.store.put_batch(keys, values, self.config)]
 
         assert self._zcopy is not None
-        ptrs = self._zcopy.fill_write_buffers(values)
+        all_ptrs = self._zcopy.fill_write_buffers(values)
         sizes = [len(value) for value in values]
+        if self.args.buffer_layout == "multi":
+            all_sizes = [self._zcopy.segment_sizes for _ in values]
+            return list(self.store.batch_put_from_multi_buffers(keys, all_ptrs, all_sizes, self.config))
+        ptrs = [ptrs[0] for ptrs in all_ptrs]
         if len(object_ids) == 1 and self.args.batch_size == 1:
             return [self.store.put_from(keys[0], ptrs[0], sizes[0], self.config)]
         return list(self.store.batch_put_from(keys, ptrs, sizes, self.config))
@@ -360,7 +490,11 @@ class StoreSession:
 
     def _get_lengths_zcopy(self, keys: List[str], slot_count: int) -> List[int]:
         assert self._zcopy is not None
-        ptrs = self._zcopy.prepare_read_buffers(slot_count)
+        all_ptrs = self._zcopy.prepare_read_buffers(slot_count)
+        if self.args.buffer_layout == "multi":
+            all_sizes = [self._zcopy.segment_sizes for _ in range(slot_count)]
+            return list(self.store.batch_get_into_multi_buffers(keys, all_ptrs, all_sizes))
+        ptrs = [ptrs[0] for ptrs in all_ptrs]
         sizes = [self.args.value_size] * slot_count
         if slot_count == 1 and self.args.batch_size == 1:
             return [self.store.get_into(keys[0], ptrs[0], sizes[0])]
@@ -368,62 +502,230 @@ class StoreSession:
 
 
 class ZcopyBufferPool:
-    def __init__(self, store_obj, value_size: int, slots: int):
+    def __init__(
+        self,
+        store_obj,
+        value_size: int,
+        slots: int,
+        segment_sizes: List[int],
+        buffer_offset: int,
+        segment_gap: int,
+    ):
         self.store = store_obj
         self.value_size = value_size
         self.slots = slots
-        self.total_size = self.value_size * self.slots
-        self._alloc_fn = None
-        self._free_fn = None
+        self.segment_sizes = tuple(segment_sizes)
+        self.buffer_offset = buffer_offset
+        self.segment_gap = segment_gap
+        segment_offset = 0
+        self.segment_offsets = []
+        for index, size in enumerate(self.segment_sizes):
+            self.segment_offsets.append(segment_offset)
+            segment_offset += size
+            if index + 1 < len(self.segment_sizes):
+                segment_offset += self.segment_gap
+        self.slot_stride = self.buffer_offset + segment_offset
+        self.total_size = self.slot_stride * self.slots
         self._registered = False
         self.base_ptr = 0
 
+    def _register(self) -> None:
+        ret = self.store.register_buffer(self.base_ptr, self.total_size)
+        if ret != 0:
+            raise RuntimeError(f"register_buffer failed for zcopy pool ptr={self.base_ptr}: {ret}")
+        self._registered = True
+
+    def close(self) -> None:
+        if self.base_ptr and self._registered:
+            try:
+                self.store.unregister_buffer(self.base_ptr)
+            except Exception:
+                LOG.debug(
+                    "unregister_buffer failed for zcopy pool ptr=%s",
+                    self.base_ptr,
+                    exc_info=True,
+                )
+            self._registered = False
+        self._release()
+        self.base_ptr = 0
+
+    def _release(self) -> None:
+        raise NotImplementedError
+
+    def slot_ptr(self, slot: int) -> int:
+        if slot < 0 or slot >= self.slots:
+            raise IndexError(f"zcopy slot {slot} is out of range [0, {self.slots})")
+        return self.base_ptr + slot * self.slot_stride + self.buffer_offset
+
+    def segment_ptrs(self, slot: int) -> List[int]:
+        slot_ptr = self.slot_ptr(slot)
+        return [slot_ptr + offset for offset in self.segment_offsets]
+
+    def write_bytes(self, slot: int, payload: bytes) -> None:
+        raise NotImplementedError
+
+    def clear_bytes(self, slot: int) -> None:
+        raise NotImplementedError
+
+    def read_bytes(self, slot: int, size: int) -> bytes:
+        raise NotImplementedError
+
+    def synchronize(self) -> None:
+        pass
+
+
+class HostZcopyBufferPool(ZcopyBufferPool):
+    def __init__(
+        self,
+        store_obj,
+        value_size: int,
+        slots: int,
+        segment_sizes: List[int],
+        buffer_offset: int,
+        segment_gap: int,
+    ):
+        super().__init__(
+            store_obj,
+            value_size,
+            slots,
+            segment_sizes,
+            buffer_offset,
+            segment_gap,
+        )
         alloc_addr = get_alloc_func_addr()
         free_addr = get_free_func_addr()
         if alloc_addr is None or free_addr is None:
             raise RuntimeError("store module does not expose hugepage alloc/free helpers")
 
-        self._alloc_fn = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)(
-            get_alloc_func_addr()
-        )
-        self._free_fn = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(
-            get_free_func_addr()
-        )
+        self._alloc_fn = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)(alloc_addr)
+        self._free_fn = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(free_addr)
+        self._buffer = None
 
         raw_ptr = self._alloc_fn(self.total_size)
         self.base_ptr = ctypes.cast(raw_ptr, ctypes.c_void_p).value or 0
         if self.base_ptr == 0:
-            raise RuntimeError(
-                f"direct hugepage alloc failed for zcopy pool: size={self.total_size}"
-            )
-        ret = self.store.register_buffer(self.base_ptr, self.total_size)
-        if ret != 0:
-            failed_ptr = self.base_ptr
+            raise RuntimeError(f"direct hugepage alloc failed for zcopy pool: size={self.total_size}")
+        try:
+            self._register()
+        except Exception:
             self._free_fn(ctypes.c_void_p(self.base_ptr))
             self.base_ptr = 0
-            raise RuntimeError(
-                f"register_buffer failed for direct zcopy pool ptr={failed_ptr}: {ret}"
-            )
-        self._registered = True
+            raise
         self._buffer = (ctypes.c_ubyte * self.total_size).from_address(self.base_ptr)
 
-    def close(self) -> None:
+    def _release(self) -> None:
         self._buffer = None
         if self.base_ptr:
-            if self._registered:
-                try:
-                    self.store.unregister_buffer(self.base_ptr)
-                except Exception:
-                    LOG.debug("unregister_buffer failed for direct zcopy pool ptr=%s", self.base_ptr, exc_info=True)
-                self._registered = False
-            if self._free_fn is not None:
-                self._free_fn(ctypes.c_void_p(self.base_ptr))
-            self.base_ptr = 0
+            self._free_fn(ctypes.c_void_p(self.base_ptr))
 
-    def slot_ptr(self, slot: int) -> int:
-        if slot < 0 or slot >= self.slots:
-            raise IndexError(f"zcopy slot {slot} is out of range [0, {self.slots})")
-        return self.base_ptr + slot * self.value_size
+    def write_bytes(self, slot: int, payload: bytes) -> None:
+        if len(payload) != self.value_size:
+            raise ValueError(f"Payload size {len(payload)} does not match value-size {self.value_size}")
+        payload_offset = 0
+        for ptr, size in zip(self.segment_ptrs(slot), self.segment_sizes):
+            ctypes.memmove(ptr, payload[payload_offset : payload_offset + size], size)
+            payload_offset += size
+
+    def clear_bytes(self, slot: int) -> None:
+        for ptr, size in zip(self.segment_ptrs(slot), self.segment_sizes):
+            ctypes.memset(ptr, 0, size)
+
+    def read_bytes(self, slot: int, size: int) -> bytes:
+        if size > self.value_size:
+            raise ValueError(f"Read size {size} exceeds slot size {self.value_size}")
+        remaining = size
+        chunks = []
+        for ptr, segment_size in zip(self.segment_ptrs(slot), self.segment_sizes):
+            chunk_size = min(remaining, segment_size)
+            if chunk_size == 0:
+                break
+            chunks.append(ctypes.string_at(ptr, chunk_size))
+            remaining -= chunk_size
+        return b"".join(chunks)
+
+
+class CudaZcopyBufferPool(ZcopyBufferPool):
+    def __init__(
+        self,
+        store_obj,
+        value_size: int,
+        slots: int,
+        segment_sizes: List[int],
+        buffer_offset: int,
+        segment_gap: int,
+        cuda_device: int,
+    ):
+        super().__init__(
+            store_obj,
+            value_size,
+            slots,
+            segment_sizes,
+            buffer_offset,
+            segment_gap,
+        )
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("memory-kind=cuda requires PyTorch") from exc
+        if not torch.cuda.is_available():
+            raise RuntimeError("memory-kind=cuda requires an available CUDA device")
+        if cuda_device < 0 or cuda_device >= torch.cuda.device_count():
+            raise ValueError(f"cuda-device={cuda_device} is outside [0, {torch.cuda.device_count()})")
+
+        self._torch = torch
+        self.cuda_device = cuda_device
+        with torch.cuda.device(self.cuda_device):
+            self._tensor = torch.empty(self.total_size, dtype=torch.uint8, device=f"cuda:{self.cuda_device}")
+        self.base_ptr = self._tensor.data_ptr()
+        try:
+            self._register()
+        except Exception:
+            self._tensor = None
+            self.base_ptr = 0
+            raise
+
+    def _release(self) -> None:
+        self._tensor = None
+
+    def _segment_tensor(self, slot: int, segment_index: int, size: int):
+        if size > self.segment_sizes[segment_index]:
+            raise ValueError(f"Buffer size {size} exceeds segment size " f"{self.segment_sizes[segment_index]}")
+        start = slot * self.slot_stride + self.buffer_offset + self.segment_offsets[segment_index]
+        return self._tensor.narrow(0, start, size)
+
+    def write_bytes(self, slot: int, payload: bytes) -> None:
+        if len(payload) != self.value_size:
+            raise ValueError(f"Payload size {len(payload)} does not match value-size {self.value_size}")
+        with self._torch.cuda.device(self.cuda_device):
+            payload_offset = 0
+            for index, segment_size in enumerate(self.segment_sizes):
+                payload_chunk = bytearray(payload[payload_offset : payload_offset + segment_size])
+                host_tensor = self._torch.frombuffer(payload_chunk, dtype=self._torch.uint8)
+                self._segment_tensor(slot, index, segment_size).copy_(host_tensor)
+                payload_offset += segment_size
+
+    def clear_bytes(self, slot: int) -> None:
+        with self._torch.cuda.device(self.cuda_device):
+            for index, segment_size in enumerate(self.segment_sizes):
+                self._segment_tensor(slot, index, segment_size).zero_()
+
+    def read_bytes(self, slot: int, size: int) -> bytes:
+        if size > self.value_size:
+            raise ValueError(f"Read size {size} exceeds slot size {self.value_size}")
+        with self._torch.cuda.device(self.cuda_device):
+            remaining = size
+            chunks = []
+            for index, segment_size in enumerate(self.segment_sizes):
+                chunk_size = min(remaining, segment_size)
+                if chunk_size == 0:
+                    break
+                chunks.append(self._segment_tensor(slot, index, chunk_size).cpu().numpy().tobytes())
+                remaining -= chunk_size
+            return b"".join(chunks)
+
+    def synchronize(self) -> None:
+        with self._torch.cuda.device(self.cuda_device):
+            self._torch.cuda.synchronize(self.cuda_device)
 
 
 class ZcopyBufferView:
@@ -432,43 +734,51 @@ class ZcopyBufferView:
         self.slot_offset = slot_offset
         self.slots = slots
 
-    def _slot_ptr(self, slot: int) -> int:
+    @property
+    def segment_sizes(self) -> List[int]:
+        return list(self.pool.segment_sizes)
+
+    def _global_slot(self, slot: int) -> int:
         if slot < 0 or slot >= self.slots:
             raise IndexError(f"zcopy view slot {slot} is out of range [0, {self.slots})")
-        return self.pool.slot_ptr(self.slot_offset + slot)
+        return self.slot_offset + slot
 
-    def fill_write_buffers(self, payloads: List[bytes]) -> List[int]:
-        ptrs: List[int] = []
+    def fill_write_buffers(self, payloads: List[bytes]) -> List[List[int]]:
+        all_ptrs: List[List[int]] = []
         for slot, payload in enumerate(payloads):
-            if len(payload) > self.pool.value_size:
-                raise ValueError(
-                    f"Payload size {len(payload)} exceeds slot size {self.pool.value_size}"
-                )
-            ptr = self._slot_ptr(slot)
-            ctypes.memmove(ptr, payload, len(payload))
-            ptrs.append(ptr)
-        return ptrs
+            global_slot = self._global_slot(slot)
+            self.pool.write_bytes(global_slot, payload)
+            all_ptrs.append(self.pool.segment_ptrs(global_slot))
+        self.pool.synchronize()
+        return all_ptrs
 
-    def prepare_read_buffers(self, slot_count: int) -> List[int]:
-        ptrs: List[int] = []
+    def prepare_read_buffers(self, slot_count: int) -> List[List[int]]:
+        all_ptrs: List[List[int]] = []
         for slot in range(slot_count):
-            ptr = self._slot_ptr(slot)
-            ctypes.memset(ptr, 0, self.pool.value_size)
-            ptrs.append(ptr)
-        return ptrs
+            global_slot = self._global_slot(slot)
+            self.pool.clear_bytes(global_slot)
+            all_ptrs.append(self.pool.segment_ptrs(global_slot))
+        self.pool.synchronize()
+        return all_ptrs
 
     def read_bytes(self, slot: int, size: int) -> bytes:
-        if size > self.pool.value_size:
-            raise ValueError(
-                f"Read size {size} exceeds slot size {self.pool.value_size}"
-            )
-        return ctypes.string_at(self._slot_ptr(slot), size)
+        return self.pool.read_bytes(self._global_slot(slot), size)
 
 
 class StoreRuntime:
     def __init__(self, args: argparse.Namespace, lane_count: int):
-
         self.lane_count = lane_count
+        if args.memory_kind == "cuda":
+            try:
+                import torch
+            except ImportError as exc:
+                raise RuntimeError("memory-kind=cuda requires PyTorch") from exc
+            if not torch.cuda.is_available():
+                raise RuntimeError("memory-kind=cuda requires an available CUDA device")
+            if args.cuda_device < 0 or args.cuda_device >= torch.cuda.device_count():
+                raise ValueError(f"cuda-device={args.cuda_device} is outside " f"[0, {torch.cuda.device_count()})")
+            torch.cuda.set_device(args.cuda_device)
+
         self.store = MooncakeDistributedStore()
         setup_ret = self.store.setup(
             args.local_hostname,
@@ -485,9 +795,22 @@ class StoreRuntime:
         self.zcopy_pool: Optional[ZcopyBufferPool] = None
         if args.io_api == "zcopy":
             slots = max(1, args.batch_size) * lane_count
-            self.zcopy_pool = ZcopyBufferPool(
-                self.store, args.value_size, slots
+            pool_args = (
+                self.store,
+                args.value_size,
+                slots,
+                args.resolved_segment_sizes,
+                args.buffer_offset,
+                args.segment_gap,
             )
+            try:
+                if args.memory_kind == "cuda":
+                    self.zcopy_pool = CudaZcopyBufferPool(*pool_args, cuda_device=args.cuda_device)
+                else:
+                    self.zcopy_pool = HostZcopyBufferPool(*pool_args)
+            except Exception:
+                self.close()
+                raise
 
     def make_session(
         self,
@@ -498,9 +821,7 @@ class StoreRuntime:
         zcopy_view: Optional[ZcopyBufferView] = None
         if self.zcopy_pool is not None:
             slots_per_lane = max(1, args.batch_size)
-            zcopy_view = ZcopyBufferView(
-                self.zcopy_pool, lane_id * slots_per_lane, slots_per_lane
-            )
+            zcopy_view = ZcopyBufferView(self.zcopy_pool, lane_id * slots_per_lane, slots_per_lane)
         return StoreSession(
             args,
             lane_id,
@@ -542,6 +863,8 @@ def merge_stats(name: str, stats_list: List[PhaseStats]) -> PhaseStats:
         merged.misses += stats.misses
         merged.verify_failures += stats.verify_failures
         merged.bytes_processed += stats.bytes_processed
+        merged.estimated_physical_bytes += stats.estimated_physical_bytes
+        merged.padding_bytes += stats.padding_bytes
         merged.error_counts.update(stats.error_counts)
         merged.dataset_exhausted = merged.dataset_exhausted or stats.dataset_exhausted
     return merged
@@ -563,6 +886,7 @@ def percentile(values: List[float], p: float) -> float:
 
 def summarize_stats(stats: PhaseStats) -> dict:
     duration = max(stats.end_time - stats.start_time, 0.0)
+    amplification = stats.estimated_physical_bytes / stats.bytes_processed if stats.bytes_processed > 0 else 0.0
     return {
         "requests": stats.requests,
         "successful_requests": stats.successful_requests,
@@ -573,11 +897,17 @@ def summarize_stats(stats: PhaseStats) -> dict:
         "misses": stats.misses,
         "verify_failures": stats.verify_failures,
         "bytes": stats.bytes_processed,
+        "estimated_physical_bytes": stats.estimated_physical_bytes,
+        "padding_bytes": stats.padding_bytes,
+        "io_amplification": amplification,
         "duration_sec": duration,
         "req_per_sec": (stats.requests / duration) if duration > 0 else 0.0,
         "kv_per_sec": (stats.kvs / duration) if duration > 0 else 0.0,
-        "MiB_per_sec": (stats.bytes_processed / duration / (1024 * 1024)) if duration > 0 else 0.0,
-        "lat_mean_ms": statistics.mean(stats.request_latencies) * 1000 if stats.request_latencies else 0.0,
+        "MiB_per_sec": ((stats.bytes_processed / duration / (1024 * 1024)) if duration > 0 else 0.0),
+        "estimated_physical_MiB_per_sec": (
+            stats.estimated_physical_bytes / duration / (1024 * 1024) if duration > 0 else 0.0
+        ),
+        "lat_mean_ms": (statistics.mean(stats.request_latencies) * 1000 if stats.request_latencies else 0.0),
         "lat_p50_ms": percentile(stats.request_latencies, 0.50) * 1000,
         "lat_p95_ms": percentile(stats.request_latencies, 0.95) * 1000,
         "lat_p99_ms": percentile(stats.request_latencies, 0.99) * 1000,
@@ -609,6 +939,13 @@ def log_phase_stats(stats: PhaseStats) -> None:
         summary["MiB_per_sec"],
     )
     LOG.info(
+        "estimated_physical_bytes=%d padding_bytes=%d " "io_amplification=%.3fx estimated_physical_MiB/s=%.2f",
+        summary["estimated_physical_bytes"],
+        summary["padding_bytes"],
+        summary["io_amplification"],
+        summary["estimated_physical_MiB_per_sec"],
+    )
+    LOG.info(
         "lat_mean=%.3fms lat_p50=%.3fms lat_p95=%.3fms lat_p99=%.3fms dataset_exhausted=%s",
         summary["lat_mean_ms"],
         summary["lat_p50_ms"],
@@ -638,6 +975,20 @@ class BenchmarkRunner:
             raise ValueError("batch-size must be > 0")
         if self.args.value_size <= 0:
             raise ValueError("value-size must be > 0")
+        if self.args.block_size <= 0 or (self.args.block_size & (self.args.block_size - 1)):
+            raise ValueError("block-size must be a positive power of two")
+        if self.args.buffer_offset < 0:
+            raise ValueError("buffer-offset must be >= 0")
+        if self.args.segment_gap < 0:
+            raise ValueError("segment-gap must be >= 0")
+        if self.args.io_api == "plain" and self.args.memory_kind != "host":
+            raise ValueError("memory-kind=cuda requires --io-api=zcopy")
+        if self.args.io_api == "plain" and self.args.buffer_layout != "single":
+            raise ValueError("buffer-layout=multi requires --io-api=zcopy")
+        if self.args.io_api == "plain" and self.args.buffer_offset != 0:
+            raise ValueError("buffer-offset requires --io-api=zcopy")
+        if self.args.buffer_layout == "single" and self.args.segment_gap != 0:
+            raise ValueError("segment-gap requires --buffer-layout=multi")
         if self.args.key_size <= 0:
             raise ValueError("key-size must be > 0")
         if self.args.nr_objects <= 0:
@@ -658,12 +1009,13 @@ class BenchmarkRunner:
             raise ValueError("phase-gap-file must be set when phase-gap-mode=file")
         if self.args.scenario == "mixed_rw" and self.args.runtime <= 0:
             raise ValueError("mixed_rw requires --runtime > 0")
-        if self._scenario_has_write() and self.args.value_size % 512 != 0:
-            raise ValueError("write-involved scenarios require value-size to be 512B aligned")
+        self.args.resolved_segment_sizes = resolve_segment_sizes(
+            self.args.value_size,
+            self.args.buffer_layout,
+            self.args.segments,
+            self.args.segment_sizes,
+        )
         make_key(self.args.key_prefix, self.args.key_size, self.args.object_id_start)
-
-    def _scenario_has_write(self) -> bool:
-        return self.args.scenario in {"verify_write", "fill", "write_perf", "mixed_rw"}
 
     def _write_budget(self) -> int:
         return self.args.write_objects if self.args.write_objects > 0 else self.args.nr_objects
@@ -704,12 +1056,20 @@ class BenchmarkRunner:
         deadline = time.time() + self.args.phase_gap_timeout_sec
         while time.time() < deadline:
             if os.path.exists(self.args.phase_gap_file):
-                LOG.info("detected phase gap file %s, continuing to %s", self.args.phase_gap_file, label)
+                LOG.info(
+                    "detected phase gap file %s, continuing to %s",
+                    self.args.phase_gap_file,
+                    label,
+                )
                 return
             time.sleep(1.0)
         raise TimeoutError(f"timed out waiting for phase gap file {self.args.phase_gap_file}")
 
-    def _run_threads(self, phase_name: str, worker_builder: Callable[[StoreSession, int], Callable[[PhaseStats], None]]) -> PhaseStats:
+    def _run_threads(
+        self,
+        phase_name: str,
+        worker_builder: Callable[[StoreSession, int], Callable[[PhaseStats], None]],
+    ) -> PhaseStats:
         sessions = self._make_sessions()
         per_lane_stats: List[Optional[PhaseStats]] = [None] * self.lane_count
         threads: List[threading.Thread] = []
@@ -722,7 +1082,11 @@ class BenchmarkRunner:
             per_lane_stats[index] = stats
 
         for lane_id, session in enumerate(sessions):
-            thread = threading.Thread(target=runner, args=(lane_id, session), name=f"{phase_name}-lane{lane_id}")
+            thread = threading.Thread(
+                target=runner,
+                args=(lane_id, session),
+                name=f"{phase_name}-lane{lane_id}",
+            )
             threads.append(thread)
             thread.start()
 
@@ -746,6 +1110,8 @@ class BenchmarkRunner:
         stats.misses += request.misses
         stats.verify_failures += request.verify_failures
         stats.bytes_processed += request.bytes_processed
+        stats.estimated_physical_bytes += request.estimated_physical_bytes
+        stats.padding_bytes += request.padding_bytes
         stats.error_counts.update(request.error_counts)
 
     def _run_fixed_write(
@@ -773,6 +1139,7 @@ class BenchmarkRunner:
                             self.dataset.mark_prepared(result.successful_object_ids)
                         else:
                             self.dataset.mark_runtime_written(result.successful_object_ids)
+
             return run
 
         stats = self._run_threads(phase_name, worker)
@@ -805,6 +1172,7 @@ class BenchmarkRunner:
                     self._record(stats, latency, result, len(object_ids))
                     if result.successful_object_ids:
                         self.dataset.mark_runtime_written(result.successful_object_ids)
+
             return run
 
         return self._run_threads(phase_name, worker)
@@ -916,7 +1284,10 @@ class BenchmarkRunner:
     def _maybe_prepare_dataset(self) -> Optional[PhaseStats]:
         if self.args.prepare_mode == "none":
             return None
-        if self.args.prepare_mode == "write" or self.args.scenario in {"read_perf", "mixed_rw"}:
+        if self.args.prepare_mode == "write" or self.args.scenario in {
+            "read_perf",
+            "mixed_rw",
+        }:
             stats = self._run_fixed_write(
                 "prepare_write",
                 self._prepare_budget(),
@@ -929,9 +1300,19 @@ class BenchmarkRunner:
 
     def run(self) -> List[PhaseStats]:
         LOG.info(
-            "scenario=%s io_api=%s numjobs=%d iodepth=%d lanes=%d batch_size=%d value_size=%d nr_objects=%d prepare_objects=%d write_objects=%d memory_replica_num=%d nof_replica_num=%d verify=%s",
+            "scenario=%s io_api=%s memory_kind=%s buffer_layout=%s "
+            "segment_sizes=%s buffer_offset=%d segment_gap=%d block_size=%d numjobs=%d "
+            "iodepth=%d lanes=%d batch_size=%d value_size=%d nr_objects=%d "
+            "prepare_objects=%d write_objects=%d memory_replica_num=%d "
+            "nof_replica_num=%d preferred_segment=%s verify=%s",
             self.args.scenario,
             self.args.io_api,
+            self.args.memory_kind,
+            self.args.buffer_layout,
+            self.args.resolved_segment_sizes,
+            self.args.buffer_offset,
+            self.args.segment_gap,
+            self.args.block_size,
             self.args.numjobs,
             self.args.iodepth,
             self.lane_count,
@@ -942,6 +1323,7 @@ class BenchmarkRunner:
             self.args.write_objects,
             self.args.memory_replica_num,
             self.args.nof_replica_num,
+            self.args.preferred_segment or "<none>",
             self.args.verify,
         )
 

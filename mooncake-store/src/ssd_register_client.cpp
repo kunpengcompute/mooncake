@@ -14,7 +14,7 @@ int NoFRegisterClient::set_register(const std::string &nqn, size_t nsid,
                                     const std::string &traddr, size_t trsvcid,
                                     uintptr_t base, size_t size,
                                     const std::string &master_server_addr,
-                                    uint32_t block_size) {
+                                    uint32_t block_size, std::string trtype) {
     LOG(INFO) << "Registering SSD: nqn=" << nqn << ",nsid=" << nsid
               << ",traddr=" << traddr << ",trsvcid=" << trsvcid
               << ",master=" << master_server_addr << ",base=" << base
@@ -34,14 +34,11 @@ int NoFRegisterClient::set_register(const std::string &nqn, size_t nsid,
         return OPERATION_FAILED;
     }
 
-    const char *trtype_env = std::getenv("MC_NOF_TRTYPE");
-    std::string trtype = trtype_env ? trtype_env : "RDMA";
     std::transform(
         trtype.begin(), trtype.end(), trtype.begin(),
         [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    if (trtype != "RDMA" && trtype != "TCP") {
-        LOG(WARNING) << "Invalid MC_NOF_TRTYPE=" << trtype
-                     << ", fallback to RDMA";
+    if (trtype != "RDMA" && trtype != "TCP" && trtype != "UB") {
+        LOG(WARNING) << "Invalid trtype=" << trtype << ", fallback to RDMA";
         trtype = "RDMA";
     }
 
@@ -85,7 +82,7 @@ int NoFRegisterClient::set_unregister_by_endpoint(
     std::transform(
         trtype.begin(), trtype.end(), trtype.begin(),
         [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    if (trtype != "RDMA" && trtype != "TCP") {
+    if (trtype != "RDMA" && trtype != "TCP" && trtype != "UB") {
         LOG(WARNING) << "Invalid MC_NOF_TRTYPE=" << trtype
                      << ", fallback to RDMA";
         trtype = "RDMA";

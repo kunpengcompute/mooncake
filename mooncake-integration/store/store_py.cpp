@@ -1972,13 +1972,19 @@ PYBIND11_MODULE(store, m) {
                 const std::string &traddr = "", size_t trsvcid = 4420,
                 uintptr_t base = 0x0, size_t size = 1024,
                 const std::string &master_server_addr = "127.0.0.1:50051",
-                uint32_t block_size = 512) {
+                uint32_t block_size = 512,
+                const std::string &trtype = "RDMA") {
                  self.register_ = std::make_shared<NoFRegisterClient>();
                  return self.register_->set_register(nqn, nsid, traddr, trsvcid,
                                                      base, size,
                                                      master_server_addr,
-                                                     block_size);
-             })
+                                                     block_size, trtype);
+             },
+             py::arg("nqn") = "", py::arg("nsid") = 1,
+             py::arg("traddr") = "", py::arg("trsvcid") = 4420,
+             py::arg("base") = 0x0, py::arg("size") = 1024,
+             py::arg("master_server_addr") = "127.0.0.1:50051",
+             py::arg("block_size") = 512, py::arg("trtype") = "RDMA")
         .def("real_unregister_by_endpoint",
              [](MooncakeDistributedNoFRegisterPyWrapper &self,
                 const std::string &nqn = "", size_t nsid = 1,

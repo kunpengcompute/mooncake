@@ -168,11 +168,19 @@ class MooncakeNoFRegister:
                     if not nqn or not listen_addresses:
                         continue
 
-                    # Get transport info from first listen address
-                    traddr = listen_addresses[0].get('traddr')
-                    trsvcid = listen_addresses[0].get('trsvcid')
+                    listen_address = listen_addresses[0]
+                    traddr = listen_address.get('traddr')
+                    trsvcid = listen_address.get('trsvcid')
+                    trtype = str(listen_address.get('trtype', 'RDMA')).upper()
 
                     if not traddr or not trsvcid:
+                        continue
+                    if trtype not in ('RDMA', 'TCP', 'UB'):
+                        logging.warning(
+                            "Skipping unsupported SPDK transport %s for %s",
+                            trtype,
+                            nqn,
+                        )
                         continue
 
                     # Process each namespace
@@ -203,6 +211,7 @@ class MooncakeNoFRegister:
                             'nsid': nsid,
                             'traddr': traddr,
                             'trsvcid': int(trsvcid),  # Ensure trsvcid is integer
+                            'trtype': trtype,
                             'base': 0,
                             'size': size,
                             'block_size': block_size,
@@ -211,7 +220,15 @@ class MooncakeNoFRegister:
                         }
 
                         ssd_configs.append(ssd_config)
-                        logging.info(f"Found SSD: nqn={nqn}, nsid={nsid}, traddr={traddr}, size={size}")
+                        logging.info(
+                            "Found SSD: nqn=%s, nsid=%s, traddr=%s, "
+                            "trtype=%s, size=%s",
+                            nqn,
+                            nsid,
+                            traddr,
+                            trtype,
+                            size,
+                        )
 
             except Exception as e:
                 logging.error(f"Failed to get SSD info from {ip}: {e}")
@@ -236,7 +253,18 @@ class MooncakeNoFRegister:
 
         for i, cfg in enumerate(self.config_list):
             try:
-                logging.info("Registering SSD %d/%d: nqn=%s, traddr=%s", i + 1, total, cfg.get("nqn"), cfg.get("traddr"))
+                trtype = str(cfg.get("trtype", "RDMA")).upper()
+                if trtype not in ("RDMA", "TCP", "UB"):
+                    raise ValueError(f"Unsupported SPDK transport: {trtype}")
+
+                logging.info(
+                    "Registering SSD %d/%d: nqn=%s, traddr=%s, trtype=%s",
+                    i + 1,
+                    total,
+                    cfg.get("nqn"),
+                    cfg.get("traddr"),
+                    trtype,
+                )
 
                 # Create register instance and register SSD
                 self.register = MooncakeDistributedNoFRegister()
@@ -248,7 +276,8 @@ class MooncakeNoFRegister:
                     cfg["base"],
                     cfg["size"],
                     cfg["master_server_address"],
-                    cfg["block_size"]
+                    cfg["block_size"],
+                    trtype,
                 )
 
                 if ret != 0:

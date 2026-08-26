@@ -1,4 +1,5 @@
 # Transfer Engine Benchmarking & Tuning Guide
+
 ## Background
 
 Mooncake’s data transfer backbone is the **Transfer Engine (Mooncake TE)**. Through the adoption of **SGLang**, Mooncake TE is being widely applied across different scenarios and vendors, and user feedback has been increasing.
@@ -14,17 +15,20 @@ To support validation and quick prototyping, we provide a **benchmark program** 
 ## Usage
 
 The benchmark requires **two processes**:  
+
 - **Target** (must start first)  
 - **Initiator** (must start after target)
 
 ### Example
 
 - Target:
+
 ```bash
 ./transfer_engine_bench --mode=target --auto_discovery --metadata_server=P2PHANDSHAKE
 ````
 
 * Initiator (`segment_id` is `target_ip:RPC_port`; RPC port is printed by target, range 15000–20000):
+
 ```
 Transfer Engine RPC using XXX, listening on YYY:ZZZ
                                                 ~~~

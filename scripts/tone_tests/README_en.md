@@ -79,6 +79,7 @@ test_case_name=
 - **Avoid Relative Paths**: Don't use `./` or `../` relative paths
 - **Use Environment Variables**: Utilize `$BASE_DIR`, `$TEST_CASE_RESULT_DIR`, etc.
 - **Recommended Practice**:
+
   ```bash
   BASE_DIR=${TONE_TESTS_DIR}
   TEST_CASE_RESULT_DIR=${TONE_TESTS_DIR}/${TEST_CASE_RESULT_PATH}
@@ -137,6 +138,7 @@ Or when failed:
 ```
 
 **Field Descriptions**:
+
 - `test_case`: Test case name (required)
 - `status`: Test status, `Pass` or `Fail` (required)
 - `timestamp`: UTC timestamp in ISO 8601 format (optional)

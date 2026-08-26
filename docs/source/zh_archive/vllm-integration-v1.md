@@ -1,9 +1,11 @@
 # vLLM 解耦式服务与 MooncakeStore 集成
 
 ## 概述
+
 本文档是基于 [PR 10502](https://github.com/vllm-project/vllm/pull/10502) 和 [PR 12957](https://github.com/vllm-project/vllm/pull/12957) 的最新版 MooncakeStore 集成文档，支持节点内及跨节点的 KVCache 传输，用于解耦式服务场景。基准测试结果将很快发布。
 
 v0.x 至 v1 主要变更：
+
 - XpYd 支持与编排
   - 支持动态调整预填充组和解码组的规模
 - 更好的稳定性与容错性
@@ -11,32 +13,43 @@ v0.x 至 v1 主要变更：
   - 由于移除了实例间直连，每个实例都可作为普通的 vLLM 实例独立工作，可正常处理非代理请求
 
 **_请注意当前仍为实验版本，可能根据 vLLM 社区反馈随时调整。_**
+
 - **更新（2025年4月10日）**：我们正在进行 vLLM v1 版本集成工作，敬请期待。
 
 ## 安装
+
 ### 准备工作
+
 ```bash
 pip3 install mooncake-transfer-engine
 ```
 
 注意事项：
+
   - 如遇缺失 `lib*.so` 等库问题，请先执行 `pip3 uninstall mooncake-transfer-engine` 卸载，然后按照[编译指南](build.md)手动编译。
   - 对于 vLLM <= v0.8.4，请使用mooncake-transfer-engine <= v0.3.3.post2，`mooncake_vllm_adaptor`接口已被废弃。
 
 ### 安装最新版 vLLM
+
 #### 1. 克隆官方仓库
+
 ```bash
 git clone git@github.com:vllm-project/vllm.git
 ```
+
 #### 2. 编译安装
+
 ##### 2.1 源码编译
+
 ```bash
 cd vllm
 pip3 install -e .
 ```
+
   - 如遇编译问题，请参考[vLLM 官方编译指南](https://docs.vllm.ai/en/latest/getting_started/installation/index.html)。
 
 ## 配置
+
 ### 使用 RDMA 运行示例所需配置文件
 
 - 为预填充和解码实例准备一个 _**mooncake.json**_ 文件
@@ -50,6 +63,7 @@ pip3 install -e .
     "master_server_address": "192.168.0.137:50001"
 }
 ```
+
 - "local_hostname": 当前节点用于连接元数据服务器的 IP 地址
   - **_同一节点上的所有预填充实例和解码实例可共享此配置文件。_**
 - "metadata_server": Mooncake 传输引擎的元数据服务器地址，例如：
@@ -63,6 +77,7 @@ pip3 install -e .
 ### 使用 TCP 运行示例所需配置文件
 
 - 为预填充实例和解码实例准备 _**mooncake.json**_ 配置文件
+
 ```json
 {
     "local_hostname": "192.168.0.137",
@@ -74,7 +89,9 @@ pip3 install -e .
 ```
 
 ## 运行示例
+
  - 请根据您的环境更改以下指南中的 IP 地址和端口。
+
 ```bash
 # Begin from `root` of your cloned repo!
 
@@ -154,8 +171,8 @@ Mooncake 团队实现的这个简单的 disagg_proxy 示例基于轮询策略。
 
 **_请确保修改命令中的 IP 地址。_**
 
-
 ## 测试 OpenAI 兼容的请求
+
 ```
 curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
   "model": "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4",
@@ -163,4 +180,5 @@ curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json"
   "max_tokens": 1000
 }'
 ```
+
 - 如果您不是在代理服务器上进行测试，请将 localhost 更改为代理服务器的 IP 地址。

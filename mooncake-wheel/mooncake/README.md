@@ -21,6 +21,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --port 8020 --kv-transfer-config '{"kv_conne
 ```
 
 #### Proxy
+
 ```bash
 python -m mooncake.vllm_v1_proxy_server --prefiller-host 192.168.0.2 --prefiller-port 8010 --decoder-host 192.168.0.3 --decoder-port 8020
 ```

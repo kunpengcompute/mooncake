@@ -193,12 +193,14 @@ initialize(local_hostname, metadata_server, protocol, device_name)
 Initializes the transfer engine with basic configuration.
 
 **Parameters:**
+
 - `local_hostname` (str): The hostname and port of the local server (e.g., "127.0.0.1:12345")
 - `metadata_server` (str): The metadata server connection string (e.g., "127.0.0.1:2379" or "etcd://127.0.0.1:2379")
 - `protocol` (str): The transport protocol to use ("rdma", "tcp", etc.)
 - `device_name` (str): Comma-separated list of device names to filter, or empty string for all devices
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 #### initialize_ext()
@@ -210,6 +212,7 @@ initialize_ext(local_hostname, metadata_server, protocol, device_name, metadata_
 Initializes the transfer engine with extended configuration including metadata type specification.
 
 **Parameters:**
+
 - `local_hostname` (str): The hostname and port of the local server
 - `metadata_server` (str): The metadata server connection string
 - `protocol` (str): The transport protocol to use
@@ -217,6 +220,7 @@ Initializes the transfer engine with extended configuration including metadata t
 - `metadata_type` (str): The type of metadata server ("etcd", "p2p", etc.)
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 ### Engine Information
@@ -230,6 +234,7 @@ get_engine()
 Gets the inner transfer engine instance, which can be reused for mooncake store.
 
 **Returns:**
+
 - `InnerTransferEngine`: The inner transfer engine
 
 ### Network Information
@@ -243,6 +248,7 @@ get_rpc_port()
 Gets the RPC port that the transfer engine is listening on.
 
 **Returns:**
+
 - `int`: The RPC port number
 
 ### Buffer Management
@@ -256,9 +262,11 @@ allocate_managed_buffer(length)
 Allocates a managed buffer of the specified size using a buddy allocation system for efficient memory management.
 
 **Parameters:**
+
 - `length` (int): The size of the buffer to allocate in bytes
 
 **Returns:**
+
 - `int`: The memory address of the allocated buffer as an integer, or 0 on failure
 
 #### free_managed_buffer()
@@ -270,10 +278,12 @@ free_managed_buffer(buffer_addr, length)
 Frees a previously allocated managed buffer.
 
 **Parameters:**
+
 - `buffer_addr` (int): The memory address of the buffer to free
 - `length` (int): The size of the buffer in bytes
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 #### get_first_buffer_address()
@@ -285,9 +295,11 @@ get_first_buffer_address(segment_name)
 Gets the address of the first buffer in a specified segment.
 
 **Parameters:**
+
 - `segment_name` (str): The name of the segment
 
 **Returns:**
+
 - `int`: The memory address of the first buffer in the segment
 
 ### Data Transfer Operations
@@ -301,12 +313,14 @@ transfer_sync_write(target_hostname, buffer, peer_buffer_address, length)
 Performs a synchronous write operation to transfer data from local buffer to remote buffer.
 
 **Parameters:**
+
 - `target_hostname` (str): The hostname of the target server
 - `buffer` (int): The local buffer address
 - `peer_buffer_address` (int): The remote buffer address
 - `length` (int): The number of bytes to transfer
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 #### transfer_sync_read()
@@ -318,12 +332,14 @@ transfer_sync_read(target_hostname, buffer, peer_buffer_address, length)
 Performs a synchronous read operation to transfer data from remote buffer to local buffer.
 
 **Parameters:**
+
 - `target_hostname` (str): The hostname of the target server
 - `buffer` (int): The local buffer address
 - `peer_buffer_address` (int): The remote buffer address
 - `length` (int): The number of bytes to transfer
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 #### transfer_sync()
@@ -335,6 +351,7 @@ transfer_sync(target_hostname, buffer, peer_buffer_address, length, opcode)
 Performs a synchronous transfer operation with specified opcode.
 
 **Parameters:**
+
 - `target_hostname` (str): The hostname of the target server
 - `buffer` (int): The local buffer address
 - `peer_buffer_address` (int): The remote buffer address
@@ -342,6 +359,7 @@ Performs a synchronous transfer operation with specified opcode.
 - `opcode` (TransferOpcode): The transfer operation type (READ or WRITE)
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 #### transfer_submit_write()
@@ -353,12 +371,14 @@ transfer_submit_write(target_hostname, buffer, peer_buffer_address, length)
 Submits an asynchronous write operation and returns immediately.
 
 **Parameters:**
+
 - `target_hostname` (str): The hostname of the target server
 - `buffer` (int): The local buffer address
 - `peer_buffer_address` (int): The remote buffer address
 - `length` (int): The number of bytes to transfer
 
 **Returns:**
+
 - `int`: Batch ID for tracking the operation, or negative value on failure
 
 #### transfer_check_status()
@@ -370,9 +390,11 @@ transfer_check_status(batch_id)
 Checks the status of an asynchronous transfer operation.
 
 **Parameters:**
+
 - `batch_id` (int): The batch ID returned from transfer_submit_write()
 
 **Returns:**
+
 - `int`: 
   - 1: Transfer completed successfully
   - 0: Transfer still in progress
@@ -390,11 +412,13 @@ write_bytes_to_buffer(dest_address, src_ptr, length)
 Writes bytes from a Python bytes object to a buffer at the specified address.
 
 **Parameters:**
+
 - `dest_address` (int): The destination buffer address
 - `src_ptr` (bytes): The source bytes to write
 - `length` (int): The number of bytes to write
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 #### read_bytes_from_buffer()
@@ -406,10 +430,12 @@ read_bytes_from_buffer(source_address, length)
 Reads bytes from a buffer at the specified address and returns them as a Python bytes object.
 
 **Parameters:**
+
 - `source_address` (int): The source buffer address
 - `length` (int): The number of bytes to read
 
 **Returns:**
+
 - `bytes`: The bytes read from the buffer
 
 ### Memory Registration (Experimental)
@@ -423,10 +449,12 @@ register_memory(buffer_addr, capacity)
 Registers a memory region for RDMA access (experimental feature).
 
 **Parameters:**
+
 - `buffer_addr` (int): The memory address to register
 - `capacity` (int): The size of the memory region in bytes
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 #### unregister_memory()
@@ -438,9 +466,11 @@ unregister_memory(buffer_addr)
 Unregisters a previously registered memory region.
 
 **Parameters:**
+
 - `buffer_addr` (int): The memory address to unregister
 
 **Returns:**
+
 - `int`: 0 on success, negative value on failure
 
 ### Enums
@@ -569,10 +599,12 @@ else:
 ## Error Handling
 
 All methods return integer status codes:
+
 - `0`: Success
 - Negative values: Error codes indicating various failure conditions
 
 Common error scenarios:
+
 - Network connectivity issues
 - Invalid buffer addresses
 - Memory allocation failures
@@ -589,6 +621,7 @@ Common error scenarios:
 ## Thread Safety
 
 The Transfer Engine Python API is thread-safe for most operations. However, it's recommended to:
+
 - Use separate TransferEngine instances for different threads when possible
 - Avoid concurrent modifications to the same buffer addresses
 - Use proper synchronization when sharing buffer addresses between threads

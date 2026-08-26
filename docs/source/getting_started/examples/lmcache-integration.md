@@ -16,8 +16,8 @@ LMCache is an open-source Knowledge Delivery Network (KDN), specifically designe
 
 This strategic alliance delivers substantial mutual technological advancements:
 
-*   **LMCache Integrates Mooncake for Enhanced Performance**: LMCache leverages Mooncake’s advanced transfer engine and KVCache storage solutions, significantly enhancing data distribution efficiency and overall system performance.
-*   **Mooncake Integrates LMCache for Enhanced Functionality**: Mooncake now includes LMCache as its KVCache management layer, benefiting from LMCache's flexible cache control mechanisms and future-oriented functionalities, such as CacheBlend. This integration enables Mooncake to offer more sophisticated features and improved operational flexibility.
+* **LMCache Integrates Mooncake for Enhanced Performance**: LMCache leverages Mooncake’s advanced transfer engine and KVCache storage solutions, significantly enhancing data distribution efficiency and overall system performance.
+* **Mooncake Integrates LMCache for Enhanced Functionality**: Mooncake now includes LMCache as its KVCache management layer, benefiting from LMCache's flexible cache control mechanisms and future-oriented functionalities, such as CacheBlend. This integration enables Mooncake to offer more sophisticated features and improved operational flexibility.
 
 ## Getting Started
 
@@ -31,10 +31,10 @@ To illustrate the benefits of this collaboration, a comprehensive performance ev
 
 ### Experimental Setup
 
-*   **Hardware:** 8 × H800 GPUs
-*   **Model:** Qwen2.5-72B-Instruct (non-quantized)
-*   **Workload:** 50 requests, each with an input of 9,728 tokens and generating 64 tokens per request, without concurrency limits.
-*   **Cache Configuration:** LMCache’s local CPU cache was disabled to ensure a direct assessment of Mooncake Store’s effectiveness.
+* **Hardware:** 8 × H800 GPUs
+* **Model:** Qwen2.5-72B-Instruct (non-quantized)
+* **Workload:** 50 requests, each with an input of 9,728 tokens and generating 64 tokens per request, without concurrency limits.
+* **Cache Configuration:** LMCache’s local CPU cache was disabled to ensure a direct assessment of Mooncake Store’s effectiveness.
 
 ### Performance Metrics and Improvements
 
@@ -58,8 +58,8 @@ These results clearly illustrate how the collaborative integration of LMCache an
 
 Moving forward, LMCache and Mooncake plan to collaborate closely on several key improvements highly valued by the community, including:
 
-*   Developing **optimized KVCache eviction and placement strategies** to maximize throughput.
-*   Implementing **asynchronous KVCache scheduling** and **zero-copy KVCache transferring mechanisms** to minimize costs through effective prefetching and offloading to cheaper storage tiers.
-*   **Expanding caching strategies beyond simple prefix matching**, enhancing KVCache reusability by supporting more flexible matching patterns.
+* Developing **optimized KVCache eviction and placement strategies** to maximize throughput.
+* Implementing **asynchronous KVCache scheduling** and **zero-copy KVCache transferring mechanisms** to minimize costs through effective prefetching and offloading to cheaper storage tiers.
+* **Expanding caching strategies beyond simple prefix matching**, enhancing KVCache reusability by supporting more flexible matching patterns.
 
 This strategic partnership represents a significant advancement toward fully realizing the potential of next-generation LLM serving architectures.

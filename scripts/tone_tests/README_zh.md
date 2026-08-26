@@ -79,6 +79,7 @@ test_case_name=
 - **禁止使用相对路径**：避免使用 `./` 或 `../` 等相对路径
 - **善用环境变量**：使用 `$BASE_DIR`、`$TEST_CASE_RESULT_DIR` 等环境变量
 - **推荐做法**：
+
   ```bash
   BASE_DIR=${TONE_TESTS_DIR}
   TEST_CASE_RESULT_DIR=${TONE_TESTS_DIR}/${TEST_CASE_RESULT_PATH}
@@ -137,6 +138,7 @@ tone_tests/run/test_1p1d_erdma/
 ```
 
 **字段说明**：
+
 - `test_case`：测试用例名称（必需）
 - `status`：测试状态，`Pass` 或 `Fail`（必需）
 - `timestamp`：UTC 时间戳，ISO 8601 格式（可选）

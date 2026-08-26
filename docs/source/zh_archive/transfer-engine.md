@@ -1,6 +1,7 @@
 # Transfer Engine
 
 ## 概述
+
 Mooncake Transfer Engine 是一个围绕 Segment 和 BatchTransfer 两个核心抽象设计的高性能，零拷贝数据传输库。
 
 - [**Segment**](#segment) 代表一段可被远程读写的连续地址空间，既可以是 DRAM 或 VRAM 提供的非持久化存储 **RAM Segment**，也可以是 NVMeof 提供的持久化存储 **NVMeof Segment**。
@@ -14,9 +15,11 @@ Mooncake Transfer Engine 是一个围绕 Segment 和 BatchTransfer 两个核心�
 Mooncake Transfer Engine 通过 `TransferEngine` 类对外提供接口（位于 `mooncake-transfer-engine/include/transfer_engine.h`），其中对应不同后端的具体的数据传输功能在内部由 `Transport` 类实现，包括`TcpTransport`、`RdmaTransport` 和 `NVMeoFTransport`。
 
 ### Segment
+
 Segment 表示 Transfer Engine 实现数据传输过程期间可使用的源地址范围及目标地址范围集合。也就是说，所有 BatchTransfer 请求中涉及的本地与远程地址都需要位于合法的 Segment 区间里。Transfer Engine 支持以下两种类型的 Segment。
 
 #### 1. 位于内存地址空间（DRAM、VRAM）的 RAM Segment
+
 每一个进程启动时， Transfer Engine 会自动创建一个以自身 `local_hostname` 为名称（见 TransferEngine 的初始化函数，需要全局唯一）的 Segment，该 Segment 在逻辑上覆盖了完整的内存地址空间，包括 DRAM/VRAM 等存储介质，Transfer Engine 在使用 BatchTransfer 接口进行传输任务时，会自动判断相应硬件信息，从而选择最佳传输方式。每个进程有且只有一个 Segment。其他进程通过调用 `openSegment` 接口并传递正确名称的方式，可引用 Segment 并完成读写操作。
 
 在实际部署中，应用系统通常只使用部分内存地址空间完成数据传输，因此在 Transfer Engine 内部将 Segment 进一步划分成多个 Buffers。每个 Buffer 代表一段连续的、位于同一设备上的地址空间，用户使用 BatchTransfer 接口完成读写操作时，若引用 RAM Segment，则每次读写任务的范围必须在其中的某一个合法 Buffer 内。
@@ -25,6 +28,7 @@ Segment 表示 Transfer Engine 实现数据传输过程期间可使用的源地�
 除此在外，Transfer Engine 也支持注册一些本地 DRAM 区域，这一部分区域仅仅是作为数据操作的本地侧存储空间，比如 vLLM 的 DRAM PageCache 区域。它也被视为当前进程中有效 RAM Segment 的一部分，但不能被其他进程通过调用 `openSegment` 接口引用。
 
 #### 2. 位于挂载到 NVMeof 上文件的 **NVMeof Segment**
+
 Transfer Engine 也借助 NVMeof 协议，支持从 NVMe 上直接将文件指定偏移的数据，通过 PCIe 直传方式直达 DRAM/VRAM，无需经过 CPU 且实现零拷贝。用户需要按照指引的说明将远程存储节点挂载到本地，并使用 `openSegment` 接口进行引用，从而完成数据读写操作。
 
 ### BatchTransfer
@@ -44,6 +48,7 @@ Transfer Engine 也借助 NVMeof 协议，支持从 NVMe 上直接将文件指�
 BatchTransfer API 使用请求（Request）对象数组传入用户请求，需指定操作类型（READ 或 WRITE）、数据长度以及本地和远程内存的地址。传输操作适用于 DRAM 和 GPU VRAM，并在最佳情况下利用 GPU 直接 RDMA，前提是指定的内存区域已预先注册。这些操作的完成情况可通过 `getTransferStatus` API 来异步监控这些操作的完成情况。
 
 ### 拓扑感知路径选择（Topology Aware Path Selection）
+
 现代推理服务器通常由多个CPU插槽、DRAM、GPU和RDMA NIC设备组成。尽管从技术上讲，使用任何RDMA NIC将数据从本地DRAM或VRAM传输到远程位置是可能的，但这些传输可能会受到Ultra Path Interconnect (UPI)或PCIe交换机带宽限制的制约。为了克服这些限制，Transfer Engine 实现了拓扑感知路径选择算法。在处理请求之前，每个服务器生成一个拓扑矩阵（Topology Matrix）并将其广播到整个集群。拓扑矩阵将网络接口卡（NIC）分类为各种类型的内存的“首选”和“次要”列表，这些类型在内存注册时指定。在正常情况下，选择首选列表中的NIC进行传输，便于在本地NUMA或仅通过本地PCIe交换机进行GPU Direct RDMA操作。在出现故障的情况下，两个列表中的所有NIC都可能被使用。上述过程包括根据内存地址识别适当的本地和目标NIC，建立连接，并执行数据传输。
 
 ![topology-matrix](../../image/topology-matrix.png)
@@ -53,15 +58,18 @@ BatchTransfer API 使用请求（Request）对象数组传入用户请求，需�
 为了进一步最大化带宽利用率，如果单个请求的传输长度超过64KB，则其内部被划分为多个切片。每个切片可能使用不同的路径，使所有RDMA NIC能够协同工作。
 
 ### 端点管理
+
 Transfer Engine 使用一对端点来表示本地RDMA NIC和远程RDMA NIC之间的连接。实际上，每个端点包括一个或多个RDMA QP对象。
 Transfer Engine 中的连接是按需建立的；端点在第一次请求之前保持未配对状态。
 为了防止大量端点减慢请求处理速度，Transfer Engine 采用端点池，限制最大活动连接数。
 Transfer Engine 使用SIEVE算法来管理端点的逐出。如果由于链路错误导致连接失败，它将从两端的端点池中移除，并在下一次数据传输尝试期间重新建立。
 
 ### 故障处理
+
 在多NIC环境中，一个常见的故障场景是特定NIC的暂时不可用，而其他路由仍然可以连接两个节点。Transfer Engine 旨在有效地管理这种暂时性故障。如果识别到连接不可用，Transfer Engine 会自动识别一个替代的、可达的路径，并将请求重新提交给不同的RDMA NIC设备。此外，Transfer Engine 能够检测到其他RDMA资源的问题，包括RDMA上下文和完成队列。它会暂时避免使用这些资源，直到问题得到解决。
 
 ## 范例程序：Transfer Engine Bench
+
 `mooncake-transfer-engine/example/transfer_engine_bench.cpp` 提供了一个范例程序，通过调用 Transfer Engine API 接口，发起节点从目标节点的 DRAM 处反复读取/写入数据块，以展示 Transfer Engine 的基本用法，并可用于测量读写吞吐率。目前 Transfer Engine Bench 工具支持 RDMA 及 TCP 协议。
 
 编译 Transfer Engine 成功后，可在 `build/mooncake-transfer-engine/example` 目录下产生测试程序 `transfer_engine_bench`。
@@ -77,6 +85,7 @@ Transfer Engine 使用SIEVE算法来管理端点的逐出。如果由于链路�
    默认状态下不会使用etcd服务，要在transfer engine中使用etcd服务，需要在`mooncake-common/common.cmake`文件中，把`USE_ETCD`变量的值设为`ON`，就可以使用了。
 
    例如，可使用如下命令行启动 `etcd` 服务：
+
       ```bash
       etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://10.0.0.1:2379
       ```
@@ -84,18 +93,21 @@ Transfer Engine 使用SIEVE算法来管理端点的逐出。如果由于链路�
    1.2. **启动 `http` 作为 `metadata` 服务**
 
    例如，可使用 `mooncake-transfer-engine/example/http-metadata-server` 示例中的 `http` 服务：
+
       ```bash
       cd mooncake-transfer-engine/example/http-metadata-server
       go run . --addr=:8080
       ```
 
 2. **启动目标节点。**
+
     ```bash
     ./transfer_engine_bench --mode=target \
                             --metadata_server=etcd://10.0.0.1:2379 \
                             [--local_server_name=TARGET_NAME] \
                             [--device_name=erdma_0 | --auto-discovery]
     ```
+
    各个参数的含义如下：
    - `--mode=target` 表示启动目标节点。目标节点不发起读写请求，只是被动按发起节点的要求供给或写入数据。
       > [!NOTE]
@@ -109,6 +121,7 @@ Transfer Engine 使用SIEVE算法来管理端点的逐出。如果由于链路�
    - 在仅支持 TCP 的网络环境中，可使用 `--protocol=tcp` 参数，此时不需要指定 `--device_name` 参数。
 
 1. **启动发起节点。**
+
     ```bash
     export MC_GID_INDEX=n
     ./transfer_engine_bench --metadata_server=etcd://10.0.0.1:2379 \
@@ -116,6 +129,7 @@ Transfer Engine 使用SIEVE算法来管理端点的逐出。如果由于链路�
                             [--local_server_name=INITIATOR_NAME] \
                             [--device_name=erdma_1 | --auto-discovery]
     ```
+
    各个参数的含义如下（其余同前）：
    - `--segment_id` 可以简单理解为目标节点对应的段名称，需要和启动目标节点时 `--local_server_name` 传入的值（如果有）保持一致。
    
@@ -133,6 +147,7 @@ Transfer Engine 使用SIEVE算法来管理端点的逐出。如果由于链路�
 > 如果在执行期间发生异常，大多数情况是参数设置不正确所致，建议参考[故障排除文档](troubleshooting.md)先行排查。
 
 ## C/C++ API
+
 Transfer Engine 通过 `TransferEngine` 类统一对外提供接口（位于 `mooncake-transfer-engine/include/transfer_engine.h`），其中对应不同后端的具体的数据传输功能在内部由 `Transport` 类实现，目前支持 `TcpTransport`,`RdmaTransport` 和 `NVMeoFTransport`。
 
 ### 数据传输
@@ -260,15 +275,18 @@ int unregisterLocalMemory(void *addr);
 ### Segment 管理与元数据格式
 
 TransferEngine 提供 `openSegment` 函数，该函数获取一个 `SegmentHandle`，用于后续 `Transport` 的传输。
+
 ```cpp
 SegmentHandle openSegment(const std::string& segment_name);
 ```
+
 - `segment_name`：segment 的唯一标志符。对于 RAM Segment，这需要与对端进程初始化 TransferEngine 对象时填写的 `server_name` 保持一致。
 - 返回值：若成功，返回对应的 SegmentHandle；否则返回负数值。
   
 ```cpp
 int closeSegment(SegmentHandle segment_id);
 ```
+
 - `segment_id`：segment 的唯一标志符。
 - 返回值：若成功，返回 0；否则返回负数值。
 
@@ -340,6 +358,7 @@ Value = {
     ]
 }
 ```
+
 </details>
 
 ### HTTP 元数据服务
@@ -353,13 +372,16 @@ Value = {
 具体实现，可以参考 [mooncake-transfer-engine/example/http-metadata-server](../../mooncake-transfer-engine/example/http-metadata-server) 用 Golang 实现的 demo 服务。
 
 ### 构造函数与初始化
+
 TransferEngine 在完成构造后需要调用 `init` 函数进行初始化：
+
 ```cpp
 TransferEngine();
 
 int init(const std::string &metadata_conn_string,
          const std::string &local_server_name);
 ```
+
 - metadata_conn_string: 元数据存储服务连接字符串，表示 `etcd`/`redis` 的 IP 地址/主机名，或者 http 服务的 URI。一般形式是 `[proto]://[hostname:port]`。例如，下列元数据服务器地址是合法的：
 
     - 使用 `etcd` 作为元数据存储服务：`"10.0.0.1:2379"` 或 `"etcd://10.0.0.1:2379"`
@@ -376,18 +398,23 @@ int init(const std::string &metadata_conn_string,
 回收分配的所有类型资源，同时也会删除掉全局 meta data server 上的信息。
 
 ## 二次开发
+
 ### 使用 C/C++ 接口二次开发
+
 在完成 Mooncake Store 编译后，可将编译好的静态库文件 `libtransfer_engine.a` 及 C 头文件 `transfer_engine_c.h`，移入到你自己的项目里。不需要引用 `src/transfer_engine` 下的其他文件。
 
 ### 使用 Golang 接口二次开发
+
 为了支撑 P2P Store 的运行需求，Transfer Engine 提供了 Golang 接口的封装，详见 `mooncake-p2p-store/src/p2pstore/transfer_engine.go`。
 
 编译项目时启用 `-DWITH_P2P_STORE=ON` 选项，则可以一并编译 P2P Store 样例程序。
 
 ### 使用 Rust 接口二次开发
+
 在 `mooncake-transfer-engine/rust` 下给出了 TransferEngine 的 Rust 接口实现，并根据该接口实现了 Rust 版本的样例程序，逻辑类似于 [transfer_engine_bench.cpp](../../mooncake-transfer-engine/example/transfer_engine_bench.cpp)。若想编译 rust example，需安装 Rust SDK，并在 cmake 命令中添加 `-DWITH_RUST_EXAMPLE=ON`。
 
 ## 高级运行时选项
+
 对于高级用户，TransferEngine 提供了如下所示的高级运行时选项，均可通过 **环境变量（environment variable）** 方式传入。
 
 - `MC_NUM_CQ_PER_CTX` 每个设备实例创建的 CQ 数量，默认值 1

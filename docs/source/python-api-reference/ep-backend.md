@@ -104,4 +104,3 @@ dist.init_process_group(
 ```
 
 For a full example, see `mooncake-wheel/tests/test_mooncake_backend_elastic.py`.
-

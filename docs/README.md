@@ -36,7 +36,7 @@ Be sure to set `locale` right before building.
 python -m http.server -d build/html/
 ```
 
-This will start a local server at http://localhost:8000. You can now open your browser and view the documentation.
+This will start a local server at <http://localhost:8000>. You can now open your browser and view the documentation.
 
 If port 8000 is already in use, you can specify a different port, for example:
 

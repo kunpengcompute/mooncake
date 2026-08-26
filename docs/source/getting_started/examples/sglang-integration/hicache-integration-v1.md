@@ -115,6 +115,7 @@ python -m mooncake.http_metadata_server
 This service is responsible for centralized metadata management including internal connection status and related metadata.
 
 Deployment of the `metadata service` can be skipped in the following cases:
+
 * Mooncake supports non-centralized metadata management via a P2P handshake mechanism to exchange metadata. When using this mode, deployment of the `metadata service` can be skipped.
 * Mooncake also supports embedding `mededata service` into `master service`. In this case, only the `master service` needs to be started.
 
@@ -270,7 +271,6 @@ In particular, for the `global segment size`, if at least one `store service` in
 **HiCache Related Parameters for SGLang Server**
 
 For a comprehensive overview of HiCache-related parameters, please refer to [this document](https://docs.sglang.ai/advanced_features/hicache_design.html#related-parameters).
-
 
 Note that, for `--hicache-mem-layout {layer_first,page_first,page_first_direct}`, which specifies the memory layout for the host memory pool, `page_first` or `page_first_direct` are required if use Mooncake backend.
 

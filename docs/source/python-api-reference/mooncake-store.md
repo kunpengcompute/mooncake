@@ -3,6 +3,7 @@
 ## Installation
 
 ### PyPI Package
+
 Install the Mooncake Transfer Engine package from PyPI, which includes both Mooncake Transfer Engine and Mooncake Store Python bindings:
 
 ```bash
@@ -12,6 +13,7 @@ pip install mooncake-transfer-engine
 📦 **Package Details**: [https://pypi.org/project/mooncake-transfer-engine/](https://pypi.org/project/mooncake-transfer-engine/)
 
 ### Required Service
+
 Only one service is required now:
 
 - `mooncake_master` — Master service which now embeds the HTTP metadata server
@@ -28,6 +30,7 @@ mooncake_master \
   --http_metadata_server_host=0.0.0.0 \
   --http_metadata_server_port=8080
 ```
+
 This exposes the metadata endpoint at `http://<host>:<port>/metadata`.
 
 ### Hello World Example
@@ -62,7 +65,7 @@ store.close()
 
 **RDMA device selection**: Leave `rdma_devices` as `""` to auto-select RDMA NICs. Provide a comma-separated list (e.g. `"mlx5_0,mlx5_1"`) to pin to specific hardware.
 
-Mooncake selects available ports internally at `setup() `, so you do not need to fix specific port numbers in these examples. Internally, ports are chosen from a dynamic range (currently 12300–14300).
+Mooncake selects available ports internally at `setup()`, so you do not need to fix specific port numbers in these examples. Internally, ports are chosen from a dynamic range (currently 12300–14300).
 
 #### P2P Hello World (preview)
 
@@ -141,9 +144,11 @@ For maximum performance, especially with RDMA networks, use the zero-copy API. T
 Zero-copy operations require registering memory buffers with the store:
 
 #### register_buffer()
+
 Register a memory buffer for direct RDMA access.
 
 #### unregister_buffer()
+
 Unregister a previously registered buffer.
 
 <details>
@@ -238,6 +243,7 @@ store.close()
 </details>
 
 #### put_from()
+
 Store data directly from a registered buffer (zero-copy).
 
 ```python
@@ -245,12 +251,14 @@ def put_from(self, key: str, buffer_ptr: int, size: int, config=None) -> int
 ```
 
 **Parameters:**
+
 - `key`: Object identifier
 - `buffer_ptr`: Memory address (from ctypes.data or similar)
 - `size`: Number of bytes to store
 - `config`: Optional replication configuration
 
 #### get_into()
+
 Retrieve data directly into a registered buffer (zero-copy).
 
 ```python
@@ -258,6 +266,7 @@ def get_into(self, key: str, buffer_ptr: int, size: int) -> int
 ```
 
 **Parameters:**
+
 - `key`: Object identifier to retrieve
 - `buffer_ptr`: Memory address of pre-allocated buffer
 - `size`: Size of the buffer (must be >= object size)
@@ -282,6 +291,7 @@ config = ReplicateConfig()
 ### Properties
 
 #### replica_num
+
 **Type:** `int`
 **Default:** `1`
 **Description:** Specifies the total number of replicas to create for the stored object.
@@ -292,6 +302,7 @@ config.replica_num = 3  # Store 3 copies of the data
 ```
 
 #### with_soft_pin
+
 **Type:** `bool`
 **Default:** `False`
 **Description:** Enables soft pinning for the stored object. Soft pinned objects are prioritized to remain in memory during eviction - they are only evicted when memory is insufficient and no other objects are eligible for eviction. This is useful for frequently accessed or important objects like system prompts.
@@ -302,6 +313,7 @@ config.with_soft_pin = True  # Keep this object in memory longer
 ```
 
 #### preferred_segment
+
 **Type:** `str`
 **Default:** `""` (empty string)
 **Description:** Specifies a preferred segment (node) for data allocation. This is typically the hostname:port of a target server.
@@ -320,6 +332,7 @@ config.preferred_segment = self.get_hostname()
 ```
 
 #### prefer_alloc_in_same_node
+
 **Type:** `str`
 **Default:** `""` (empty string)
 **Description:** Enables the preference for allocating data on the same node. Currently, this only supports `batch_put_from_multi_buffers`. Additionally, it does not support disk segments, and the `replica_num` can only be set to 1.
@@ -328,6 +341,7 @@ config.preferred_segment = self.get_hostname()
 config = ReplicateConfig()
 config.prefer_alloc_in_same_node = "True
 ```
+
 ---
 
 ## Non-Zero-Copy API (Simple Usage)
@@ -369,15 +383,18 @@ print("Retrieved all keys successfully:", retrieved == values)
 **Choose the appropriate API based on your use case:**
 
 **Zero-copy API is beneficial when:**
+
 - Working with large data transfers
 - RDMA network infrastructure is available and configured
 - Direct memory access patterns fit your application design
 
 **Non-zero-copy API is suitable for:**
+
 - Development and prototyping phases
 - Applications without specific performance requirements
 
 **Batch operations can improve throughput for:**
+
 - Multiple related operations performed together
 - Scenarios where network round-trip reduction is beneficial
 
@@ -454,15 +471,17 @@ if buffer:
 The main class for interacting with Mooncake Store.
 
 #### Constructor
+
 ```python
 store = MooncakeDistributedStore()
 ```
+
 Creates a new store instance. No parameters required.
 
 ---
 
-
 #### setup()
+
 Initialize distributed resources and establish network connections.
 
 ```python
@@ -479,8 +498,9 @@ def setup(
 ```
 
 **Parameters:**
+
 - `local_hostname` (str): **Required**. Local hostname and port (e.g., "localhost" or "localhost:12345")
-- `metadata_server` (str): **Required**. Metadata server address (e.g., "http://localhost:8080/metadata")
+- `metadata_server` (str): **Required**. Metadata server address (e.g., "<http://localhost:8080/metadata>")
 - `global_segment_size` (int): Memory segment size in bytes for mounting (default: 16MB = 16777216)
 - `local_buffer_size` (int): Local buffer size in bytes (default: 1GB = 1073741824)
 - `protocol` (str): Network protocol - "tcp" or "rdma" (default: "tcp")
@@ -488,6 +508,7 @@ def setup(
 - `master_server_addr` (str): **Required**. Master server address (e.g., "localhost:50051")
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Example:**
@@ -509,7 +530,9 @@ store.setup("localhost", "http://localhost:8080/metadata", 512*1024*1024, 128*10
 </details>
 
 ---
+
 #### setup_dummy()
+
 Initialize the store with a dummy client for testing purposes.
 
 ```python
@@ -517,14 +540,17 @@ def setup_dummy(self, mem_pool_size: int, local_buffer_size: int, server_address
 ```
 
 **Parameters:**
+
 - `mem_pool_size` (int): Memory pool size in bytes
 - `local_buffer_size` (int): Local buffer size in bytes
 - `server_address` (str): Server address in format "hostname:port"
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Example:**
+
 ```python
 # Initialize with dummy client
 store.setup_dummy(1024*1024*256, 1024*1024*64, "localhost:8080")
@@ -533,6 +559,7 @@ store.setup_dummy(1024*1024*256, 1024*1024*64, "localhost:8080")
 ---
 
 #### put()
+
 Store binary data in the distributed storage.
 
 ```python
@@ -540,11 +567,13 @@ def put(self, key: str, value: bytes, config: ReplicateConfig = None) -> int
 ```
 
 **Parameters:**
+
 - `key` (str): Unique object identifier
 - `value` (bytes): Binary data to store
 - `config` (ReplicateConfig, optional): Replication configuration
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Example:**
@@ -567,6 +596,7 @@ store.put("important_data", b"Critical information", config)
 ---
 
 #### get()
+
 Retrieve binary data from distributed storage.
 
 ```python
@@ -574,12 +604,15 @@ def get(self, key: str) -> bytes
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier to retrieve
 
 **Returns:**
+
 - `bytes`: Retrieved binary data
 
 **Raises:**
+
 - Returns empty bytes if key doesn't exist
 
 **Example:**
@@ -600,6 +633,7 @@ else:
 ---
 
 #### put_batch()
+
 Store multiple objects in a single batch operation.
 
 ```python
@@ -607,11 +641,13 @@ def put_batch(self, keys: List[str], values: List[bytes], config: ReplicateConfi
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers
 - `values` (List[bytes]): List of binary data to store
 - `config` (ReplicateConfig, optional): Replication configuration for all objects
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Example:**
@@ -630,6 +666,7 @@ result = store.put_batch(keys, values)
 ---
 
 #### get_batch()
+
 Retrieve multiple objects in a single batch operation.
 
 ```python
@@ -637,9 +674,11 @@ def get_batch(self, keys: List[str]) -> List[bytes]
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers to retrieve
 
 **Returns:**
+
 - `List[bytes]`: List of retrieved binary data
 
 **Example:**
@@ -659,6 +698,7 @@ for key, value in zip(keys, values):
 ---
 
 #### remove()
+
 Delete an object from the storage system.
 
 ```python
@@ -666,12 +706,15 @@ def remove(self, key: str) -> int
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier to remove
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Example:**
+
 ```python
 result = store.remove("my_key")
 if result == 0:
@@ -681,6 +724,7 @@ if result == 0:
 ---
 
 #### remove_by_regex()
+
 Remove objects from the storage system whose keys match a regular expression.
 
 ```python
@@ -688,12 +732,15 @@ def remove_by_regex(self, regex: str) -> int
 ```
 
 **Parameters:**
+
 - `regex` (str): The regular expression to match against object keys.
 
 **Returns:**
+
 - `int`: The number of objects removed, or a negative value on error.
 
 **Example:**
+
 ```python
 # Remove all keys starting with "user_session_"
 count = store.remove_by_regex("^user_session_.*")
@@ -704,6 +751,7 @@ if count >= 0:
 ---
 
 #### remove_all()
+
 Remove all objects from the storage system.
 
 ```python
@@ -711,9 +759,11 @@ def remove_all(self) -> int
 ```
 
 **Returns:**
+
 - `int`: Number of objects removed, or -1 on error
 
 **Example:**
+
 ```python
 count = store.remove_all()
 print(f"Removed {count} objects")
@@ -722,6 +772,7 @@ print(f"Removed {count} objects")
 ---
 
 #### is_exist()
+
 Check if an object exists in the storage system.
 
 ```python
@@ -729,15 +780,18 @@ def is_exist(self, key: str) -> int
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier to check
 
 **Returns:**
+
 - `int`:
   - `1`: Object exists
   - `0`: Object doesn't exist
   - `-1`: Error occurred
 
 **Example:**
+
 ```python
 exists = store.is_exist("my_key")
 if exists == 1:
@@ -751,6 +805,7 @@ else:
 ---
 
 #### batch_is_exist()
+
 Check existence of multiple objects in a single batch operation.
 
 ```python
@@ -758,12 +813,15 @@ def batch_is_exist(self, keys: List[str]) -> List[int]
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers to check
 
 **Returns:**
+
 - `List[int]`: List of existence results (1=exists, 0=not exists, -1=error)
 
 **Example:**
+
 ```python
 keys = ["key1", "key2", "key3"]
 results = store.batch_is_exist(keys)
@@ -775,6 +833,7 @@ for key, exists in zip(keys, results):
 ---
 
 #### get_size()
+
 Get the size of a stored object in bytes.
 
 ```python
@@ -782,12 +841,15 @@ def get_size(self, key: str) -> int
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier
 
 **Returns:**
+
 - `int`: Size in bytes, or negative value on error
 
 **Example:**
+
 ```python
 size = store.get_size("my_key")
 if size >= 0:
@@ -799,6 +861,7 @@ else:
 ---
 
 #### get_buffer()
+
 Get object data as a buffer that implements Python's buffer protocol.
 
 ```python
@@ -806,12 +869,15 @@ def get_buffer(self, key: str) -> BufferHandle
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier
 
 **Returns:**
+
 - `BufferHandle`: Buffer object or None if not found
 
 **Example:**
+
 ```python
 buffer = store.get_buffer("large_object")
 if buffer:
@@ -824,6 +890,7 @@ if buffer:
 ---
 
 #### put_parts()
+
 Store data from multiple buffer parts as a single object.
 
 ```python
@@ -831,14 +898,17 @@ def put_parts(self, key: str, *parts, config: ReplicateConfig = None) -> int
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier
 - `*parts`: Variable number of bytes-like objects to concatenate
 - `config` (ReplicateConfig, optional): Replication configuration
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Example:**
+
 ```python
 part1 = b"Hello, "
 part2 = b"World!"
@@ -847,7 +917,9 @@ result = store.put_parts("greeting", part1, part2, part3)
 ```
 
 ---
+
 #### batch_get_buffer()
+
 Get multiple objects as buffers that implement Python's buffer protocol.
 
 ```python
@@ -855,14 +927,17 @@ def batch_get_buffer(self, keys: List[str]) -> List[BufferHandle]
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers to retrieve
 
 **Returns:**
+
 - `List[BufferHandle]`: List of buffer objects, with None for keys not found
 
 **Note:** This function is not supported for dummy client.
 
 **Example:**
+
 ```python
 buffers = store.batch_get_buffer(["key1", "key2", "key3"])
 for i, buffer in enumerate(buffers):
@@ -871,7 +946,9 @@ for i, buffer in enumerate(buffers):
 ```
 
 ---
+
 #### alloc_from_mem_pool()
+
 Allocate memory from the memory pool.
 
 ```python
@@ -879,13 +956,17 @@ def alloc_from_mem_pool(self, size: int) -> int
 ```
 
 **Parameters:**
+
 - `size` (int): Size of memory to allocate in bytes
 
 **Returns:**
+
 - `int`: Memory address as integer, or 0 on failure
 
 ---
+
 #### init_all()
+
 Initialize all resources with specified protocol and device.
 
 ```python
@@ -893,16 +974,19 @@ def init_all(self, protocol: str, device_name: str, mount_segment_size: int = 16
 ```
 
 **Parameters:**
+
 - `protocol` (str): Network protocol - "tcp" or "rdma"
 - `device_name` (str): Device name for the protocol
 - `mount_segment_size` (int): Memory segment size in bytes for mounting (default: 16MB = 16777216)
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 ---
 
 #### get_hostname()
+
 Get the hostname of the current store instance.
 
 ```python
@@ -910,9 +994,11 @@ def get_hostname(self) -> str
 ```
 
 **Returns:**
+
 - `str`: Hostname and port of this store instance
 
 **Example:**
+
 ```python
 hostname = store.get_hostname()
 print(f"Store running on: {hostname}")
@@ -921,6 +1007,7 @@ print(f"Store running on: {hostname}")
 ---
 
 #### get_replica_desc()
+
 Get descriptors of replicas for a key.
 
 ```python
@@ -928,12 +1015,15 @@ def get_replica_desc(self, key: str) -> List[Replica::Descriptor]
 ```
 
 **Parameters:**
+
 - `key` (str): mooncake store key
 
 **Returns:**
+
 - `List[Replica::Descriptor]`: List of replica descriptors
 
 **Example:**
+
 ```python
 descriptors = store.get_replica_desc("mooncake_key")
 for desc in descriptors:
@@ -949,6 +1039,7 @@ for desc in descriptors:
 ---
 
 #### batch_get_replica_desc()
+
 Get descriptors of replicas for a tuple of keys.
 
 ```python
@@ -956,12 +1047,15 @@ def batch_get_replica_desc(self, keys: List[str]) -> Dict[str, List[Replica::Des
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of mooncake store keys
 
 **Returns:**
+
 - `Dict[str, List[Replica::Descriptor]]`: Dictionary mapping keys to their list of replica descriptors
 
 **Example:**
+
 ```python
 descriptors_map = store.batch_get_replica_desc(["key1", "key2"])
 for key, desc_list in descriptors_map.items():
@@ -978,6 +1072,7 @@ for key, desc_list in descriptors_map.items():
 ---
 
 #### close()
+
 Clean up all resources and terminate connections.
 
 ```python
@@ -985,15 +1080,19 @@ def close(self) -> int
 ```
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Example:**
+
 ```python
 store.close()
 ```
 
 ---
+
 #### put_from_with_metadata()
+
 Store data directly from a registered buffer with metadata (zero-copy).
 
 ```python
@@ -1001,6 +1100,7 @@ def put_from_with_metadata(self, key: str, buffer_ptr: int, metadata_buffer_ptr:
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier
 - `buffer_ptr` (int): Memory address of the main data buffer (from ctypes.data or similar)
 - `metadata_buffer_ptr` (int): Memory address of the metadata buffer
@@ -1009,11 +1109,13 @@ def put_from_with_metadata(self, key: str, buffer_ptr: int, metadata_buffer_ptr:
 - `config` (ReplicateConfig, optional): Replication configuration
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Note:** This function is not supported for dummy client.
 
 **Example:**
+
 ```python
 import numpy as np
 
@@ -1039,7 +1141,9 @@ store.unregister_buffer(metadata_ptr)
 ```
 
 ---
+
 #### pub_tensor()
+
 Publish a PyTorch tensor with configurable replication settings.
 
 ```python
@@ -1047,16 +1151,19 @@ def pub_tensor(self, key: str, tensor: torch.Tensor, config: ReplicateConfig = N
 ```
 
 **Parameters:**
+
 - `key` (str): Unique object identifier
 - `tensor` (torch.Tensor): PyTorch tensor to store
 - `config` (ReplicateConfig, optional): Replication configuration
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Note:** This function requires `torch` to be installed and available in the environment.
 
 **Example:**
+
 ```python
 import torch
 from mooncake.store import ReplicateConfig
@@ -1162,6 +1269,7 @@ def batch_get_tensor_with_tp(self, base_keys: List[str], tp_rank: int = 0, tp_si
   - `List[torch.Tensor]`: List of retrieved tensors (or shards). Contains `None` for missing keys.
 
 ---
+
 #### put_tensor()
 
 Put a PyTorch tensor into the store.
@@ -1171,15 +1279,18 @@ def put_tensor(self, key: str, tensor: torch.Tensor) -> int
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier
 - `tensor` (torch.Tensor): The PyTorch tensor to store
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Note:** This function requires `torch` to be installed and available in the environment.
 
 **Example:**
+
 ```python
 import torch
 from mooncake.store import MooncakeDistributedStore
@@ -1205,14 +1316,17 @@ def get_tensor(self, key: str) -> torch.Tensor
 ```
 
 **Parameters:**
+
 - `key` (str): Object identifier to retrieve
 
 **Returns:**
+
 - `torch.Tensor`: The retrieved tensor. Returns `None` if not found.
 
 **Note:** This function requires `torch` to be installed and available in the environment.
 
 **Example:**
+
 ```python
 import torch
 from mooncake.store import MooncakeDistributedStore
@@ -1241,14 +1355,17 @@ def batch_get_tensor(self, keys: List[str]) -> List[torch.Tensor]
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers to retrieve
 
 **Returns:**
+
 - `List[torch.Tensor]`: List of retrieved tensors. Contains `None` for missing keys.
 
 **Note:** This function requires `torch` to be installed and available in the environment.
 
 **Example:**
+
 ```python
 import torch
 from mooncake.store import MooncakeDistributedStore
@@ -1282,15 +1399,18 @@ def batch_put_tensor(self, keys: List[str], tensors_list: List[torch.Tensor]) ->
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers
 - `tensors_list` (List[torch.Tensor]): List of tensors to store
 
 **Returns:**
+
 - `List[int]`: List of status codes for each tensor operation.
 
 **Note:** This function requires `torch` to be installed and available in the environment.
 
 **Example:**
+
 ```python
 import torch
 from mooncake.store import MooncakeDistributedStore
@@ -1401,6 +1521,7 @@ def batch_get_tensor_with_tp_into(self, base_keys: List[str], buffer_ptrs: List[
 ### Batch Zero-Copy Operations
 
 #### batch_put_from()
+
 Store multiple objects from pre-registered buffers (zero-copy).
 
 ```python
@@ -1408,17 +1529,20 @@ def batch_put_from(self, keys: List[str], buffer_ptrs: List[int], sizes: List[in
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers
 - `buffer_ptrs` (List[int]): List of memory addresses
 - `sizes` (List[int]): List of buffer sizes
 - `config` (ReplicateConfig, optional): Replication configuration
 
 **Returns:**
+
 - `List[int]`: List of status codes for each operation (0 = success, negative = error)
 
 ---
 
 #### batch_get_into()
+
 Retrieve multiple objects into pre-registered buffers (zero-copy).
 
 ```python
@@ -1426,11 +1550,13 @@ def batch_get_into(self, keys: List[str], buffer_ptrs: List[int], sizes: List[in
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers
 - `buffer_ptrs` (List[int]): List of memory addresses
 - `sizes` (List[int]): List of buffer sizes
 
 **Returns:**
+
 - `List[int]`: List of bytes read for each operation (positive = success, negative = error)
 
 ⚠️ **Buffer Registration Required**: All buffers must be registered before batch zero-copy operations.
@@ -1474,6 +1600,7 @@ for ptr in buffer_ptrs:
 ---
 
 #### batch_put_from_multi_buffers()
+
 Store multiple objects from multiple pre-registered buffers (zero-copy).
 
 ```python
@@ -1482,12 +1609,14 @@ def batch_put_from_multi_buffers(self, keys: List[str], all_buffer_ptrs: List[Li
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers
 - `all_buffer_ptrs` (List[int]): all List of memory addresses
 - `sizes` (List[int]): all List of buffer sizes
 - `config` (ReplicateConfig, optional): Replication configuration
 
 **Returns:**
+
 - `List[int]`: List of status codes for each operation (0 = success, negative = error)
 
 ---
@@ -1502,11 +1631,13 @@ List[int]
 ```
 
 **Parameters:**
+
 - `keys` (List[str]): List of object identifiers
 - `all_buffer_ptrs` (List[int]): List of memory addresses
 - `all_sizes` (List[int]): List of buffer sizes
 
 **Returns:**
+
 - `List[int]`: List of bytes read for each operation (positive = success, negative = error)
 
 ⚠️ **Buffer Registration Required**: All buffers must be registered before batch zero-copy operations.
@@ -1552,6 +1683,7 @@ store.batch_get_into_multi_buffers(keys, all_remote_addrs, all_sizes, True)
 store.unregister_buffer(tensor.data_ptr())
 store.unregister_buffer(target_tensor.data_ptr())
 ```
+
 </details>
 
 ## MooncakeHostMemAllocator Class
@@ -1570,6 +1702,7 @@ allocator = MooncakeHostMemAllocator()
 ### Methods
 
 #### alloc()
+
 Allocate memory from the host memory pool.
 
 ```python
@@ -1577,12 +1710,15 @@ def alloc(self, size: int) -> int
 ```
 
 **Parameters:**
+
 - `size` (int): Size of memory to allocate in bytes
 
 **Returns:**
+
 - `int`: Memory address as integer, or 0 on failure
 
 **Example:**
+
 ```python
 allocator = MooncakeHostMemAllocator()
 ptr = allocator.alloc(1024 * 1024)  # Allocate 1MB
@@ -1591,6 +1727,7 @@ if ptr != 0:
 ```
 
 #### free()
+
 Free previously allocated memory.
 
 ```python
@@ -1598,12 +1735,15 @@ def free(self, ptr: int) -> int
 ```
 
 **Parameters:**
+
 - `ptr` (int): Memory address to free
 
 **Returns:**
+
 - `int`: Status code (0 = success, non-zero = error code)
 
 **Example:**
+
 ```python
 result = allocator.free(ptr)
 if result == 0:
@@ -1626,9 +1766,11 @@ bind_to_numa_node(node: int)
 ```
 
 **Parameters:**
+
 - `node` (int): NUMA node number to bind to
 
 **Example:**
+
 ```python
 from mooncake.store import bind_to_numa_node
 
@@ -1643,10 +1785,12 @@ bind_to_numa_node(0)
 ## Error Handling
 
 Most methods return integer status codes:
+
 - `0`: Success
 - Negative values: Error codes (for methods that can return data size)
 
 For methods that return data (`get`, `get_batch`, `get_buffer`, `get_tensor`):
+
 - Return the requested data on success
 - Return empty/None on failure or key not found
 

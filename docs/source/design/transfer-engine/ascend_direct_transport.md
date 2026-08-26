@@ -21,9 +21,11 @@ Transport provides a performance test file at `mooncake-transfer-engine/example/
 When the `metadata_server` is configured as `P2PHANDSHAKE`, Mooncake randomly selects listening ports from the new RPC port mapping to avoid port conflicts. Therefore, testing requires the following steps:
 
 1. Start the target node first and observe the logs printed in `mooncake-transfer-engine/src/transfer_engine.cpp`. Look for a statement in the following format:
+
    ```
    Transfer Engine RPC using <protocol> listening on <IP>:<actual_port>
    ```
+
    Record the actual listening port number of the target node.
 
 2. Modify the startup command for the initiator node: Change the `--segment_id` parameter value to the target node's IP + actual listening port number (format: `<IP>:<port>`).
@@ -33,11 +35,13 @@ When the `metadata_server` is configured as `P2PHANDSHAKE`, Mooncake randomly se
 Complete command format is shown below:
 
 **Start target node:**
+
 ```shell
 ./transfer_engine_ascend_direct_perf --metadata_server=P2PHANDSHAKE --local_server_name=127.0.0.1:12345 --operation=write --device_logicid=0 --mode=target --block_size=16384 --batch_size=32 --block_iteration=10
 ```
 
 **Start initiator node:**
+
 ```shell
 ./transfer_engine_ascend_direct_perf --metadata_server=P2PHANDSHAKE --local_server_name=127.0.0.1:12346 --operation=write --device_logicid=1 --mode=initiator --block_size=16384 --batch_size=32 --block_iteration=10  --segment_id=127.0.0.1:real_port
 ```

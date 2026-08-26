@@ -72,4 +72,3 @@ TENT is intended for cases where data transfer is on the critical path, such as:
 TENT extends the classic Mooncake Transfer Engine by moving transport selection, scheduling, and failure handling into the runtime. This allows applications to run efficiently on heterogeneous and changing hardware without embedding transport-specific logic.
 
 The design favors predictable behavior and operational simplicity over manual tuning and static configuration.
-

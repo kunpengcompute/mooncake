@@ -1,9 +1,11 @@
 # vLLM V0 Disaggregated Serving Demo
 
 ## Overview
+
 This is the latest version of mooncake-transfer-engine integration doc with the vLLM project based on [PR 10502](https://github.com/vllm-project/vllm/pull/10502) and [PR 10884](https://github.com/vllm-project/vllm/pull/10884) (vllm version: v0.6.4.post1/main) to accelerate KVCache transfer for inter-node disaggregated serving scenario. We have run some experiments to obtain some [preview benchmark results](../../../performance/vllm-benchmark-results-v0.2.md). More benchmark results will be released in due time.
 
 **_Please note that this is still an experimental version and will be modified anytime based on feedback from the vLLM community._**
+
  - **Update(Apr 10, 2025)**: We are working on the vLLM v1 integration now. Stay tuned.
  - **Update(Sep 5, 2025)**: We have released the vLLM v1 integration with Mooncake Store and LMCache. Please refer to [vllmv1-lmcache-integration](vllmv1-lmcache-integration.md) for more details.
 
@@ -16,25 +18,33 @@ pip3 install mooncake-transfer-engine
 ```
 
 Note:
+
   - If you encounter problems such as missing `lib*.so`, you should uninstall this package by `pip3 uninstall mooncake-transfer-engine`, and build the binaries manually according to the [instructions](build.md).
   - For vLLM version <= v0.8.4, it requires mooncake-transfer-engine <= 0.3.3.post2. In the latest release, interface `mooncake_vllm_adaptor` has been deprecated.
 
 ### Install the latest version of vLLM
+
 #### 1. Clone vLLM from official repo
+
 ```bash
 git clone git@github.com:vllm-project/vllm.git
 ```
+
 #### 2. Build
+
 ##### 2.1 Build from source (Include C++ and CUDA code)
+
 ```bash
 cd vllm
 pip3 uninstall vllm -y
 pip3 install -e .
 ```
+
  - **If the build fails, try upgrading the version of cmake through `pip3 install cmake --upgrade`.**
  - If you encounter any problems that you cannot solve, please refer to the [vLLM official compilation guide](https://docs.vllm.ai/en/v0.6.4.post1/getting_started/installation.html#install-the-latest-code).
 
 ## Configuration
+
 ### Prepare configuration file to Run Example over RDMA
 
 - Prepare a _**mooncake.json**_ file for both Prefill and Decode instances
@@ -50,6 +60,7 @@ pip3 install -e .
   "device_name": "erdma_0"
 }
 ```
+
 - "prefill_url": The IP address and port of the Prefill node.
   - The port in the URL is used to communicate with metadata server.
 - "decode_url": The IP address and port of the Decode node.
@@ -66,6 +77,7 @@ pip3 install -e .
 ### Prepare configuration file to Run Example over TCP
 
 - Prepare a _**mooncake.json**_ file for both Prefill and Decode instances
+
 ```json
 {
   "prefill_url": "192.168.0.137:13003",
@@ -80,7 +92,9 @@ pip3 install -e .
 Note: we will support auto-detect in the next version when the `protocol` is absent in the config file.
 
 ## Run Example
+
  - Please change the IP addresses and ports in the following guide according to your env.
+
 ```bash
 # Begin from `root` of your cloned repo!
 
@@ -115,7 +129,9 @@ MOONCAKE_CONFIG_PATH=./mooncake.json VLLM_USE_MODELSCOPE=True python3 -m vllm.en
 # 4. Start the proxy server on one node (Let's take the prefill node as an example)
 python3 proxy_server.py
 ```
+
 The implementation of `proxy_server.py`
+
 ```python
 import os
 
@@ -181,8 +197,8 @@ if __name__ == '__main__':
 
 **_Be sure to change the IP address in the code._**
 
-
 ## Test with openai compatible request
+
 ```
 curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json" -d '{
   "model": "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4",
@@ -190,4 +206,5 @@ curl -s http://localhost:8000/v1/completions -H "Content-Type: application/json"
   "max_tokens": 1000
 }'
 ```
+
 - If you are not testing on the proxy server, please change the `localhost` to the IP address of the proxy server.

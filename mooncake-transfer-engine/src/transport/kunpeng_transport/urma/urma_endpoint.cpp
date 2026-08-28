@@ -776,7 +776,7 @@ int UrmaEndpoint::construct(GlobalConfig& config) {
         .depth = 2048,  // DEFAULT_DEPTH (512)
         .trans_mode =
             context_->transMode(), /* override via MC_URMA_TRANS_MODE */
-        .priority = 15,            // URMA_MAX_PRIORITY 15
+        .priority = 1,            // URMA_MAX_PRIORITY 1
         .max_sge = 5,              // SGE_NUM_MAX 5
         .rnr_retry = 7,            // URMA_TYPICAL_RNR_RETRY    7
         .err_timeout = 17,         // URMA_TYPICAL_ERR_TIMEOUT   17

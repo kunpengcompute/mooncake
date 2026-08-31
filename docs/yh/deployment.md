@@ -354,11 +354,15 @@ ldconfig
 
 ### 3.2 Mooncake安装
 
+Mooncake 源码使用 BoostKit GitCode 仓库的 [`dev-master_ub_transport`](https://gitcode.com/boostkit/mooncake/tree/dev-master_ub_transport) 分支。
+
 ```bash
 git config --global http.sslVerify false
-git clone --recurse-submodules https://github.com/<对应仓>/Mooncake.git
+git clone --branch dev-master_ub_transport \
+    --single-branch \
+    --recurse-submodules \
+    https://gitcode.com/boostkit/mooncake.git Mooncake
 cd Mooncake
-git checkout HA
 export GOPROXY="http://mirrors.aliyun.com/goproxy,direct"
 export GOINSECURE="go.etcd.io/etcd"
 export GOSUMDB="sum.golang.org"
@@ -368,6 +372,211 @@ cmake -B build -DUSE_UB=ON -DBUILD_SHARED_LIBS=ON -DWITH_TE=ON -DWITH_STORE=ON -
 cmake --build build -j$(nproc)
 git config --global http.sslVerify true
 ```
+
+### 3.3 Local SSD 环境配置
+
+Mooncake 的 Local SSD 数据统一存放在 `/var/lib/mooncake_ssd`。当节点存在多块 NVMe 数据盘时，可先将这些磁盘组成一个 RAID0，再把 `/var/lib` 挂载到 RAID0 文件系统上。这样既能聚合多盘容量和带宽，也能为容器运行目录及 Mooncake Local SSD 数据提供充足空间。
+
+> **注意：** 创建 RAID0 和格式化文件系统会清除目标磁盘上的全部数据。执行前必须确认设备名称，并备份 `/var/lib` 及目标 NVMe 盘中的重要数据。RAID0 不提供数据冗余，任意一块成员盘故障都可能导致整个阵列的数据丢失。
+
+#### 3.3.1 创建软件 RAID0
+
+以下命令以 4 个已经完成分区的 NVMe 设备为例。执行前先确认这些设备没有被挂载或被其他 RAID、LVM 使用：
+
+```bash
+lsblk -f
+cat /proc/mdstat
+```
+
+创建 RAID0：
+
+```bash
+mdadm --create --verbose /dev/md0 \
+    --level=0 \
+    --raid-devices=4 \
+    --chunk=1024 \
+    /dev/nvme1n1p1 \
+    /dev/nvme2n1p1 \
+    /dev/nvme3n1p1 \
+    /dev/nvme4n1p1
+```
+
+查看阵列同步状态和详细信息：
+
+```bash
+watch -n 1 cat /proc/mdstat
+mdadm --detail /dev/md0
+```
+
+保存 RAID 配置，使阵列在系统重启后能够自动组装：
+
+```bash
+mkdir -p /etc/mdadm
+mdadm --detail --scan | tee /etc/mdadm/mdadm.conf
+```
+
+#### 3.3.2 将 `/var/lib` 挂载到 RAID0
+
+先停止 Mooncake、容器运行时以及其他正在使用 `/var/lib` 的服务。以下操作需要在 `/var/lib` 不再被持续写入的维护窗口执行。
+
+格式化 RAID0：
+
+```bash
+mkfs.ext4 /dev/md0
+```
+
+备份原目录、创建挂载点并挂载 RAID0：
+
+```bash
+mv /var/lib /var/lib.old
+mkdir -p /var/lib
+mount /dev/md0 /var/lib
+cp -a /var/lib.old/. /var/lib/
+```
+
+检查原目录与新目录的数据量，确认复制完整后再启动此前停止的服务：
+
+```bash
+du -sh /var/lib.old /var/lib
+df -h /var/lib
+```
+
+将挂载信息写入 `/etc/fstab`，使其在系统重启后自动生效：
+
+```bash
+MD0_UUID=$(blkid -s UUID -o value /dev/md0)
+echo "UUID=${MD0_UUID} /var/lib ext4 defaults 0 0" >> /etc/fstab
+mount -a
+```
+
+验证 RAID 和挂载状态：
+
+```bash
+lsblk | grep md0 -C 2
+cat /etc/fstab
+df -h | grep -E '/dev/md0|/var/lib'
+```
+
+确认业务运行正常且备份不再需要后，再由管理员择机清理 `/var/lib.old`。不要在验证完成前删除该目录。
+
+#### 3.3.3 创建 Mooncake Local SSD 目录
+
+```bash
+mkdir -p /var/lib/mooncake_ssd
+chmod 755 /var/lib/mooncake_ssd
+df -h /var/lib/mooncake_ssd
+```
+
+启动 Mooncake Client 时配置：
+
+```bash
+export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/var/lib/mooncake_ssd
+```
+
+#### 3.3.4 配置最大文件数量
+
+Mooncake Local SSD 使用大量文件时，需要提高进程可打开的文件描述符数量。在 `/etc/security/limits.conf` 中添加：
+
+```text
+root    soft    nofile    65535
+root    hard    nofile    102400
+```
+
+重新登录 Shell 后配置当前会话的上限：
+
+```bash
+ulimit -n 102400
+ulimit -n
+```
+
+如果 Mooncake Client 由 systemd 启动，还需要在对应的 service 文件的 `[Service]` 段中添加：
+
+```ini
+LimitNOFILE=102400
+```
+
+然后重新加载并重启服务：
+
+```bash
+systemctl daemon-reload
+systemctl restart <mooncake-client-service>
+```
+
+### 3.4 不启用 ETCD 和 S3 的启动方式
+
+如果只需要部署单 Master 环境，不需要 ETCD 提供的 Master 选主、OpLog 高可用能力，也不需要 S3 保存快照，可以使用 Master 内置的 HTTP Metadata Server。该模式部署简单，适用于功能验证和单 Master 测试，但不具备 Master 自动故障切换及 S3 快照恢复能力。
+
+以下示例中，`<master IP>` 替换为 Master 节点的业务 IP，`<client IP>` 替换为当前 Client 节点的业务 IP。
+
+#### 3.4.1 启动 Master
+
+```bash
+MASTER_IP="<master IP>"
+
+export URMA_RPC_ENABLE=0
+export URMA_RPC_DEVICE=bonding_dev_0
+export URMA_RPC_EID_INDEX=0
+
+export MOONCAKE_SNAPSHOT_LOCAL_PATH=/home/mooncake_snapshot
+export MOONCAKE_MASTER_SERVICE_SNAPSHOT_TEST_SKIP_CLEANUP=1
+export MC_LOG_DIR="/home/master_log"
+
+mooncake_master \
+    --enable_http_metadata_server=true \
+    --http_metadata_server_host="${MASTER_IP}" \
+    --http_metadata_server_port=8017 \
+    --default_kv_lease_ttl=300000 \
+    --default_kv_soft_pin_ttl=300000 \
+    --metrics_port=9006 \
+    --rpc_port=50052 \
+    --rpc_address="${MASTER_IP}" \
+    --enable_metrics_report_to_backend=true \
+    --enable_offload=true \
+    --enable_ha=false \
+    --enable_oplog=false \
+    --enable_snapshot=false \
+    --enable_snapshot_restore=false
+```
+
+Master 启动后，HTTP Metadata Server 地址为：
+
+```text
+http://<master IP>:8017/metadata
+```
+
+#### 3.4.2 启动 Client
+
+```bash
+MASTER_IP="<master IP>"
+CLIENT_IP="<client IP>"
+
+export MC_URMA_ACTIVE_PORT=0
+export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/var/lib/mooncake_ssd
+export MC_STORE_CLIENT_METRIC=0
+export MC_STORE_CLIENT_METRIC_INTERVAL=3
+export MC_URMA_BONDING_MULTIPATH_ENABLE=on
+export MC_HIFREQ_LOG_SAMPLE_RATE=1
+export MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT=1
+export GLOG_v=1
+export MC_LOG_DIR="/home/client_log"
+
+export URMA_RPC_ENABLE=0
+export URMA_RPC_DEVICE=bonding_dev_0
+export URMA_RPC_EID_INDEX=0
+
+mooncake_client \
+    --host="${CLIENT_IP}" \
+    --metadata_server="http://${MASTER_IP}:8017/metadata" \
+    --master_server_address="${MASTER_IP}:50052" \
+    --protocol=ub \
+    --device_names=bonding_dev_0 \
+    --global_segment_size=214748364080 \
+    --port=50053 \
+    --threads=32 \
+    --enable_offload=true
+```
+
+每个 Client 都应使用自身的 `<client IP>`，但所有 Client 的 `metadata_server` 和 `master_server_address` 都应指向同一个 Master。性能测试时建议将 `MC_HIFREQ_LOG_SAMPLE_RATE` 调整为 `0`，避免高频日志影响测试结果。
 
 ## 4 Mooncake HA测试脚本
 ### 4.1 master运行脚本
@@ -412,7 +621,7 @@ mooncake_master \
 
 ```bash
 export MC_URMA_ACTIVE_PORT=0
-export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/home/mooncake_ssd
+export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/var/lib/mooncake_ssd
 export MC_STORE_CLIENT_METRIC=0
 export MC_STORE_CLIENT_METRIC_INTERVAL=3
 export MC_URMA_BONDING_MULTIPATH_ENABLE=on
@@ -424,6 +633,7 @@ export MC_LOG_DIR="/home/client_log"
 export URMA_RPC_ENABLE=0
 export URMA_RPC_DEVICE=bonding_dev_0
 export URMA_RPC_EID_INDEX=0
+export MC_STORE_CLUSTER_ID=mooncake_cluster
 
 mooncake_client \
     --host=<node1 ip> \
@@ -455,7 +665,8 @@ export URMA_RPC_ENABLE=0
 export URMA_RPC_DEVICE=bonding_dev_0
 export URMA_RPC_EID_INDEX=0
 
-export MC_LOG_DIR="/home/w00889253/client_log"
+export MC_LOG_DIR="/home/client_log"
+export MC_STORE_CLUSTER_ID=mooncake_cluster
 
 stress_cluster_bench \
     --metadata-server='etcd://<node1 ip>:2379;<node2 ip>:2379' \
@@ -497,7 +708,8 @@ export URMA_RPC_ENABLE=0
 export URMA_RPC_DEVICE=bonding_dev_0
 export URMA_RPC_EID_INDEX=0
 
-export MC_LOG_DIR="/home/w00889253/client_log"
+export MC_LOG_DIR="/home/client_log"
+export MC_STORE_CLUSTER_ID=mooncake_cluster
 
 stress_cluster_bench \
     --metadata-server='etcd://<node1 ip>:2379;<node2 ip>:2379' \
@@ -693,7 +905,7 @@ client
 ```
 export MC_TCP_BIND_ADDRESS=<node1 ip>
 export MC_URMA_ACTIVE_PORT=0
-export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/home/mooncake_ssd
+export MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/var/lib/mooncake_ssd
 export MC_STORE_CLIENT_METRIC=0
 export MC_STORE_CLIENT_METRIC_INTERVAL=3
 export MC_URMA_BONDING_MULTIPATH_ENABLE=on

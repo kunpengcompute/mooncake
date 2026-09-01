@@ -32,25 +32,29 @@ std::string genGpuNodeName(int node) {
 
 const std::vector<MemoryLocationEntry> getMemoryLocation(void *start,
                                                          size_t len,
-                                                         bool only_first_page) {
+                                                         bool only_first_page,
+                                                         bool probe_gpu) {
     std::vector<MemoryLocationEntry> entries;
 
 #if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_HIP) ||  \
     defined(USE_MLU) || defined(USE_MACA) || defined(USE_HYGON) || \
     defined(USE_COREX) || defined(USE_SUNRISE)
-    cudaPointerAttributes attributes;
-    cudaError_t result = cudaPointerGetAttributes(&attributes, start);
-    if (result != cudaSuccess) {
-        LOG(ERROR) << "cudaPointerGetAttributes failed (Error code: " << result
-                   << " - " << cudaGetErrorString(result) << ")" << std::endl;
-        entries.push_back({(uint64_t)start, len, kWildcardLocation});
-        return entries;
-    }
+    if (probe_gpu) {
+        cudaPointerAttributes attributes;
+        cudaError_t result = cudaPointerGetAttributes(&attributes, start);
+        if (result != cudaSuccess) {
+            LOG(ERROR) << "cudaPointerGetAttributes failed (Error code: "
+                       << result << " - " << cudaGetErrorString(result) << ")"
+                       << std::endl;
+            entries.push_back({(uint64_t)start, len, kWildcardLocation});
+            return entries;
+        }
 
-    if (attributes.type == cudaMemoryTypeDevice) {
-        entries.push_back(
-            {(uint64_t)start, len, genGpuNodeName(attributes.device)});
-        return entries;
+        if (attributes.type == cudaMemoryTypeDevice) {
+            entries.push_back(
+                {(uint64_t)start, len, genGpuNodeName(attributes.device)});
+            return entries;
+        }
     }
 #endif
 

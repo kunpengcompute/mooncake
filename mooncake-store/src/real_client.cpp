@@ -171,10 +171,11 @@ size_t sum_buffer_handle_sizes(
 }
 
 std::string resolve_register_buffer_location(void *buffer) {
-#if defined(USE_CUDA)
+#if defined(USE_CUDA) || defined(USE_MUSA) || defined(USE_MACA) || \
+    defined(USE_HYGON) || defined(USE_COREX) || defined(USE_HIP)
     int device_id = -1;
     if (gpu_staging::IsDevicePointer(buffer, &device_id) && device_id >= 0) {
-        return "cuda:" + std::to_string(device_id);
+        return GPU_PREFIX + std::to_string(device_id);
     }
 #else
     (void)buffer;
@@ -662,7 +663,10 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
 #endif
 
 #ifdef USE_NOF
-    if (!SpdkWrapper::GetInstance().InitializeEnv()) {
+    const std::string spdk_client_name =
+        "mooncake_client_" +
+        std::to_string(static_cast<unsigned long>(getpid()));
+    if (!SpdkWrapper::GetInstance().InitializeEnv(spdk_client_name)) {
         LOG(ERROR) << "spdk env init fail";
         return tl::unexpected(ErrorCode::INTERNAL_ERROR);
     }
@@ -3082,6 +3086,32 @@ tl::expected<void, ErrorCode> RealClient::unregister_buffer_internal(
 
 int RealClient::unregister_buffer(void *buffer) {
     return to_py_ret(unregister_buffer_internal(buffer));
+}
+
+tl::expected<void, ErrorCode> RealClient::register_spdk_gpu_buffer_internal(
+    void *buffer, size_t size) {
+    if (!client_) {
+        LOG(ERROR) << "Client is not initialized";
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    return client_->RegisterSpdkGpuMemory(buffer, size);
+}
+
+int RealClient::register_spdk_gpu_buffer(void *buffer, size_t size) {
+    return to_py_ret(register_spdk_gpu_buffer_internal(buffer, size));
+}
+
+tl::expected<void, ErrorCode> RealClient::unregister_spdk_gpu_buffer_internal(
+    void *buffer) {
+    if (!client_) {
+        LOG(ERROR) << "Client is not initialized";
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    return client_->UnregisterSpdkGpuMemory(buffer);
+}
+
+int RealClient::unregister_spdk_gpu_buffer(void *buffer) {
+    return to_py_ret(unregister_spdk_gpu_buffer_internal(buffer));
 }
 
 std::optional<RealClient::WritableBufferRegion>

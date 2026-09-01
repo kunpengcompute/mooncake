@@ -36,7 +36,7 @@ class SpdkWrapper {
 
     static SpdkWrapper &GetInstance();
 
-    bool InitializeEnv();
+    bool InitializeEnv(const std::string &app_name = {});
 
     void Cleanup();
 

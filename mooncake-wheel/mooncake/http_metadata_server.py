@@ -87,6 +87,9 @@ class KVBootstrapServer:
         data = await request.read()
         async with self.lock:
             if key.find("rpc_meta") != -1 and key in self.store:
+                if self.store[key] == data:
+                    return web.Response(text='metadata unchanged', status=200,
+                                      content_type='application/json')
                 return web.Response(text='Duplicate rpc_meta key not allowed', status=400,
                                   content_type='application/json')
             self.store[key] = data

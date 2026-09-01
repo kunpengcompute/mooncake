@@ -10,7 +10,11 @@
 #include "spdk/spdk_wrapper.h"
 
 #if defined(USE_SPDK_GPU_DMABUF)
+#if defined(USE_MACA)
+#include "cuda_alike.h"
+#else
 #include <cuda_runtime_api.h>
+#endif
 #include <spdk/gpu_dmabuf.h>
 #define MOONCAKE_HAS_SPDK_GPU_DMABUF 1
 #else
@@ -119,7 +123,7 @@ SpdkWrapper &SpdkWrapper::GetInstance() {
     return ins;
 }
 
-bool SpdkWrapper::InitializeEnv() {
+bool SpdkWrapper::InitializeEnv(const std::string &app_name) {
     if (initialized.load(std::memory_order_acquire)) {
         return true;
     }
@@ -131,7 +135,14 @@ bool SpdkWrapper::InitializeEnv() {
 
     struct spdk_env_opts opts;
     spdk_env_opts_init(&opts);
-    opts.name = "mooncake";
+    const char *configured_name = std::getenv("MC_SPDK_APP_NAME");
+    const std::string resolved_name =
+        !app_name.empty()
+            ? app_name
+            : (configured_name != nullptr && configured_name[0] != '\0'
+                   ? configured_name
+                   : "mooncake");
+    opts.name = resolved_name.c_str();
 
     int rc = spdk_env_init(&opts);
     if (rc != 0) {
@@ -536,7 +547,7 @@ int SpdkWrapper::RegisterGpuMemoryRegion(void *ptr, size_t size) {
         return -EINVAL;
     }
 
-#if MOONCAKE_HAS_SPDK_GPU_DMABUF
+#if MOONCAKE_HAS_SPDK_GPU_DMABUF && !defined(USE_MACA)
     cudaPointerAttributes attributes{};
     if (cudaPointerGetAttributes(&attributes, ptr) != cudaSuccess) {
         return -EINVAL;

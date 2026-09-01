@@ -30,6 +30,9 @@
 
 #include "common.h"
 #include "config.h"
+#if defined(USE_MACA)
+#include "cuda_alike.h"
+#endif
 #include "environ.h"
 #include "memory_location.h"
 #include "topology.h"
@@ -146,7 +149,8 @@ int RdmaTransport::install(std::string &local_server_name,
     return 0;
 }
 
-int RdmaTransport::preTouchMemory(void *addr, size_t length) {
+int RdmaTransport::preTouchMemory(void *addr, size_t length,
+                                  bool allow_gpu_dmabuf) {
     if (context_list_.size() == 0) {
         // At least one context is required for pre-touch.
         return 0;
@@ -169,8 +173,9 @@ int RdmaTransport::preTouchMemory(void *addr, size_t length) {
     for (size_t thread_i = 0; thread_i < num_threads; ++thread_i) {
         void *block_addr = static_cast<char *>(addr) + thread_i * block_size;
         threads.emplace_back([this, thread_i, block_addr, block_size,
-                              &thread_results]() {
-            int ret = context_list_[0]->preTouchMemory(block_addr, block_size);
+                              allow_gpu_dmabuf, &thread_results]() {
+            int ret = context_list_[0]->preTouchMemory(
+                block_addr, block_size, allow_gpu_dmabuf);
             thread_results[thread_i] = ret;
         });
     }
@@ -211,12 +216,17 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
     if (MCIbRelaxedOrderingEnabled) {
         access_rights |= IBV_ACCESS_RELAXED_ORDERING;
     }
+#if defined(USE_MACA)
+    const bool allow_gpu_dmabuf = name.rfind(GPU_PREFIX, 0) == 0;
+#else
+    const bool allow_gpu_dmabuf = true;
+#endif
     bool do_pre_touch = context_list_.size() > 0 &&
                         std::thread::hardware_concurrency() >= 4 &&
                         length >= (size_t)4 * 1024 * 1024 * 1024;
     if (do_pre_touch) {
         // Parallel Pre-touch the memory to speedup the registration process.
-        int ret = preTouchMemory(addr, length);
+        int ret = preTouchMemory(addr, length, allow_gpu_dmabuf);
         if (ret != 0) {
             return ret;
         }
@@ -248,10 +258,11 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
         const int ar = access_rights;  // Local copy for lambda capture
 
         for (size_t i = 0; i < context_list_.size(); ++i) {
-            reg_threads.emplace_back([this, &ret_codes, i, addr, length, ar]() {
-                ret_codes[i] =
-                    context_list_[i]->registerMemoryRegion(addr, length, ar);
-            });
+            reg_threads.emplace_back(
+                [this, &ret_codes, i, addr, length, ar, allow_gpu_dmabuf]() {
+                    ret_codes[i] = context_list_[i]->registerMemoryRegion(
+                        addr, length, ar, allow_gpu_dmabuf);
+                });
         }
 
         for (auto &thread : reg_threads) {
@@ -267,8 +278,8 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
         }
     } else {
         for (size_t i = 0; i < context_list_.size(); ++i) {
-            int ret = context_list_[i]->registerMemoryRegion(addr, length,
-                                                             access_rights);
+            int ret = context_list_[i]->registerMemoryRegion(
+                addr, length, access_rights, allow_gpu_dmabuf);
             if (ret) {
                 LOG(ERROR) << "Failed to register memory region with context "
                            << i;
@@ -301,8 +312,14 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
     // when the name is kWildcardLocation("*").
     if (name == kWildcardLocation) {
         bool only_first_page = true;
+#if defined(USE_MACA)
+        const bool probe_gpu_location = allow_gpu_dmabuf;
+#else
+        const bool probe_gpu_location = true;
+#endif
         const std::vector<MemoryLocationEntry> entries =
-            getMemoryLocation(addr, length, only_first_page);
+            getMemoryLocation(addr, length, only_first_page,
+                              probe_gpu_location);
         if (entries.empty()) return -1;
         buffer_desc.name = entries[0].location;
     } else {

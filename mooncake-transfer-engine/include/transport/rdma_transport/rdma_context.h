@@ -91,11 +91,13 @@ class RdmaContext {
 
    public:
     // Memory Region Management
-    int registerMemoryRegion(void *addr, size_t length, int access);
+    int registerMemoryRegion(void *addr, size_t length, int access,
+                             bool allow_gpu_dmabuf = true);
 
     int unregisterMemoryRegion(void *addr);
 
-    int preTouchMemory(void *addr, size_t length);
+    int preTouchMemory(void *addr, size_t length,
+                       bool allow_gpu_dmabuf = true);
 
     uint32_t rkey(void *addr);
 
@@ -103,6 +105,7 @@ class RdmaContext {
 
    private:
     int registerMemoryRegionInternal(void *addr, size_t length, int access,
+                                     bool allow_gpu_dmabuf,
                                      MemoryRegionMeta &mrMeta);
 
     using MemoryRegionMap = std::map<uintptr_t, MemoryRegionMeta>;

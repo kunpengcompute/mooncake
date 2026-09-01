@@ -54,6 +54,10 @@ class DummyClient : public PyClient {
 
     int unregister_buffer(void *buffer);
 
+    int register_spdk_gpu_buffer(void *buffer, size_t size);
+
+    int unregister_spdk_gpu_buffer(void *buffer);
+
     int64_t get_into(const std::string &key, void *buffer, size_t size);
 
     std::vector<std::vector<std::vector<int64_t>>> get_into_ranges(

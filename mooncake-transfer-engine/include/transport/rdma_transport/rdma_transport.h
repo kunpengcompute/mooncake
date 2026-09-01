@@ -106,7 +106,7 @@ class RdmaTransport : public Transport {
     int refreshLocalDeviceDesc(const std::string &device_name, uint16_t lid,
                                const std::string &gid);
 
-    int preTouchMemory(void *addr, size_t length);
+    int preTouchMemory(void *addr, size_t length, bool allow_gpu_dmabuf);
 
    public:
     int onSetupRdmaConnections(const HandShakeDesc &peer_desc,

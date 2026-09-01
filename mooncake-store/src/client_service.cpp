@@ -85,8 +85,8 @@ int GetCurrentNumaSocketId() {
 #endif
 
 #ifdef USE_NOF
-bool IsCudaLocationForSpdk(const std::string& location) {
-    return location.rfind("cuda:", 0) == 0;
+bool IsGpuLocationForSpdk(const std::string& location) {
+    return location.rfind(GPU_PREFIX, 0) == 0;
 }
 
 bool IsSpdkGpuDmabufRequested() {
@@ -2926,7 +2926,7 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
 #ifdef USE_NOF
-    if (IsCudaLocationForSpdk(location) && IsSpdkGpuDmabufRequested()) {
+    if (IsGpuLocationForSpdk(location) && IsSpdkGpuDmabufRequested()) {
         if (!SpdkWrapper::GetInstance().InitializeEnv()) {
             (void)this->transfer_engine_->unregisterLocalMemory(
                 addr, update_metadata);
@@ -2941,7 +2941,7 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
             SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
             (void)this->transfer_engine_->unregisterLocalMemory(
                 addr, update_metadata);
-            LOG(ERROR) << "Failed to register CUDA buffer with SPDK GPU "
+            LOG(ERROR) << "Failed to register GPU buffer with SPDK GPU "
                        << "dma-buf domain, addr=" << addr
                        << ", length=" << length << ", rc=" << spdk_rc;
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -2961,6 +2961,57 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
     SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
 #endif
     return {};
+}
+
+tl::expected<void, ErrorCode> Client::RegisterSpdkGpuMemory(void* addr,
+                                                            size_t length) {
+    if (addr == nullptr || length == 0) {
+        LOG(ERROR) << "Invalid SPDK GPU memory region, addr=" << addr
+                   << ", length=" << length;
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+#ifdef USE_NOF
+    if (!IsSpdkGpuDmabufRequested()) {
+        LOG(ERROR) << "SPDK GPU dma-buf registration requested while "
+                      "MC_SPDK_GPU_DMABUF is disabled";
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (!SpdkWrapper::GetInstance().InitializeEnv()) {
+        LOG(ERROR) << "Failed to initialize SPDK env for GPU dma-buf "
+                      "registration, addr="
+                   << addr << ", length=" << length;
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (!SpdkWrapper::GetInstance().IsGpuDmabufEnabled()) {
+        LOG(ERROR) << "SPDK GPU dma-buf domain is unavailable, addr=" << addr
+                   << ", length=" << length;
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    int rc = SpdkWrapper::GetInstance().RegisterGpuMemoryRegion(addr, length);
+    if (rc != 0) {
+        LOG(ERROR) << "Failed to declare GPU buffer for SPDK dma-buf, addr="
+                   << addr << ", length=" << length << ", rc=" << rc;
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    return {};
+#else
+    (void)addr;
+    (void)length;
+    return tl::unexpected(ErrorCode::INVALID_PARAMS);
+#endif
+}
+
+tl::expected<void, ErrorCode> Client::UnregisterSpdkGpuMemory(void* addr) {
+    if (addr == nullptr) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+#ifdef USE_NOF
+    SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
+    return {};
+#else
+    (void)addr;
+    return tl::unexpected(ErrorCode::INVALID_PARAMS);
+#endif
 }
 
 tl::expected<bool, ErrorCode> Client::IsExist(const std::string& key) {

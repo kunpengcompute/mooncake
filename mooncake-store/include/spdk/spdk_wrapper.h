@@ -108,6 +108,10 @@ private:
 
     int ParseTransPortStr(const std::string &tr_str, tr_info *info);
     int ConnectController(const struct spdk_nvme_transport_id *trid, ctrlr_info *info);
+    int32_t PollAdminCompletions(struct spdk_nvme_ctrlr *ctrlr, bool force);
+    bool WaitForActiveNamespace(struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid,
+                                const std::string &ctrlr_key,
+                                int32_t *admin_error);
     ProbeBuffer *GetOrCreateProbeBuffer(const std::string &tr_str,
                                         uint32_t block_size,
                                         std::string *error_reason);

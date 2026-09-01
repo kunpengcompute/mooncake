@@ -60,8 +60,20 @@ make install
 在 Mooncake 服务节点进行
 
 ```bash
-mooncake_master --rpc_address=192.168.65.81
+mooncake_master \
+  --rpc_address=192.168.65.81 \
+  --nof_eviction_ratio=0.05 \
+  --nof_eviction_high_watermark_ratio=0.95
 ```
+
+#### NoF SSD 淘汰参数
+
+| 参数 | 默认值 | 取值范围 | 说明 |
+| --- | --- | --- | --- |
+| `--nof_eviction_high_watermark_ratio` | `0.95` | `[0.0, 1.0]` | NoF SSD 池使用率高水位。全局 NoF SSD 池使用率超过该值时触发 NoF 副本淘汰。`0.95` 表示使用率超过 95% 时触发。 |
+| `--nof_eviction_ratio` | `0.05` | `[0.0, 1.0]` | 每轮 NoF 淘汰的目标对象比例下限。`0.05` 表示每轮至少以约 5% 的对象为目标执行淘汰；实际目标比例还会根据当前使用率超过高水位的幅度动态增加。 |
+
+NoF 淘汰由 master 的后台淘汰线程执行，优先选择 lease 已过期且 NoF 副本状态完整的对象。当 NoF SSD 池超过高水位，或者空间分配触发主动淘汰请求时，master 会按上述参数计算本轮淘汰目标。参数可以通过命令行设置，也可以在 master JSON/YAML 配置文件中使用 `nof_eviction_ratio` 和 `nof_eviction_high_watermark_ratio` 字段设置。
 
 ### 3.3 部署 Metadata 服务
 
@@ -477,9 +489,10 @@ taskset -c 0-31 pip install -e . --no-build-isolation
 
 ```bash
 export LMCACHE_CONFIG_FILE="/path/vllm-lmcache-mooncake-config.yaml"
+export MC_STORE_NUMA_SOCKET_ID=0
 export MC_NOF_WORKERS=4
 export MC_NOF_SUBMIT_CHUNK_BYTES=$((1 << 17))  # 128KB
-export MC_NOF_INFLIGHT_BYTES_LIMIT=$((1 << 25))  # 32MB
+export MC_NOF_INFLIGHT_BYTES_LIMIT=$((1 << 23))  # 8MB
 ```
 
 1. 启动服务：
@@ -510,12 +523,13 @@ vllm serve --port 7070 \
 ```yaml
 chunk_size: 256
 remote_url: "mooncakestore://192.168.65.81:50051/"
-remote_serde: "native"
+remote_serde: "naive"
 local_cpu: True
 max_local_cpu_size: 8
 enable_mooncake_nof_pool: True
 
 extra_config:
+  save_chunk_meta: False
   local_hostname: "localhost"
   metadata_server: "http://192.168.65.81:8080/metadata"
   master_server_address: "192.168.65.81:50051"
@@ -535,13 +549,33 @@ extra_config:
 
 #### 环境变量说明
 
-| 环境变量                      | 说明                                | 默认值 |
-| ----------------------------- | ----------------------------------- | ------ |
-| `MC_NOF_WORKERS`              | 处理 SPDK NoF IO 操作的工作线程数量 | 4      |
-| `MC_NOF_SUBMIT_CHUNK_BYTES`   | 每次向 SPDK 提交的 IO 操作大小      | 128KB  |
-| `MC_NOF_INFLIGHT_BYTES_LIMIT` | 系统中允许的最大未完成 IO 字节数    | 32MB   |
+| 环境变量                      | 说明                                           | 默认值               |
+| ----------------------------- | ---------------------------------------------- | -------------------- |
+| `MC_STORE_NUMA_SOCKET_ID`     | NoF worker 绑定的 NUMA 节点编号                | 当前 CPU 所在 NUMA 节点 |
+| `MC_NOF_WORKERS`              | 处理 SPDK NoF IO 操作的工作线程数量            | 4                    |
+| `MC_NOF_SUBMIT_CHUNK_BYTES`   | 每次向 SPDK 提交的 IO 操作大小                 | 128KB                |
+| `MC_NOF_INFLIGHT_BYTES_LIMIT` | 单个 NoF segment、单个读或写方向允许的最大未完成 IO 字节数 | 32MB |
 
-**注意**：这三个参数共同构成了 SPDK NoF IO 的 QoS 控制机制
+**注意**：后三个参数共同构成 SPDK NoF IO 的 QoS 控制机制；`MC_STORE_NUMA_SOCKET_ID` 用于控制 NoF worker 的 NUMA affinity。
+
+#### `MC_NOF_INFLIGHT_BYTES_LIMIT` 推荐配置
+
+该参数按 NoF segment（通常对应一个 namespace）分别生效，并非整个 NoF 池共享的全局上限。使用多个 namespace 时，所有 segment 的在途 I/O 会叠加；例如每盘配置为 `8MB`、Target 挂载 9 块盘时，写方向的总在途量最高约为 `72MB`。
+
+建议先根据 Target 的 `nvmf_create_transport -q` 队列深度确定单盘上限。为保留 completion 回收和突发流量的余量，单盘在途请求数建议不超过 `-q` 的约 50%：
+
+```text
+MC_NOF_INFLIGHT_BYTES_LIMIT <= Target queue depth * 50% * MC_NOF_SUBMIT_CHUNK_BYTES
+```
+
+以 `MC_NOF_SUBMIT_CHUNK_BYTES=128KB` 为例，Target 使用 `-q 128` 时，单盘推荐配置为 `8MB`，即最多约 64 个请求在途。对于多盘 Target，可使用以下保守起始配置：
+
+| Target 内 namespace 数 | 推荐 `MC_NOF_INFLIGHT_BYTES_LIMIT` | 说明 |
+| --- | --- | --- |
+| 1 - 8 | `8MB` | 适用于 `-q 128` 的稳定起始值。 |
+| 9 - 12 | `4MB` | 限制多个 qpair 叠加后的总在途量，建议先使用该值完成稳定性压测。 |
+
+9 块盘场景如已完成长时间压测且未出现 `submit io fail`，可尝试使用 `8MB` 以换取更高吞吐。若 Target 队列深度提高到 `-q 256`，可在压测验证后将 1 - 4 块盘的配置提高到 `16MB`。不要仅因盘数较少就直接使用代码默认值 `32MB`，该值在高并发 vLLM/LMCache 写入下可能超出 Target qpair 或共享 RDMA 资源的承受范围。
 
 #### 执行多轮对话推理测试
 

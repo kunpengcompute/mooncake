@@ -50,6 +50,8 @@ Examples:
 
 Notes:
   - --spdk_target_info can be specified multiple times for multiple targets.
+  - When pci is specified, both create and register phases are limited to
+    namespaces backed by those PCI devices.
   - If pci is omitted during create, the tool auto-discovers available NVMe PCI devices.
 """
     )

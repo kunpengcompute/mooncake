@@ -678,6 +678,37 @@ class MooncakeNoFRegister:
             result[key] = value
         return result
 
+    def _parse_selected_pci_devices(self, target: Dict[str, str]) -> List[str]:
+        """Return normalized PCI addresses explicitly selected for a target."""
+        pci_value = target.get('pci', '')
+        pci_pattern = re.compile(
+            r'(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]'
+        )
+        selected = list(dict.fromkeys(
+            pci.lower() for pci in pci_pattern.findall(pci_value)
+        ))
+        if 'pci' in target and not selected:
+            raise ValueError(
+                f"No valid PCI address found in pci:{pci_value}"
+            )
+        return selected
+
+    def _bdev_matches_selected_pci(
+        self,
+        bdev: Dict[str, Any],
+        selected_pci_devices: List[str],
+    ) -> bool:
+        """Check whether SPDK bdev metadata belongs to a selected PCI device."""
+        if not selected_pci_devices:
+            return True
+
+        serialized = json.dumps(bdev, sort_keys=True).lower()
+        for pci in selected_pci_devices:
+            # SPDK may report PCI addresses with or without the domain prefix.
+            if pci in serialized or pci[-7:] in serialized:
+                return True
+        return False
+
     def _execute_ssh_command(self, ip: str, command: str, path: str) -> str:
         """
         Execute command on remote server via SSH
@@ -732,12 +763,18 @@ class MooncakeNoFRegister:
             target = self._parse_spdk_target_info(target_info)
             ip = target.get('ip')
             path = target.get('path')
+            selected_pci_devices = self._parse_selected_pci_devices(target)
 
             if not ip or not path:
                 logging.error(f"Invalid target info: {target_info}")
                 continue
 
             logging.info(f"Getting SSD info from target: {ip} (path: {path})")
+            if selected_pci_devices:
+                logging.info(
+                    "Only namespaces backed by selected PCI devices will be registered: %s",
+                    ', '.join(selected_pci_devices),
+                )
 
             try:
                 # Get subsystems info
@@ -781,6 +818,16 @@ class MooncakeNoFRegister:
                             continue
 
                         bdev = bdevs[0]
+                        if not self._bdev_matches_selected_pci(
+                            bdev, selected_pci_devices
+                        ):
+                            logging.info(
+                                "Skipping namespace nsid=%s, bdev=%s because it is not backed by a selected PCI device",
+                                nsid,
+                                bdev_name,
+                            )
+                            continue
+
                         block_size = bdev.get('block_size', 512)
                         num_blocks = bdev.get('num_blocks', 0)
                         size = block_size * num_blocks

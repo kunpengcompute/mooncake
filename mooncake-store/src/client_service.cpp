@@ -2953,13 +2953,14 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
 
 tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
     void* addr, bool update_metadata) {
-    if (this->transfer_engine_->unregisterLocalMemory(addr, update_metadata) !=
-        0) {
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
+    const int rdma_rc =
+        this->transfer_engine_->unregisterLocalMemory(addr, update_metadata);
 #ifdef USE_NOF
     SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
 #endif
+    if (rdma_rc != 0) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
     return {};
 }
 

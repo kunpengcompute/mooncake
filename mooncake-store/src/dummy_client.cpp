@@ -743,19 +743,6 @@ int DummyClient::unregister_buffer(void* buffer) {
     return to_py_ret(ret);
 }
 
-int DummyClient::register_spdk_gpu_buffer(void* buffer, size_t size) {
-    (void)buffer;
-    (void)size;
-    LOG(ERROR) << "SPDK GPU dma-buf registration is unavailable in dummy mode";
-    return -1;
-}
-
-int DummyClient::unregister_spdk_gpu_buffer(void* buffer) {
-    (void)buffer;
-    LOG(ERROR) << "SPDK GPU dma-buf registration is unavailable in dummy mode";
-    return -1;
-}
-
 uint64_t DummyClient::alloc_from_mem_pool(size_t size) {
     try {
         void* addr = shm_helper_->allocate(size);

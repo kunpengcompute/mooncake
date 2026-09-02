@@ -105,10 +105,6 @@ class RealClient : public PyClient {
 
     int unregister_buffer(void *buffer);
 
-    int register_spdk_gpu_buffer(void *buffer, size_t size);
-
-    int unregister_spdk_gpu_buffer(void *buffer);
-
     struct WritableBufferRegion {
         void *base{nullptr};
         size_t size{0};
@@ -529,12 +525,6 @@ class RealClient : public PyClient {
 
     tl::expected<void, ErrorCode> register_buffer_internal(void *buffer,
                                                            size_t size);
-
-    tl::expected<void, ErrorCode> register_spdk_gpu_buffer_internal(
-        void *buffer, size_t size);
-
-    tl::expected<void, ErrorCode> unregister_spdk_gpu_buffer_internal(
-        void *buffer);
 
     struct RangedReadMetadata {
         QueryResult query_result;

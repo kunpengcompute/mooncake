@@ -3088,32 +3088,6 @@ int RealClient::unregister_buffer(void *buffer) {
     return to_py_ret(unregister_buffer_internal(buffer));
 }
 
-tl::expected<void, ErrorCode> RealClient::register_spdk_gpu_buffer_internal(
-    void *buffer, size_t size) {
-    if (!client_) {
-        LOG(ERROR) << "Client is not initialized";
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-    return client_->RegisterSpdkGpuMemory(buffer, size);
-}
-
-int RealClient::register_spdk_gpu_buffer(void *buffer, size_t size) {
-    return to_py_ret(register_spdk_gpu_buffer_internal(buffer, size));
-}
-
-tl::expected<void, ErrorCode> RealClient::unregister_spdk_gpu_buffer_internal(
-    void *buffer) {
-    if (!client_) {
-        LOG(ERROR) << "Client is not initialized";
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-    return client_->UnregisterSpdkGpuMemory(buffer);
-}
-
-int RealClient::unregister_spdk_gpu_buffer(void *buffer) {
-    return to_py_ret(unregister_spdk_gpu_buffer_internal(buffer));
-}
-
 std::optional<RealClient::WritableBufferRegion>
 RealClient::resolve_writable_buffer_region(void *buffer) const {
     std::shared_lock<std::shared_mutex> lock(registered_buffer_mutex_);

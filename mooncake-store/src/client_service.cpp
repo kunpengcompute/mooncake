@@ -2964,57 +2964,6 @@ tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
     return {};
 }
 
-tl::expected<void, ErrorCode> Client::RegisterSpdkGpuMemory(void* addr,
-                                                            size_t length) {
-    if (addr == nullptr || length == 0) {
-        LOG(ERROR) << "Invalid SPDK GPU memory region, addr=" << addr
-                   << ", length=" << length;
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-#ifdef USE_NOF
-    if (!IsSpdkGpuDmabufRequested()) {
-        LOG(ERROR) << "SPDK GPU dma-buf registration requested while "
-                      "MC_SPDK_GPU_DMABUF is disabled";
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-    if (!SpdkWrapper::GetInstance().InitializeEnv()) {
-        LOG(ERROR) << "Failed to initialize SPDK env for GPU dma-buf "
-                      "registration, addr="
-                   << addr << ", length=" << length;
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-    if (!SpdkWrapper::GetInstance().IsGpuDmabufEnabled()) {
-        LOG(ERROR) << "SPDK GPU dma-buf domain is unavailable, addr=" << addr
-                   << ", length=" << length;
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-    int rc = SpdkWrapper::GetInstance().RegisterGpuMemoryRegion(addr, length);
-    if (rc != 0) {
-        LOG(ERROR) << "Failed to declare GPU buffer for SPDK dma-buf, addr="
-                   << addr << ", length=" << length << ", rc=" << rc;
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-    return {};
-#else
-    (void)addr;
-    (void)length;
-    return tl::unexpected(ErrorCode::INVALID_PARAMS);
-#endif
-}
-
-tl::expected<void, ErrorCode> Client::UnregisterSpdkGpuMemory(void* addr) {
-    if (addr == nullptr) {
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-#ifdef USE_NOF
-    SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
-    return {};
-#else
-    (void)addr;
-    return tl::unexpected(ErrorCode::INVALID_PARAMS);
-#endif
-}
-
 tl::expected<bool, ErrorCode> Client::IsExist(const std::string& key) {
     auto result = master_client_.ExistKey(key);
     return result;

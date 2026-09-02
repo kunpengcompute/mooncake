@@ -347,11 +347,6 @@ class Client {
     tl::expected<void, ErrorCode> unregisterLocalMemory(
         void* addr, bool update_metadata = true);
 
-    tl::expected<void, ErrorCode> RegisterSpdkGpuMemory(void* addr,
-                                                        size_t length);
-
-    tl::expected<void, ErrorCode> UnregisterSpdkGpuMemory(void* addr);
-
     /**
      * @brief Checks if an object exists
      * @param key Key to check

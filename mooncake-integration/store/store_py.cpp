@@ -2621,26 +2621,6 @@ PYBIND11_MODULE(store, m) {
             "Unregister a previously registered memory "
             "buffer for direct access operations")
         .def(
-            "register_spdk_gpu_buffer",
-            [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr,
-               size_t size) {
-                void *buffer = reinterpret_cast<void *>(buffer_ptr);
-                py::gil_scoped_release release;
-                return self.store_->register_spdk_gpu_buffer(buffer, size);
-            },
-            py::arg("buffer_ptr"), py::arg("size"),
-            "Declare a GPU memory region for SPDK DMA-BUF operations without "
-            "registering it with RDMA")
-        .def(
-            "unregister_spdk_gpu_buffer",
-            [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr) {
-                void *buffer = reinterpret_cast<void *>(buffer_ptr);
-                py::gil_scoped_release release;
-                return self.store_->unregister_spdk_gpu_buffer(buffer);
-            },
-            py::arg("buffer_ptr"),
-            "Remove a GPU memory region from SPDK DMA-BUF operations")
-        .def(
             "get_into",
             [](MooncakeStorePyWrapper &self, const std::string &key,
                uintptr_t buffer_ptr, size_t size) {

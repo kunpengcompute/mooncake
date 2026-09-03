@@ -364,10 +364,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
                 results = self._store.batch_get_into_multi_buffers(
                     [key], [direct_ptrs], [direct_sizes], False
                 )
-                if len(results) != 1 or results[0] != 0:
+                expected_bytes = sum(direct_sizes)
+                if len(results) != 1 or results[0] < 0:
                     raise RuntimeError(
                         f"Mooncake batch_get_into_multi_buffers failed key={key} "
                         f"results={results}"
+                    )
+                if results[0] != expected_bytes:
+                    raise RuntimeError(
+                        f"Mooncake batch_get_into_multi_buffers short read "
+                        f"key={key} expected={expected_bytes} "
+                        f"actual={results[0]}"
                     )
                 logger.info(
                     "Mooncake Store GET direct request key=%s bytes=%d "

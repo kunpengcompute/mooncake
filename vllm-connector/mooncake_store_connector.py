@@ -129,16 +129,27 @@ class MooncakeStoreConnectorMetadata(KVConnectorMetadata):
         )
 
 
+@dataclass
+class PendingSave:
+    request: ReqMeta
+    ptrs: list[int] = field(default_factory=list)
+    sizes: list[int] = field(default_factory=list)
+    cpu_layers: dict[str, torch.Tensor] = field(default_factory=dict)
+    seen_layers: set[str] = field(default_factory=set)
+
+
 class MooncakeStoreConnector(KVConnectorBase_V1):
     """vLLM 0.15 Mooncake Store connector.
 
     The connector has two data paths:
     - GPU direct path: register vLLM KV-cache GPU storage and use
       batch_put_from_multi_buffers / batch_get_into_multi_buffers. This is the
-      path that can trigger Mooncake NoF + SPDK GPU DMA-BUF.
+      path that can trigger Mooncake NoF + SPDK GPU DMA-BUF. All layers for one
+      request are submitted as one logical value.
     - CPU fallback path: keep the original debug connector behavior, copying KV
       to CPU safetensors bytes and using ordinary put/get. This keeps vLLM
-      usable when Mooncake is built without NoF and SPDK GPU DMA-BUF.
+      usable when Mooncake is built without NoF and SPDK GPU DMA-BUF, while
+      also storing all layers for one request in one value.
     """
 
     def __init__(
@@ -156,6 +167,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         self._requests_need_load: dict[str, Request] = {}
         self._registered_gpu_buffers: dict[int, int] = {}
         self._known_gpu_storages: dict[int, int] = {}
+        self._pending_saves: dict[str, PendingSave] = {}
 
         cfg = self._kv_transfer_config
         self._mooncake_config_path = os.getenv("MOONCAKE_CONFIG_PATH", "")
@@ -327,18 +339,70 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
                 continue
             logger.info("Mooncake Store load request: tokens=%d direct=%s",
                         len(request.slot_mapping), self._gpu_direct_enabled)
+            key = self._request_key(request)
+            direct_ptrs: list[int] = []
+            direct_sizes: list[int] = []
+            cpu_layers: list[tuple[str, torch.Tensor]] = []
             for layer_name, layer in forward_context.no_compile_layers.items():
                 kv_cache_attr = getattr(layer, "kv_cache", None)
                 if kv_cache_attr is None:
                     continue
                 kv_cache_layer = kv_cache_attr[forward_context.virtual_engine]
-                key = self._object_key(layer_name, request.token_ids,
-                                       request.mm_hashes)
                 if self._gpu_direct_enabled:
-                    self._load_direct(key, kv_cache_layer, request, attn_metadata)
+                    self._maybe_register_for_direct_read(kv_cache_layer, key)
+                    ptrs, sizes = self._block_buffer_vectors(
+                        kv_cache_layer, request, attn_metadata
+                    )
+                    direct_ptrs.extend(ptrs)
+                    direct_sizes.extend(sizes)
                 else:
-                    self._load_cpu_fallback(key, kv_cache_layer, request,
-                                            attn_metadata)
+                    cpu_layers.append((layer_name, kv_cache_layer))
+
+            if self._gpu_direct_enabled:
+                if not direct_ptrs:
+                    continue
+                results = self._store.batch_get_into_multi_buffers(
+                    [key], [direct_ptrs], [direct_sizes], False
+                )
+                if len(results) != 1 or results[0] != 0:
+                    raise RuntimeError(
+                        f"Mooncake batch_get_into_multi_buffers failed key={key} "
+                        f"results={results}"
+                    )
+                logger.info(
+                    "Mooncake Store GET direct request key=%s bytes=%d "
+                    "buffers=%d",
+                    key,
+                    sum(direct_sizes),
+                    len(direct_ptrs),
+                )
+                continue
+
+            if not cpu_layers:
+                continue
+            payload = self._store.get(key)
+            if payload is None:
+                raise RuntimeError(f"Mooncake Store GET returned None: {key}")
+            tensors = safetensors_load(payload)
+            for layer_name, kv_cache_layer in cpu_layers:
+                tensor_key = self._cpu_layer_key(layer_name)
+                if tensor_key not in tensors:
+                    raise RuntimeError(
+                        f"Mooncake Store GET payload missing layer={layer_name} "
+                        f"key={key}"
+                    )
+                self._inject_kv_into_layer(
+                    kv_cache_layer,
+                    tensors[tensor_key].to(device=kv_cache_layer.device),
+                    request.slot_mapping,
+                    attn_metadata,
+                )
+            logger.info(
+                "Mooncake Store GET cpu request key=%s bytes=%d layers=%d",
+                key,
+                len(payload),
+                len(cpu_layers),
+            )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
@@ -356,16 +420,73 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         for request in connector_metadata.requests:
             if not request.is_store:
                 continue
-            key = self._object_key(layer_name, request.token_ids,
-                                   request.mm_hashes)
+            key = self._request_key(request)
+            pending = self._pending_saves.get(key)
+            if pending is None:
+                pending = PendingSave(request=request)
+                self._pending_saves[key] = pending
+            if layer_name in pending.seen_layers:
+                continue
+            pending.seen_layers.add(layer_name)
             if self._gpu_direct_enabled:
-                self._save_direct(key, kv_layer, request, attn_metadata)
+                ptrs, sizes = self._block_buffer_vectors(
+                    kv_layer, request, attn_metadata
+                )
+                pending.ptrs.extend(ptrs)
+                pending.sizes.extend(sizes)
             else:
-                self._save_cpu_fallback(key, kv_layer, request, attn_metadata)
-            self._put_marker(request.token_ids, request.mm_hashes)
+                kv_cache = self._extract_kv_from_layer(
+                    kv_layer, request.slot_mapping, attn_metadata
+                )
+                pending.cpu_layers[layer_name] = (
+                    kv_cache.detach().cpu().contiguous()
+                )
 
     def wait_for_save(self) -> None:
-        return
+        pending_saves = list(self._pending_saves.items())
+        self._pending_saves.clear()
+        for key, pending in pending_saves:
+            if self._gpu_direct_enabled:
+                if not pending.ptrs:
+                    continue
+                results = self._store.batch_put_from_multi_buffers(
+                    [key], [pending.ptrs], [pending.sizes], self._replicate_config
+                )
+                if len(results) != 1 or results[0] != 0:
+                    raise RuntimeError(
+                        f"Mooncake batch_put_from_multi_buffers failed key={key} "
+                        f"results={results}"
+                    )
+                total_bytes = sum(pending.sizes)
+                logger.info(
+                    "Mooncake Store PUT direct request key=%s bytes=%d "
+                    "buffers=%d layers=%d",
+                    key,
+                    total_bytes,
+                    len(pending.ptrs),
+                    len(pending.seen_layers),
+                )
+            else:
+                if not pending.cpu_layers:
+                    continue
+                payload = safetensors_save(
+                    {
+                        self._cpu_layer_key(layer_name): tensor
+                        for layer_name, tensor in pending.cpu_layers.items()
+                    }
+                )
+                status = self._put(key, payload)
+                if status != 0:
+                    raise RuntimeError(
+                        f"Mooncake Store PUT failed key={key} rc={status}"
+                    )
+                logger.info(
+                    "Mooncake Store PUT cpu request key=%s bytes=%d layers=%d",
+                    key,
+                    len(payload),
+                    len(pending.cpu_layers),
+                )
+            self._put_marker(pending.request.token_ids, pending.request.mm_hashes)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -386,6 +507,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
                     )
         self._registered_gpu_buffers.clear()
         self._known_gpu_storages.clear()
+        self._pending_saves.clear()
 
     def __del__(self):
         try:
@@ -478,49 +600,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         return False, None
 
-    def _save_direct(
-        self,
-        key: str,
-        kv_layer: torch.Tensor,
-        request: ReqMeta,
-        attn_metadata: AttentionMetadata,
-    ) -> None:
-        ptrs, sizes = self._block_buffer_vectors(kv_layer, request, attn_metadata)
-        if not ptrs:
-            return
-        results = self._store.batch_put_from_multi_buffers(
-            [key], [ptrs], [sizes], self._replicate_config
-        )
-        if len(results) != 1 or results[0] != 0:
-            raise RuntimeError(
-                f"Mooncake batch_put_from_multi_buffers failed key={key} "
-                f"results={results}"
-            )
-        logger.info("Mooncake Store PUT direct key=%s bytes=%d buffers=%d",
-                    key, sum(sizes), len(ptrs))
-
-    def _load_direct(
-        self,
-        key: str,
-        kv_layer: torch.Tensor,
-        request: ReqMeta,
-        attn_metadata: AttentionMetadata,
-    ) -> None:
-        self._maybe_register_for_direct_read(kv_layer, key)
-        ptrs, sizes = self._block_buffer_vectors(kv_layer, request, attn_metadata)
-        if not ptrs:
-            return
-        results = self._store.batch_get_into_multi_buffers(
-            [key], [ptrs], [sizes], False
-        )
-        if len(results) != 1 or results[0] != 0:
-            raise RuntimeError(
-                f"Mooncake batch_get_into_multi_buffers failed key={key} "
-                f"results={results}"
-            )
-        logger.info("Mooncake Store GET direct key=%s bytes=%d buffers=%d",
-                    key, sum(sizes), len(ptrs))
-
     def _maybe_register_for_direct_read(self, tensor: torch.Tensor,
                                         label: str) -> None:
         register_buffer = getattr(self._store, "register_buffer", None)
@@ -582,39 +661,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
                 sizes.append(block_bytes * len(group))
         return ptrs, sizes
 
-    def _save_cpu_fallback(
-        self,
-        key: str,
-        kv_layer: torch.Tensor,
-        request: ReqMeta,
-        attn_metadata: AttentionMetadata,
-    ) -> None:
-        kv_cache = self._extract_kv_from_layer(kv_layer, request.slot_mapping,
-                                               attn_metadata)
-        payload = safetensors_save(
-            {"kv_cache": kv_cache.detach().cpu().contiguous()}
-        )
-        status = self._put(key, payload)
-        if status != 0:
-            raise RuntimeError(f"Mooncake Store PUT failed key={key} rc={status}")
-        logger.info("Mooncake Store PUT cpu key=%s bytes=%d", key, len(payload))
-
-    def _load_cpu_fallback(
-        self,
-        key: str,
-        kv_layer: torch.Tensor,
-        request: ReqMeta,
-        attn_metadata: AttentionMetadata,
-    ) -> None:
-        payload = self._store.get(key)
-        if payload is None:
-            raise RuntimeError(f"Mooncake Store GET returned None: {key}")
-        tensors = safetensors_load(payload)
-        kv_cache = tensors["kv_cache"].to(device=kv_layer.device)
-        self._inject_kv_into_layer(kv_layer, kv_cache, request.slot_mapping,
-                                   attn_metadata)
-        logger.info("Mooncake Store GET cpu key=%s bytes=%d", key, len(payload))
-
     def _put(self, key: str, value: bytes) -> int:
         if self._replicate_config is None:
             return self._store.put(key, value)
@@ -622,6 +668,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
             return self._store.put(key, value, self._replicate_config)
         except TypeError:
             return self._store.put(key, value)
+
+    def _request_key(self, request: ReqMeta) -> str:
+        return self._object_key(
+            "__all_layers__", request.token_ids, request.mm_hashes
+        )
+
+    def _cpu_layer_key(self, layer_name: str) -> str:
+        digest = safe_hash(
+            layer_name.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()
+        return f"layer_{digest}"
 
     def _put_marker(self, token_ids: torch.Tensor, mm_hashes: list[str]) -> None:
         marker_key = self._marker_key(token_ids, mm_hashes)
@@ -657,7 +714,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
             return False
 
     def _marker_key(self, token_ids: torch.Tensor, mm_hashes: list[str]) -> str:
-        return self._object_key("__marker__", token_ids, mm_hashes)
+        return self._object_key("__marker__v2", token_ids, mm_hashes)
 
     def _object_key(
         self,
@@ -704,5 +761,3 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         dst = dst_kv_cache_layer.reshape(2, num_pages * page_size, -1)
         dst[:, slot_mapping, ...] = src_kv_cache
         dst.reshape(dst_shape)
-
-

@@ -7,17 +7,17 @@ This document describes how to build and use Mooncake with Kunpeng UB (Unified B
 UB (Unified Bus) is a transport protocol at the same abstraction layer as RDMA, CXL, NVLink, and TCP, providing a flexible transport solution that can be selected at the application layer. Currently, UB protocol has two open-source implementations:
 
 - **URMA (Unified Remote Memory Access)**: Provides a unified programming abstraction and core semantic layer for upper-layer applications. It offers unified APIs and semantic interfaces for remote shared memory access and operations, leveraging the low-latency, high-bandwidth characteristics of the UB protocol.
-  - URMA open-source repository: https://atomgit.com/openeuler/umdk
+  - [URMA open-source repository](https://atomgit.com/openeuler/umdk)
 
 - **OBMM (Ownership Based Memory Management)**: A kernel memory management system for supernode environments, supporting cross-node physical memory sharing. It provides efficient remote memory access capabilities through a kernel module (obmm.ko) and a user-space library (libobmm.so).
-  - OBMM open-source repository: https://atomgit.com/openeuler/obmm
+  - [OBMM open-source repository](https://atomgit.com/openeuler/obmm)
 
 ## Prerequisites
 
 ### 1. Hardware and Operating System
 
-- **Hardware Platform**: Kunpeng 950 CPU with native UB interconnect architecture
-- **OS Version**: openEuler 24.03 (LTS-SP3) [Download link](https://www.openeuler.openatom.cn/zh/download/#openEuler%2024.03%20LTS%20SP3)
+- **Hardware Platform**: Kunpeng 950 CPU with native UB interconnect architecture.
+- **OS Version**: openEuler 24.03 (LTS-SP3) [Download link](https://www.openeuler.openatom.cn/zh/download/#openEuler%2024.03%20LTS%20SP3).
 
 ### 2. URMA Dependencies
 
@@ -215,17 +215,17 @@ export MC_LOCAL_SERVER_NAME=127.0.0.1:12345  # default
 
 ### Key Components
 
-1. **UbTransport**: The main transport class that manages URMA resources and endpoints
-2. **UrmaContext**: Represents a URMA device context, handling device initialization and resource management
-3. **UrmaEndpoint**: Represents a connection to a remote peer, handling data transfer operations
-4. **mock_urma_api.cpp**: Mock implementation of URMA API for testing without real URMA hardware
+1. **UbTransport**: The main transport class that manages URMA resources and endpoints.
+2. **UrmaContext**: Represents a URMA device context, handling device initialization and resource management.
+3. **UrmaEndpoint**: Represents a connection to a remote peer, handling data transfer operations.
+4. **mock_urma_api.cpp**: Mock implementation of URMA API for testing without real URMA hardware.
 
 ### Protocol Advantages
 
-- **Optimized for Kunpeng**: URMA is specifically optimized for Kunpeng chip on-chip interconnect
-- **RDMA-like Semantics**: Provides similar memory semantics to RDMA
-- **High Performance**: Leverages UB's low-latency, high-bandwidth characteristics
-- **Unified Abstraction**: Offers a unified programming model for remote memory access
+- **Optimized for Kunpeng**: URMA is specifically optimized for Kunpeng chip on-chip interconnect.
+- **RDMA-like Semantics**: Provides similar memory semantics to RDMA.
+- **High Performance**: Leverages UB's low-latency, high-bandwidth characteristics.
+- **Unified Abstraction**: Offers a unified programming model for remote memory access.
 
 ## Troubleshooting
 
@@ -291,3 +291,9 @@ export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
 Kunpeng UB Transport provides a high-performance, optimized transport solution for Mooncake on Kunpeng 950 CPU platforms. By leveraging the UB protocol's low-latency and high-bandwidth characteristics, it offers comparable performance to RDMA while being specifically tailored for Kunpeng chip architectures.
 
 With proper configuration and tuning, UB Transport can significantly improve the performance of distributed AI workloads, particularly for scenarios involving large-scale parameter transfers and distributed training.
+
+## Change History
+
+|Version | Date | Description |
+|------- | -------|----------|
+|01 | 2026-09-30 | This is the first official release.|

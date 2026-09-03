@@ -142,6 +142,7 @@ class SpdkWrapper {
     void ReplenishProbeRequestContextPoolLocked(size_t count);
     int InitializeHostScratch();
     int InitializeGpuScratch(int cuda_device_id);
+    void CleanupInternal(bool release_env);
     void CleanupGpuScratch();
     void ReleaseHostScratchSlot(size_t slot_index);
     void ReleaseGpuScratchSlot(size_t slot_index);
@@ -149,6 +150,9 @@ class SpdkWrapper {
 
     std::atomic<bool> initialized{false};
     std::mutex init_mutex;
+    bool initialization_failed_{false};
+    int initialization_error_{0};
+    bool env_acquired_{false};
     std::map<std::string, std::unique_ptr<ctrlr_info>> connected_ctrlrs;
     std::mutex ctrlrs_mutex;
     std::map<std::string, std::unique_ptr<ProbeBuffer>> probe_buffers_;

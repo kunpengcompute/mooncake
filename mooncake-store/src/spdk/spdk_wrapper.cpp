@@ -51,6 +51,62 @@ bool ParseEnvBool(const char *name, bool *out) {
     return true;
 }
 
+struct ProcessSpdkEnvironment {
+    std::mutex mutex;
+    bool init_attempted{false};
+    bool env_initialized{false};
+    bool fini_called{false};
+    size_t users{0};
+    int init_result{0};
+
+    int Acquire(const struct spdk_env_opts *opts, bool *did_init) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (did_init != nullptr) {
+            *did_init = false;
+        }
+
+        if (init_attempted) {
+            if (!env_initialized || fini_called) {
+                return init_result != 0 ? init_result : -ESHUTDOWN;
+            }
+            ++users;
+            return 0;
+        }
+
+        init_attempted = true;
+        if (did_init != nullptr) {
+            *did_init = true;
+        }
+        init_result = spdk_env_init(opts);
+        if (init_result != 0) {
+            return init_result;
+        }
+
+        env_initialized = true;
+        users = 1;
+        return 0;
+    }
+
+    void Release() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (users == 0) {
+            return;
+        }
+
+        --users;
+        if (users == 0 && env_initialized && !fini_called) {
+            spdk_env_fini();
+            fini_called = true;
+        }
+    }
+};
+
+ProcessSpdkEnvironment &GetProcessSpdkEnvironment() {
+    static ProcessSpdkEnvironment *environment =
+        new ProcessSpdkEnvironment();
+    return *environment;
+}
+
 void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
     uint64_t v = 0;
     bool bv = false;
@@ -132,6 +188,12 @@ bool SpdkWrapper::InitializeEnv(const std::string &app_name) {
     if (initialized.load(std::memory_order_acquire)) {
         return true;
     }
+    if (initialization_failed_) {
+        LOG(ERROR) << "SPDK environment initialization is unavailable after "
+                      "a previous failure, rc="
+                   << initialization_error_;
+        return false;
+    }
 
     struct spdk_env_opts opts;
     spdk_env_opts_init(&opts);
@@ -144,11 +206,22 @@ bool SpdkWrapper::InitializeEnv(const std::string &app_name) {
                    : "mooncake");
     opts.name = resolved_name.c_str();
 
-    int rc = spdk_env_init(&opts);
+    bool did_init = false;
+    int rc = GetProcessSpdkEnvironment().Acquire(&opts, &did_init);
     if (rc != 0) {
-        fprintf(stderr, "SPDK init failed: %d\n", rc);
+        if (did_init) {
+            fprintf(stderr, "SPDK init failed: %d\n", rc);
+        } else {
+            LOG(ERROR) << "SPDK environment initialization is unavailable, "
+                          "cached rc="
+                       << rc;
+        }
+        initialization_failed_ = true;
+        initialization_error_ = rc;
         return false;
     }
+
+    env_acquired_ = true;
 
     // Mark SPDK as initialized.
     initialized.store(true, std::memory_order_release);
@@ -165,8 +238,9 @@ bool SpdkWrapper::InitializeEnv(const std::string &app_name) {
         if (rc != 0) {
             LOG(ERROR) << "Failed to create SPDK GPU dma-buf domain, rc="
                        << rc;
-            spdk_env_fini();
-            initialized.store(false, std::memory_order_release);
+            CleanupInternal(false);
+            initialization_failed_ = true;
+            initialization_error_ = rc;
             return false;
         }
         LOG(INFO) << "SPDK GPU dma-buf domain enabled, cuda_device_id="
@@ -176,7 +250,9 @@ bool SpdkWrapper::InitializeEnv(const std::string &app_name) {
         if (rc != 0) {
             LOG(ERROR) << "Failed to initialize NoF GPU scratch pool, rc="
                        << rc;
-            Cleanup();
+            CleanupInternal(false);
+            initialization_failed_ = true;
+            initialization_error_ = rc;
             return false;
         }
     }
@@ -184,14 +260,21 @@ bool SpdkWrapper::InitializeEnv(const std::string &app_name) {
     rc = InitializeHostScratch();
     if (rc != 0) {
         LOG(ERROR) << "Failed to initialize NoF host scratch pool, rc=" << rc;
-        Cleanup();
+        CleanupInternal(false);
+        initialization_failed_ = true;
+        initialization_error_ = rc;
         return false;
     }
     return true;
 }
 
 void SpdkWrapper::Cleanup() {
-    if (initialized.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(init_mutex);
+    CleanupInternal(true);
+}
+
+void SpdkWrapper::CleanupInternal(bool release_env) {
+    if (initialized.load(std::memory_order_acquire) || env_acquired_) {
         CleanupGpuScratch();
         {
             std::lock_guard<std::mutex> lock(gpu_dmabuf_mutex_);
@@ -248,7 +331,10 @@ void SpdkWrapper::Cleanup() {
             host_scratch_slot_size_ = 0;
             host_scratch_read_slot_count_ = 0;
         }
-        spdk_env_fini();
+        if (release_env && env_acquired_) {
+            GetProcessSpdkEnvironment().Release();
+            env_acquired_ = false;
+        }
         initialized.store(false, std::memory_order_release);
     }
 }

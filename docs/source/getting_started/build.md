@@ -3,18 +3,23 @@
 This document describes how to build Mooncake.
 
 ## PyPI Package
+
 Install the Mooncake Transfer Engine package from PyPI, which includes both Mooncake Transfer Engine and Mooncake Store Python bindings:
 
 **For CUDA-enabled systems:**
+
 ```bash
 pip install mooncake-transfer-engine
 ```
+
 📦 **Package Details**: [https://pypi.org/project/mooncake-transfer-engine/](https://pypi.org/project/mooncake-transfer-engine/)
 
 **For non-CUDA systems:**
+
 ```bash
 pip install mooncake-transfer-engine-non-cuda
 ```
+
 📦 **Package Details**: [https://pypi.org/project/mooncake-transfer-engine-non-cuda/](https://pypi.org/project/mooncake-transfer-engine-non-cuda/)
 
 > **Note**: The CUDA version includes Mooncake-EP and GPU topology detection, requiring CUDA 12.1+. The non-CUDA version is for environments without CUDA dependencies.
@@ -22,24 +27,30 @@ pip install mooncake-transfer-engine-non-cuda
 ## Automatic
 
 ### Recommended Version
+
 - OS: Ubuntu 22.04 LTS+
 - cmake: 3.20.x
 - gcc: 9.4+
 
 ### Steps
+
 1. Install dependencies, stable Internet connection is required:
+
    ```bash
    bash dependencies.sh
    ```
 
 2. In the root directory of this project, run the following commands:
+
    ```bash
    mkdir build
    cd build
    cmake ..
    make -j
    ```
+
 3. Install Mooncake python package and mooncake_master executable
+
    ```bash
    sudo make install
    ```
@@ -47,6 +58,7 @@ pip install mooncake-transfer-engine-non-cuda
 ## Manual
 
 ### Recommended Version
+
 - cmake: 3.22.x
 - boost-devel: 1.66.x
 - googletest: 1.12.x
@@ -58,6 +70,7 @@ pip install mooncake-transfer-engine-non-cuda
 ### Steps
 
 1. Install dependencies from system software repository:
+
     ```bash
     # For debian/ubuntu
     apt-get install -y build-essential \
@@ -92,28 +105,32 @@ pip install mooncake-transfer-engine-non-cuda
     ```
 
     NOTE: You may need to install gtest, glog, gflags from source code:
+
     ```bash
     git clone https://github.com/gflags/gflags
     git clone https://github.com/google/glog
     git clone https://github.com/abseil/googletest.git
     ```
 
-2. If you want to compile the GPUDirect support module, first follow the instructions in https://docs.nvidia.com/cuda/cuda-installation-guide-linux/ to install CUDA (ensure to enable `nvidia-fs` for proper `cuFile` module compilation). After that:
-    1) Follow Section 3.7 in https://docs.nvidia.com/cuda/gpudirect-rdma/ to install `nvidia-peermem` for enabling GPU-Direct RDMA
+2. If you want to compile the GPUDirect support module, first follow the instructions in <https://docs.nvidia.com/cuda/cuda-installation-guide-linux/> to install CUDA (ensure to enable `nvidia-fs` for proper `cuFile` module compilation). After that:
+    1) Follow Section 3.7 in <https://docs.nvidia.com/cuda/gpudirect-rdma/> to install `nvidia-peermem` for enabling GPU-Direct RDMA
     2) Configure `LIBRARY_PATH` and `LD_LIBRARY_PATH` to ensure linking of `cuFile`, `cudart`, and other libraries during compilation:
+
     ```bash
     export LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
     ```
 
-3. If you want to compile the Moore Mthreads GPUDirect support module, first follow the instructions in https://docs.mthreads.com/musa-sdk/musa-sdk-doc-online/install_guide to install MUSA. After that:
+3. If you want to compile the Moore Mthreads GPUDirect support module, first follow the instructions in <https://docs.mthreads.com/musa-sdk/musa-sdk-doc-online/install_guide> to install MUSA. After that:
     1) Install `mthreads-peermem` for enabling GPU-Direct RDMA
     2) Configure `LIBRARY_PATH` and `LD_LIBRARY_PATH` to ensure linking of `musart`, and other libraries during compilation:
+
     ```bash
     export LIBRARY_PATH=$LIBRARY_PATH:/usr/local/musa/lib
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/musa/lib
 
 4. Install yalantinglibs
+
     ```bash
     git clone https://github.com/alibaba/yalantinglibs.git
     cd yalantinglibs
@@ -124,6 +141,7 @@ pip install mooncake-transfer-engine-non-cuda
     ```
 
 5. In the root directory of this project, run the following commands:
+
    ```bash
    mkdir build
    cd build
@@ -132,11 +150,13 @@ pip install mooncake-transfer-engine-non-cuda
    ```
 
 6. Install Mooncake python package and mooncake_master executable
+
    ```bash
    make install
    ```
 
 ## Use Mooncake in Docker Containers
+
 Mooncake supports Docker-based deployment. What you need is to get Docker image by `docker pull alogfans/mooncake`.
 For the container to use the host's network resources, you need to add the `--device` option when starting the container. The following is an example.
 
@@ -149,7 +169,9 @@ cd /Mooncake-main/build/mooncake-transfer-engine/example
 ```
 
 ## Advanced Compile Options
+
 The following options can be used during `cmake ..` to specify whether to compile certain components of Mooncake.
+
 - `-DUSE_CUDA=[ON|OFF]`: Enable GPU Direct RDMA and NVMe-of support
 - `-DUSE_MUSA=[ON|OFF]`: Enable Moore Threads GPU support via MUSA
 - `-DUSE_HIP=[ON|OFF]`: Enable AMD GPU support via HIP/ROCm

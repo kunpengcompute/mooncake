@@ -42,11 +42,11 @@ In practical deployment, Mooncake aggregates memory across the entire cluster in
 
 **Cluster Deployment:**
 The benchmark was conducted across a 3-node cluster connected via eRDMA:
+
 - Machine A: SGLang server, Mooncake master service, Mooncake client (30GB memory)
 - Machine B: Mooncake client (60GB memory)  
 - Machine C: Mooncake client (60GB memory)
 - Total Distributed Memory Pool: 150GB
-
 
 **Benchmark Script:**
 

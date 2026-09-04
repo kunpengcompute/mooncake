@@ -47,6 +47,7 @@ Data prefetching is one of HiCache’s core optimization techniques, designed to
 **Multithreading and Asynchronous Computation:** Data prefetching is implemented using multithreading and asynchronous computation to improve efficiency. HiCache employs a two-thread pipeline that continuously processes prefetch requests. The `prefetch_thread_func` thread continuously queries the L3 backend to determine the hit prefix length for each request. Meanwhile, the `prefetch_io_aux_func` thread continuously submits requests whose hit rates exceed the threshold to the L3 backend for execution. For the submitted requests, **Mooncake** uses RDMA to read data in parallel from multiple remote storage nodes. This design enables efficient and high-speed data prefetching.
 
 **Prefetch Strategies**: Prefetching operations face a fundamental challenge of timing uncertainty: how long should we wait for the prefetch operation before proactively terminating it? The completion time of a prefetch depends on various factors, such as network conditions, storage backend load, and data size (determined by the model, configuration, and number of tokens to prefetch, etc.), making it difficult to predict accurately. If the waiting time is too long, prefill computation will be significantly delayed, hurting overall inference performance. Conversely, if the waiting time is too short, the prefetch operation may be terminated before completion, preventing the use of prefetched results and wasting computation and I/O overhead. To address these issues, HiCache provides three distinct prefetch termination strategies, enabling flexible adaptation to different runtime scenarios:
+
 - **best_effort**: Terminates immediately when GPU can execute prefill computation, with no waiting time, suitable for scenarios extremely sensitive to latency.
 - **wait_complete**: Must wait for all prefetch operations to complete, suitable for scenarios requiring high cache hit rates.
 - **timeout**: Terminates after specified time or when complete, balancing latency and cache hit rate needs.
@@ -93,6 +94,7 @@ For example, during prefetching, `all_reduce(op=min)` is used to ensure that all
 ## Data Transfer Optimization
 
 **Zero-Copy Data Transfers**: Both prefetching and write-back involve substantial data movement. Minimizing the number of data copies can significantly improve system performance:
+
 - HiCache supports passing memory addresses and sizes directly when transferring data from L2 memory to an L3 backend.
 - **Mooncake** provides zero-copy read and write interfaces, enabling fully zero-copy data transfers between L2 memory and RDMA. During prefetching, data can be directly read from remote memory into the target L2 memory via RDMA. During write-back, data in L2 can be directly written to the remote target address through RDMA, achieving a completely zero-copy data transfer process.
 

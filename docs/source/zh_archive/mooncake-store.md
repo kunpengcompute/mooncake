@@ -10,13 +10,13 @@ Mooncake Store 提供了底层的对象存储和管理能力，包括可配置�
 
 Mooncake Store 的主要特性包括：
 
-*   **对象级存储操作**：提供简单易用的对象级 API，包括 `Put`、`Get` 和 `Remove` 等操作，方便用户进行数据管理。
-*   **多副本支持**：支持为同一对象保存多个数据副本，有效缓解热点访问压力。保证同一对象的每个 slice 被放置在不同的 segment 中，不同对象的 slice 可以共享 segment。采用尽力而为的副本分配策略。
-*   **强一致性**：Mooncake Store 保证 `Get` 操作始终返回正确且完整的数据。一旦一个对象成功 `Put`，它在被删除之前保持不可变，从而确保所有后续的 `Get` 请求都能获取到最新的值。
-*   **零拷贝、高带宽利用**：由 Transfer Engine 提供支持, 数据链路零拷贝，对大型对象进行条带化和并行 I/O 传输，充分利用多网卡聚合带宽，实现高速数据读写。
-*   **动态资源伸缩**：支持动态添加和删除节点，灵活应对系统负载变化，实现资源的弹性管理。
-*   **容错能力**: 任意数量的 master 节点和 client 节点故障都不会导致读取到错误数据。只要至少有一个 master 和一个 client 处于正常运行状态，Mooncake Store 就能继续正常工作并对外提供服务。
-*   **分级缓存**: 支持将 RAM 中缓存数据卸载到 SSD 中，以进一步实现成本与性能间的平衡，提升存储系统的效率。
+* **对象级存储操作**：提供简单易用的对象级 API，包括 `Put`、`Get` 和 `Remove` 等操作，方便用户进行数据管理。
+* **多副本支持**：支持为同一对象保存多个数据副本，有效缓解热点访问压力。保证同一对象的每个 slice 被放置在不同的 segment 中，不同对象的 slice 可以共享 segment。采用尽力而为的副本分配策略。
+* **强一致性**：Mooncake Store 保证 `Get` 操作始终返回正确且完整的数据。一旦一个对象成功 `Put`，它在被删除之前保持不可变，从而确保所有后续的 `Get` 请求都能获取到最新的值。
+* **零拷贝、高带宽利用**：由 Transfer Engine 提供支持, 数据链路零拷贝，对大型对象进行条带化和并行 I/O 传输，充分利用多网卡聚合带宽，实现高速数据读写。
+* **动态资源伸缩**：支持动态添加和删除节点，灵活应对系统负载变化，实现资源的弹性管理。
+* **容错能力**: 任意数量的 master 节点和 client 节点故障都不会导致读取到错误数据。只要至少有一个 master 和一个 client 处于正常运行状态，Mooncake Store 就能继续正常工作并对外提供服务。
+* **分级缓存**: 支持将 RAM 中缓存数据卸载到 SSD 中，以进一步实现成本与性能间的平衡，提升存储系统的效率。
 
 ## 架构
 
@@ -25,7 +25,6 @@ Mooncake Store 的主要特性包括：
 如上图所示，Mooncake Store 中有两个关键组件：**Master Service** 和 **Client**。
 
 **Master Service**：`Master Service` 负责管理整个集群的逻辑存储空间池，并处理节点的加入与退出事件。它负责对象空间的分配以及元数据的维护。其内存分配与替换策略经过专门设计和优化，以满足大语言模型推理任务的需求。
-
 
 `Master Service` 作为一个独立进程运行，并向外部组件提供 RPC 服务。需要注意的是，`Transfer Engine` 所依赖的 `metadata service`（可通过 etcd、Redis 或 HTTP 等方式实现）不包含在 `Master Service` 中，需要单独部署。
 
@@ -45,6 +44,7 @@ Mooncake Store 的主要特性包括：
 2. **独立模式**：作为一个独立的进程运行。在此模式下，`Client` 被分为两个部分：一个 **虚拟**`Client` （dummy Client）和一个 **真实**`Client` （real Client）：**真实**`Client` 是一个全功能的实现，它作为一个独立的进程运行，并直接与其他 Mooncake Store 组件通信。它负责处理所有的 RPC 通信、内存管理和数据传输操作。**真实**`Client` 通常部署在为分布式缓存池贡献内存的节点上；**虚拟**`Client` 是一个轻量级的封装，它通过 RPC 调用将所有操作转发给一个本地的 **真实**`Client`，它专为需要将客户端嵌入到应用程序（如 vLLM）相同进程中，但实际的 Mooncake Store 操作又需要由一个独立进程处理的场景而设计。**虚拟**`Client` 和 **真实**`Client` 通过 RPC 调用和共享内存进行通信，以确保仍然可以实现零拷贝传输。
 
 Mooncake Store 支持两种部署方式，以满足不同的可用性需求：
+
 1. **默认模式**：在该模式下，master service 由单个 master 节点组成，部署方式较为简单，但存在单点故障的问题。如果 master 崩溃或无法访问，系统将无法继续提供服务，直到 master 恢复为止。
 2. **高可用模式（不稳定）**：在该模式下 master service 以多个 master 节点组成集群，并借助 etcd 集群进行协调，从而提升系统的容错能力。多个 master 节点使用 etcd 进行 leader 选举，由 leader 负责处理客户端请求。如果当前的 leader 崩溃或发生网络故障，其余 master 节点将自动进行新的 leader 选举，以确保服务的持续可用性。
 
@@ -63,12 +63,12 @@ ErrorCode Init(const std::string& local_hostname,
 ```
 
 初始化 Mooncake Store 客户端。其中各参数含义如下：
+
 - `local_hostname` 表示本机的 IP:Port 或者可访问的域名（若不含端口号则使用默认值）
 - `metadata_connstring` 表示 Transfer Engine 初始化所需的 etcd/redis 等元数据服务的地址
 - `protocol` 为 Transfer Engine 所支持的协议，包括rdma、tcp
 - `protocol_args` 是Transfer Engine 需要的协议参数
 - `master_server_entry` 表示 Master 的地址信息（默认模式为 `IP:Port`，高可用模式为 `etcd://IP:Port;IP:Port;...;IP:Port`）
-
 
 ### Get 接口
 
@@ -94,6 +94,7 @@ tl::expected<void, ErrorCode> Put(const ObjectKey& key,
 `Put` 将 `key` 对应的值存储到分布式内存池中。通过 `config` 参数，可以指定所需的副本数量以及优先选择哪个 segment 用于存储该值。当启用持久化功能时，`Put` 还会异步地将数据持久化到 SSD。
 
 **副本保证和尽力而为行为：**
+
 - 保证对象的每个slice被复制到不同的segment，确保分布在不同的存储节点上
 - 不同对象的slice可能被放置在同一个segment中
 - 副本采用尽力而为的方式运行：如果没有足够的空间来分配所有请求的副本，对象仍将被写入，副本数量为实际能够分配的数量
@@ -143,6 +144,7 @@ BatchReplicaClear(const std::vector<std::string>& object_keys,
 ```
 
 用于批量清除属于特定 Client ID 的多个对象 key 的副本。此接口允许清除特定 segment 上的副本或所有 segment 上的副本。如果 segment_name 为空，将清除指定对象的所有副本（对象将被完全删除）。如果提供了 segment_name，则只清除位于该特定 segment 上的副本。此操作在主服务器上执行，并返回成功清除的对象 key 列表。只有属于指定 client_id、租约已过期且满足清除条件的对象才会被处理。
+
 ### QueryByRegex
 
 ```C++
@@ -408,6 +410,7 @@ message UnMountSegmentResponse {
 空间需要释放时，通过该接口在`Master Service` 中把之前挂载的资源移除。
 
 #### 对象信息维护
+
 `Master Service` 需要维护与 buffer allocator 相关的映射关系和对象元数据等信息，在多副本场景下实现对内存资源的高效管理和副本状态的精确控制。此外，`Master Service` 使用读写锁保护关键数据结构，从而在多线程环境下保证数据的一致性与安全性。
 以下为`Master Service` 维护存储空间信息的接口：
 
@@ -613,6 +616,7 @@ struct ReplicateConfig {
 注意在开启该功能时，用户需要保证各client所在主机的DFS挂载目录都是有效且相同的（`root_fs_dir=/path/to/dir`），如果存在部分client挂载目录无效或错误，会导致mooncake store运行出现一些异常情况。
 
 #### 持久化存储空间配置
+
 mooncake提供了DFS可用空间的配置，用户可以在启动master时指定`--global_file_segment_size=100GB`，表示DFS上最大可用空间为100GB。
 当前默认设置为int64的最大值(因为我们一般不限制DFS的使用空间大小)，在`mooncake_maseter`的打屏日志中使用`infinite`表示最大值。
 
@@ -620,11 +624,13 @@ mooncake提供了DFS可用空间的配置，用户可以在启动master时指定
 **注意** 当前还没有提供DFS上文件驱逐的能力
 
 #### 数据访问机制
+
 持久化功能同样遵循了mooncake store中控制流和数据流分离的设计。kvcache object的读\写操作在client端完成，kvcache object的查询和管理功能在master端完成。在文件系统中key -> kvcache object的索引信息是由固定的索引机制维护，每个文件对应一个kvcache object（文件名即为对应的key名称）。 
 
 启用持久化功能后，对于每次 `Put`或`BatchPut` 操作，都会发起一次同步的memory pool写入操作和一次异步的DFS持久化操作。之后执行 `Get`或 `BatchGet` 时，如果在memory pool中没有找到对应的kvcache，则会尝试从DFS中读取该文件数据，并返回给用户。
 
 #### 3FS USRBIO 插件
+
 如需通过3FS原生接口（USRBIO）实现高性能持久化文件读写，请参阅本文档的配置说明。[3FS USRBIO 插件配置](/mooncake-store/src/hf3fs/README.md)。
 
 ### 内置元数据服务器
@@ -667,11 +673,12 @@ HTTP 元数据服务器可通过以下参数进行配置：
 
 **完整的 Python API 文档**: [https://kvcache-ai.github.io/Mooncake/python-api-reference/mooncake-store.html](https://kvcache-ai.github.io/Mooncake/python-api-reference/mooncake-store.html)
 
-
 ## 编译及使用方法
+
 Mooncake Store 与其它相关组件（Transfer Engine等）一同编译。
 
 默认模式:
+
 ```
 mkdir build && cd build
 cmake .. # 默认模式
@@ -680,6 +687,7 @@ sudo make install # 安装 Python 接口支持包
 ```
 
 高可用模式:
+
 ```
 mkdir build && cd build
 cmake .. -DSTORE_USE_ETCD # 编译 etcd 客户端接口封装模块，依赖 go
@@ -690,11 +698,13 @@ sudo make install # 安装 Python 接口支持包
 **注意：** 使用高可用模式只需要开启 `-DSTORE_USE_ETCD`。`-DUSE_ETCD` 是 **Transfer Engine** 的编译选项，与高可用模式**无关**。
 
 ### 启动 Transfer Engine 的 Metadata 服务
+
 Mooncake Store 使用 Transfer Engine 作为核心传输引擎，因此需要启动元数据服务（etcd/redis/http），`metadata` 服务的启动与配置可以参考[Transfer Engine](./transfer-engine/index.md)的有关章节。特别注意：对于 etcd 服务，默认仅为本地进程提供服务，需要修改监听选项（IP 为 0.0.0.0，而不是默认的 127.0.0.1）。可使用 curl 等指令验证正确性。
 
 ### 启动 Master Service
 
 Master Service 独立作为一个进程，对外提供 gRPC 接口，负责Mooncake Store 的元数据管理（注意Master Service 并不复用Transfer Engine 的Metadata服务），默认监听端口为 `50051`。在编译完成后，可直接运行位于 `build/mooncake-store/src/` 目录下的 `mooncake_master`。启动后，Master Service 会在日志中输出下列内容：
+
 ```
 Starting Mooncake Master Service
 Port: 50051
@@ -707,6 +717,7 @@ Master service listening on 0.0.0.0:50051
 高可用模式依赖于 etcd 服务进行协调。如果 Transfer Engine 也使用 etcd 作为其元数据服务，那么 Mooncake Store 使用的 etcd 集群可以与 Transfer Engine 使用的集群共用，也可以是独立的。
 
 高可用模式支持部署多个 master 实例，以消除单点故障。每个 master 实例启动时必须带上以下参数：
+
 ```
 --enable-ha：启用高可用模式
 --etcd-endpoints：指定 etcd 服务的多个入口，使用分号 ';' 分隔
@@ -714,6 +725,7 @@ Master service listening on 0.0.0.0:50051
 ```
 
 例如:
+
 ```
 ./build/mooncake-store/src/mooncake_master \
     --enable-ha=true \
@@ -722,18 +734,22 @@ Master service listening on 0.0.0.0:50051
 ```
 
 ### 启动验证程序
+
 Mooncake Store 提供了多种验证程序，包括基于 C++ 和 Python 等接口形态。下面以 `stress_cluster_benchmark` 为例介绍一下如何运行。
 
 1. 打开 `stress_cluster_benchmark.py`，结合网络情况修改初始化代码，重点是 local_hostname（对应本机 IP 地址）、metadata_server（对应 Transfer Engine 元数据服务）、master_server_address（对应 Master Service 地址及端口）等：
 
 打开 `stress_cluster_benchmark.py`，根据你的网络环境更新初始化设置。特别注意以下字段：
+
 ```
 local_hostname：本机的 IP 地址
 metadata_server：Transfer Engine 元数据服务的地址
 master_server_address：Master 服务的地址
 ```
+
 **注意**：`master_server_address` 的格式取决于部署模式。在默认模式下，使用格式 `IP:Port`，表示单个 master 节点的地址。在高可用模式下，使用格式 `etcd://IP:Port;IP:Port;...;IP:Port`，表示 etcd 集群各节点的地址。
 例如：
+
 ```python
 import os
 import time
@@ -806,7 +822,6 @@ retcode = store.setup(
 
 - **`threads`**: （整型, 默认: 1）: client 使用的线程数。
 
-
 ### 将 Client 作为独立进程启动并通过 HTTP 访问
 
 使用 `mooncake-wheel/mooncake/mooncake_store_service.py` 可以以独立进程的形式启动 **真实**`Client` 并通过 HTTP 访问。
@@ -833,11 +848,13 @@ retcode = store.setup(
 * `port`：HTTP 服务的端口号
 
 假设 `mooncake_transfer_engine` 的 wheel 包已经安装，通过下列命令可以启动程序：
+
 ```bash
 python -m mooncake.mooncake_store_service --config=[config_path] --port=8081
 ```
 
 ### 设置 yalantinglibs coro_rpc 和 coro_http的日志级别
+
 默认日志级别为 warning。你可以通过以下环境变量自定义日志级别：
 
 `export MC_YLT_LOG_LEVEL=info`
@@ -849,6 +866,7 @@ python -m mooncake.mooncake_store_service --config=[config_path] --port=8081
 ## 范例代码
 
 #### Python 使用示例
+
 我们提供一个参考样例 `distributed_object_store_provider.py`，其位于 `mooncake-store/tests` 目录下。为了检测相关组件是否正常安装，可在相同的服务器上后台运行 etcd、Master Service（`mooncake_master`）等两个服务，然后在前台执行该 Python 程序，此时应输出测试成功的结果。
 
 #### C++ 使用示例

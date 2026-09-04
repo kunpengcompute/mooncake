@@ -15,10 +15,13 @@ Ascend Transport supports the batch transfer interface batch_transfer_sync provi
 In addition to the dependencies already required by Mooncake, Ascend Transport needs some HCCL-related dependencies:
 
 **MPI**
+
 ```bash
 yum install -y mpich mpich-devel
 ```
+
 or
+
 ```bash
 apt-get install -y mpich libmpich-dev
 ```
@@ -63,6 +66,7 @@ Alternatively, you can copy the `.so` file to another path referenced by `$LD_LI
 
 5. **potential MPI Conflicts**:
    Concurrently installing MPI (typically MPICH) and OpenMPI may cause conflicts. If you encounter MPI-related issues, try running the following commands:
+
 ```bash
    sudo apt install mpich libmpich-dev
    sudo apt purge openmpi-bin libopenmpi-dev
@@ -93,6 +97,7 @@ Alternatively, you can copy the `.so` file to another path referenced by `$LD_LI
 ### Build Instructions
 
 Once all dependencies are installed successfully, you can proceed with building Mooncake normally. If errors occur, try setting the following environment variable:
+
 ```bash
 export CPLUS_INCLUDE_PATH=$(echo $CPLUS_INCLUDE_PATH | tr ':' '\n' | grep -v "/usr/local/Ascend" | paste -sd: -)
 ```
@@ -102,6 +107,7 @@ export CPLUS_INCLUDE_PATH=$(echo $CPLUS_INCLUDE_PATH | tr ':' '\n' | grep -v "/u
 Each Huawei NPU card has a dedicated parameter-plane NIC and should be managed by a single `TransferEngine` instance responsible for all its data transfers.
 
 ### Ranktable Management
+
 Ascend Transport does not rely on global Ranktable information. It only needs to obtain the local Ranktable information of the current NPU card. During the initialization of Ascend Transport, it will automatically parse the /etc/hccn.conf file to acquire this information.
 
 ### Initialization
@@ -140,9 +146,11 @@ Therefore, in testing:
 
 1. **Start the target node first**.  
    Watch the log produced by `mooncake-transfer-engine/src/transfer_engine.cpp`; you should see a line similar to  
+
    ```
    Transfer Engine RPC using <protocol> listening on <IP>:<actual-port>
    ```  
+
    Note the **actual port** the target node is listening on.
 
 2. **Edit the initiator’s launch command**:  
@@ -155,11 +163,13 @@ Refer to the command format shown below:
 #### Example Commands for Scenario Testing
 
 **Start Initiator Node:**
+
 ```bash
 ./transfer_engine_ascend_one_sided --metadata_server=P2PHANDSHAKE --local_server_name=10.0.0.0:12345 --protocol=hccl --operation=write --segment_id=10.0.0.0:12346 --device_id=0 --mode=initiator --block_size=8388608 --batch_size=32 
 ```
 
 **Start Target Node:**
+
 ```bash
 ./transfer_engine_ascend_one_sided --metadata_server=P2PHANDSHAKE --local_server_name=10.0.0.0:12346 --protocol=hccl --operation=write --device_id=1 --mode=target --block_size=8388608 --batch_size=32 
 ```
@@ -167,11 +177,13 @@ Refer to the command format shown below:
 #### Example Commands for Performance Testing
 
 **Start Initiator Node:**
+
 ```bash
 ./transfer_engine_ascend_perf --metadata_server=P2PHANDSHAKE --local_server_name=10.0.0.0:12345 --protocol=hccl --operation=write --segment_id=10.0.0.0:12346 --device_id=0 --mode=initiator --block_size=16384 --batch_size=32 --block_iteration=10
 ```
 
 **Start Target Node:**
+
 ```bash
 ./transfer_engine_ascend_perf --metadata_server=P2PHANDSHAKE --local_server_name=10.0.0.0:12346 --protocol=hccl --operation=write --device_id=1 --mode=target --batch_size=32 --block_iteration=10
 ```
@@ -181,16 +193,19 @@ Refer to the command format shown below:
 For example, if only device 5 and device 7 are mounted in the container, with device 5 as the initiator and device 7 as the receiver, the commands for multi-scenario use cases should be modified as follows:
 
 **Start the initiator node:**
+
 ```bash
 ./transfer_engine_ascend_one_sided --metadata_server=P2PHANDSHAKE --local_server_name=10.0.0.0:12345 --protocol=hccl --operation=write --segment_id=10.0.0.0:12346 --device_logicid=0 --device_phyid=5 --mode=initiator --block_size=8388608
 ```
 
 **Start the target node:**
+
 ```bash
 ./transfer_engine_ascend_one_sided --metadata_server=P2PHANDSHAKE --local_server_name=10.0.0.0:12346 --protocol=hccl --operation=write --device_logicid=1 --device_phyid=7 --mode=target --block_size=8388608
 ```
 
 ### Print Description
+
 If you need to obtain information about whether each transport request is cross-hccs and its corresponding execution time, you can enable the related logs by setting the environment variable. Use the following command to turn on the logging:
 
 ```bash
@@ -198,6 +213,7 @@ export ASCEND_TRANSPORT_PRINT=1
 ```
 
 ### Timeout Configuration
+
 Ascend Transport based on TCP for out-of-band communication, has a connection timeout configured via the environment variable `Ascend_TCP_TIMEOUT`, with a default value of 30 seconds. On the host side, the `recv` timeout is set to 30 seconds, meaning that if no message is received from the peer within 30 seconds, an error will be reported.
 
 The connection timeout for `hccl_socket` is configured through the environment variable `Ascend_HCCL_SOCKET_TIMEOUT`, with a default value of 30 seconds. If this timeout is exceeded, the current transmission will report an error and return.
@@ -207,19 +223,20 @@ The connection timeout for `hccl_socket` is configured through the environment v
 In `transport_mem`, the point-to-point communication between endpoints involves a connection handshake process, and its timeout is configured via `Ascend_TRANSPORT_MEM_TIMEOUT`, with a default value of 120 seconds.
 
 ### Error Code
+
 Ascend transport error codes reuse the HCCL collective communication transport error codes.
 typedef enum {
-    HCCL_SUCCESS = 0,       /* success */
+    HCCL_SUCCESS = 0,       /*success */
     HCCL_E_PARA = 1,        /* parameter error */
     HCCL_E_PTR = 2,         /* empty pointer, checking if operations like notifypool->reset are performed multiple times leading to pointer clearing */
     HCCL_E_MEMORY = 3,      /* memory error */
     HCCL_E_INTERNAL = 4,    /* Internal error. Common causes include:
                             * - Memory not registered
-                            * - Memory registration error
+                            *- Memory registration error
                             * - The starting address of the registered memory is not 2M aligned
-                            * - Memory not successfully swapped
+                            *- Memory not successfully swapped
                             * Check whether the memory to be transferred is within the range of registered memory.
-                            * In multi-machine scenarios, check whether the startup script is mixed used.
+                            *In multi-machine scenarios, check whether the startup script is mixed used.
                             */
     HCCL_E_NOT_SUPPORT = 5, /* feature not supported */
     HCCL_E_NOT_FOUND = 6,   /* specific resource not found */
@@ -239,5 +256,5 @@ typedef enum {
     HCCL_E_AGAIN = 20,        /* operation repeated, in some cases it is not an error. For example, registering the same memory multiple times will directly return the handle from the first registration. If it does not affect the functionality, it is considered successful */
     HCCL_E_REMOTE = 21,       /* error cqe */
     HCCL_E_SUSPENDING = 22,   /* error communicator suspending */
-    HCCL_E_RESERVED           /* reserved */
+    HCCL_E_RESERVED           /* reserved*/
 } HcclResult;

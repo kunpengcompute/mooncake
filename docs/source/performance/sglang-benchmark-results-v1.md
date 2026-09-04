@@ -4,6 +4,7 @@ We evaluated the current implementation on two A10 servers. By comparing the per
 Moreover, we anticipate even greater benefits in larger-scale clusters where both the number of prefill and decode nodes (x and y in xPyD configurations) increase, offering enhanced scheduling flexibility and resource efficiency.
 
 ## Traffic Request Rate: 1.0
+
 * model: Qwen2.5-7B-Instruct-GPTQ-Int4
 * TP: 4
 * random_input_len=8192, random_output_len=512
@@ -15,6 +16,7 @@ Moreover, we anticipate even greater benefits in larger-scale clusters where bot
 | 2 Regular      | 427.65                           | 4586.54               |7433.27                         | 767.18         | 1264.88       | 10.30         | 12.73        |
 
 ## Traffic Request Rate: 4.0
+
 * model: Qwen2.5-7B-Instruct-GPTQ-Int4
 * TP: 2
 * random_input_len=2048, random_output_len=512

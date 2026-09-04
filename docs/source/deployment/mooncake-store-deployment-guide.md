@@ -91,6 +91,7 @@ curl -s http://<master_host>:9003/metrics/summary
   - `MC_STORE_MEMCPY` (default `0`/false): Set to `1` to prefer local memcpy when source/destination are on the same client.
 
 ## Set the Log Level for yalantinglibs coro_rpc and coro_http
+
 By default, the log level is set to warning. You can customize it using the following environment variable:
 
 `export MC_YLT_LOG_LEVEL=info`

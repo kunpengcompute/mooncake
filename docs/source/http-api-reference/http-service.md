@@ -5,6 +5,7 @@ The Mooncake Store HTTP Service provides RESTful endpoints for cluster managemen
 ## Overview
 
 The HTTP service serves multiple purposes:
+
 - **Metrics & Monitoring**: Prometheus-compatible metrics endpoints
 - **Cluster Management**: Query and manage distributed storage segments
 - **Data Inspection**: Examine stored objects and their replicas
@@ -15,6 +16,7 @@ The HTTP service serves multiple purposes:
 ### Metrics Endpoints
 
 #### `/metrics`
+
 Prometheus-compatible metrics endpoint providing detailed system metrics in text format.
 
 **Method**: `GET`
@@ -22,11 +24,13 @@ Prometheus-compatible metrics endpoint providing detailed system metrics in text
 **Response**: Comprehensive metrics including request counts, error rates, latency statistics, and resource utilization
 
 **Example**:
+
 ```bash
 curl http://localhost:8080/metrics
 ```
 
 #### `/metrics/summary`
+
 Human-readable metrics summary with key performance indicators.
 
 **Method**: `GET`
@@ -34,6 +38,7 @@ Human-readable metrics summary with key performance indicators.
 **Response**: Condensed overview of system health and performance metrics
 
 **Example**:
+
 ```bash
 curl http://localhost:8080/metrics/summary
 ```
@@ -41,6 +46,7 @@ curl http://localhost:8080/metrics/summary
 ### Data Management Endpoints
 
 #### `/query_key`
+
 Retrieve replica information for a specific key, including memory locations and transport endpoints.
 
 **Method**: `GET`
@@ -49,11 +55,13 @@ Retrieve replica information for a specific key, including memory locations and 
 **Response**: JSON-formatted replica descriptors for memory replicas
 
 **Example**:
+
 ```bash
 curl "http://localhost:8080/query_key?key=my_object"
 ```
 
 **Response Format**:
+
 ```json
 {
   "transport_endpoint_": "hostname:port",
@@ -62,6 +70,7 @@ curl "http://localhost:8080/query_key?key=my_object"
 ```
 
 #### `/get_all_keys`
+
 List all keys currently stored in the distributed system.
 
 **Method**: `GET`
@@ -69,6 +78,7 @@ List all keys currently stored in the distributed system.
 **Response**: Newline-separated list of all stored keys
 
 **Example**:
+
 ```bash
 curl http://localhost:8080/get_all_keys
 ```
@@ -76,6 +86,7 @@ curl http://localhost:8080/get_all_keys
 ### Segment Management Endpoints
 
 #### `/get_all_segments`
+
 List all mounted segments in the cluster.
 
 **Method**: `GET`
@@ -83,11 +94,13 @@ List all mounted segments in the cluster.
 **Response**: Newline-separated list of segment names
 
 **Example**:
+
 ```bash
 curl http://localhost:8080/get_all_segments
 ```
 
 #### `/query_segment`
+
 Query detailed information about a specific segment, including used and available capacity.
 
 **Method**: `GET`
@@ -96,11 +109,13 @@ Query detailed information about a specific segment, including used and availabl
 **Response**: Multi-line text with segment details
 
 **Example**:
+
 ```bash
 curl "http://localhost:8080/query_segment?segment=segment_name"
 ```
 
 **Response Format**:
+
 ```
 segment_name
 Used(bytes): 1073741824
@@ -110,17 +125,19 @@ Capacity(bytes): 4294967296
 ### Health Check Endpoints
 
 #### `/health`
+
 Basic health check endpoint for service availability verification.
 
 **Method**: `GET`
 **Content-Type**: `text/plain; version=0.0.4`
 **Response**: `OK` when service is healthy
 **Status Codes**: 
+
 - `200 OK`: Service is healthy
 - Other: Service may be experiencing issues
 
 **Example**:
+
 ```bash
 curl http://localhost:8080/health
 ```
-

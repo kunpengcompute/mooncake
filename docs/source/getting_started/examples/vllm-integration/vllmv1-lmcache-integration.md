@@ -9,6 +9,7 @@ The vLLM v1 version has been released with support for PD disaggregation. The de
 1. First, you need to prepare two GPU-equipped machines, which we will refer to as Machine A and Machine B. Install [vLLM](https://docs.vllm.ai/en/latest/getting_started/quickstart.html), [Mooncake](https://kvcache-ai.github.io/Mooncake/getting_started/build.html) and [LMCache](https://docs.lmcache.ai/getting_started/installation.html) on both Machine A and Machine B. For specific installation instructions, please refer to the official documentation of each repository.
 
 2. Start the Mooncake Master node on Machine A:
+
 ```bash
 mooncake_master -port 50052 -max_threads 64 -metrics_port 9004 \
   --enable_http_metadata_server=true \
@@ -17,7 +18,9 @@ mooncake_master -port 50052 -max_threads 64 -metrics_port 9004 \
 ```
 
 3. Launch the Decoder instance on machine A
+
 - Modify the vllm/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_vllm_launcher.sh file.
+
 ```diff
 diff --git a/examples/lmcache/disagg_prefill_lmcache_v1/disagg_vllm_launcher.sh b/examples/lmcache/disagg_prefill_lmcache_v1/disagg_vllm_launcher.sh
 index 831ef0bb5..a2ff0744c 100644
@@ -35,7 +38,9 @@ index 831ef0bb5..a2ff0744c 100644
          VLLM_WORKER_MULTIPROC_METHOD=spawn \
          CUDA_VISIBLE_DEVICES=1 \
 ```
+
 - Add the `mooncake-decoder-config.yaml` file
+
 ```yaml
 chunk_size: 256
 remote_url: "mooncakestore://{IP of Machine A}:50052/"
@@ -56,12 +61,15 @@ extra_config:
 ```
 
 - Launch the Decoder instance using command 
+
 ```bash
 bash disagg_vllm_launcher.sh decoder Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4
 ```
 
 4. Launch the Prefiller instance on machine B
+
 - Modify the vllm/examples/others/lmcache/disagg_prefill_lmcache_v1/disagg_vllm_launcher.sh file.
+
 ```diff
 diff --git a/examples/lmcache/disagg_prefill_lmcache_v1/disagg_vllm_launcher.sh b/examples/lmcache/disagg_prefill_lmcache_v1/disagg_vllm_launcher.sh
 index 831ef0bb5..9e5a3f044 100644
@@ -76,6 +84,7 @@ index 831ef0bb5..9e5a3f044 100644
 ```
 
 - Add the `mooncake-prefiller-config.yaml` file
+
 ```yaml
 chunk_size: 256
 remote_url: "mooncakestore://{IP of Machine A}:50052/"
@@ -96,6 +105,7 @@ extra_config:
 ```
 
 - Launch the Prefiller instance using command 
+
 ```bash
 bash disagg_vllm_launcher.sh prefiller Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4
 ```

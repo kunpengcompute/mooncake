@@ -7,15 +7,19 @@ This document describes how to quickly start using Mooncake Transfer Engine and 
 Install the Mooncake Transfer Engine package from PyPI, which includes both Mooncake Transfer Engine and Mooncake Store Python bindings:
 
 **For CUDA-enabled systems:**
+
 ```bash
 pip install mooncake-transfer-engine
 ```
+
 📦 **Package Details**: [https://pypi.org/project/mooncake-transfer-engine/](https://pypi.org/project/mooncake-transfer-engine/)
 
 **For non-CUDA systems:**
+
 ```bash
 pip install mooncake-transfer-engine-non-cuda
 ```
+
 📦 **Package Details**: [https://pypi.org/project/mooncake-transfer-engine-non-cuda/](https://pypi.org/project/mooncake-transfer-engine-non-cuda/)
 
 > **Note**: The CUDA version includes Mooncake-EP and GPU topology detection, requiring CUDA 12.1+. The non-CUDA version is for environments without CUDA dependencies.
@@ -190,6 +194,7 @@ mooncake_master \
   --http_metadata_server_host=0.0.0.0 \
   --http_metadata_server_port=8080
 ```
+
 This exposes the metadata endpoint at `http://<host>:<port>/metadata`.
 
 ### Hello World Example

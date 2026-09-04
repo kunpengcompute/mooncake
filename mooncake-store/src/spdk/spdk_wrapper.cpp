@@ -211,6 +211,24 @@ uint64_t GetAdminPollIntervalMs() {
     return interval_ms;
 }
 
+uint64_t GetNamespaceRefreshTimeoutMs() {
+    static const uint64_t timeout_ms = [] {
+        uint64_t value = 1000;
+        ParseEnvU64("MC_SPDK_NOF_NAMESPACE_REFRESH_TIMEOUT_MS", &value);
+        return value;
+    }();
+    return timeout_ms;
+}
+
+uint64_t GetNamespaceRefreshPollIntervalMs() {
+    static const uint64_t interval_ms = [] {
+        uint64_t value = 10;
+        ParseEnvU64("MC_SPDK_NOF_NAMESPACE_REFRESH_POLL_INTERVAL_MS", &value);
+        return value;
+    }();
+    return interval_ms;
+}
+
 void FillProbePattern(void *buf, uint32_t size, const std::string &tr_str,
                       uint64_t seq) {
     if (!buf || size == 0) {
@@ -522,12 +540,22 @@ int32_t SpdkWrapper::NvmePollAdminCompletions(nof_seg_handle *seg) {
         return -ENXIO;
     }
 
+    return PollAdminCompletions(ctrlr, false);
+}
+
+int32_t SpdkWrapper::PollAdminCompletions(struct spdk_nvme_ctrlr *ctrlr,
+                                          bool force) {
+    if (!ctrlr) {
+        return -ENXIO;
+    }
+
     auto now = std::chrono::steady_clock::now();
     auto interval = std::chrono::milliseconds(GetAdminPollIntervalMs());
 
     std::lock_guard<std::mutex> lock(admin_poll_mutex_);
     auto it = last_admin_poll_.find(ctrlr);
-    if (it != last_admin_poll_.end() && now - it->second < interval) {
+    if (!force && it != last_admin_poll_.end() &&
+        now - it->second < interval) {
         return 0;
     }
 
@@ -541,6 +569,68 @@ int32_t SpdkWrapper::NvmePollAdminCompletions(nof_seg_handle *seg) {
                   << (trid ? trid->subnqn : "") << " completions=" << ret;
     }
     return ret;
+}
+
+bool SpdkWrapper::WaitForActiveNamespace(struct spdk_nvme_ctrlr *ctrlr,
+                                         uint32_t nsid,
+                                         const std::string &ctrlr_key,
+                                         int32_t *admin_error) {
+    if (admin_error) {
+        *admin_error = 0;
+    }
+    if (!ctrlr) {
+        if (admin_error) {
+            *admin_error = -ENXIO;
+        }
+        return false;
+    }
+    if (spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid)) {
+        return true;
+    }
+
+    const auto timeout =
+        std::chrono::milliseconds(GetNamespaceRefreshTimeoutMs());
+    const auto poll_interval = std::chrono::milliseconds(
+        GetNamespaceRefreshPollIntervalMs());
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    uint32_t poll_count = 0;
+
+    do {
+        ++poll_count;
+        int32_t ret = PollAdminCompletions(ctrlr, true);
+        if (ret < 0) {
+            if (admin_error) {
+                *admin_error = ret;
+            }
+            LOG(ERROR) << "refresh nof namespaces failed"
+                       << ", ctrlr_key=" << ctrlr_key
+                       << ", nsid=" << nsid
+                       << ", admin_ret=" << ret
+                       << ", poll_count=" << poll_count;
+            return false;
+        }
+        if (spdk_nvme_ctrlr_is_active_ns(ctrlr, nsid)) {
+            LOG(INFO) << "nof namespace became active after admin refresh"
+                      << ", ctrlr_key=" << ctrlr_key
+                      << ", nsid=" << nsid
+                      << ", poll_count=" << poll_count;
+            return true;
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        if (poll_interval.count() > 0) {
+            std::this_thread::sleep_for(poll_interval);
+        }
+    } while (true);
+
+    LOG(WARNING) << "nof namespace remains inactive after admin refresh"
+                 << ", ctrlr_key=" << ctrlr_key
+                 << ", nsid=" << nsid
+                 << ", timeout_ms=" << timeout.count()
+                 << ", poll_count=" << poll_count;
+    return false;
 }
 
 void SpdkWrapper::DropNofControllerLocked(const std::string &ctrlr_key,
@@ -715,11 +805,11 @@ int SpdkWrapper::ParseTransPortStr(const std::string &tr_str, tr_info *info) {
                       std::string(info->trid.subnqn) + "|" +
                       std::to_string(static_cast<int>(info->trid.trtype));
 
-    LOG(INFO) << "traddr:" << info->trid.traddr
-              << "trsvcid:" << info->trid.trsvcid
-              << "ns:" << info->ns
-              << "subnqn:" << info->trid.subnqn
-              << "trtype:" << info->trid.trtype;
+    VLOG(1) << "traddr:" << info->trid.traddr
+            << "trsvcid:" << info->trid.trsvcid
+            << "ns:" << info->ns
+            << "subnqn:" << info->trid.subnqn
+            << "trtype:" << info->trid.trtype;
     
     return 0;
 }
@@ -799,31 +889,50 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
                 return ns_seg[tr.ns];
             }
 
-            if (spdk_nvme_ctrlr_is_active_ns(info->ctrlr, tr.ns)) {
+            int32_t namespace_refresh_error = 0;
+            if (WaitForActiveNamespace(info->ctrlr, tr.ns, tr.ctrlr_key,
+                                       &namespace_refresh_error)) {
                 ns = spdk_nvme_ctrlr_get_ns(info->ctrlr, tr.ns);
             } else {
-                LOG(ERROR) << "spdk_nvme_ctrlr_is_active_ns failed";
+                LOG(ERROR) << "spdk_nvme_ctrlr_is_active_ns failed"
+                           << ", ctrlr_key=" << tr.ctrlr_key
+                           << ", nsid=" << tr.ns
+                           << ", admin_error=" << namespace_refresh_error;
+                if (IsConnectionError(namespace_refresh_error)) {
+                    should_retry = true;
+                } else {
+                    return nullptr;
+                }
+            }
+
+            if (!should_retry && !ns) {
+                LOG(ERROR) << "spdk_nvme_ctrlr_get_ns failed"
+                           << ", ctrlr_key=" << tr.ctrlr_key
+                           << ", nsid=" << tr.ns;
                 return nullptr;
             }
 
-            qpair = spdk_nvme_ctrlr_alloc_io_qpair(info->ctrlr, nullptr, 0);
-            if (!qpair) {
-                LOG(ERROR) << "alloc spdk_nvme_qpair failed"
-                           << ", ctrlr_key=" << tr.ctrlr_key
-                           << ", attempt=" << attempt;
-                should_retry = true;
-            } else {
-                seg_handle = new nof_seg_handle;
-                if (!seg_handle) {
-                    spdk_nvme_ctrlr_free_io_qpair(qpair);
-                    LOG(ERROR) << "alloc nof_seg_handle failed";
-                    return nullptr;
-                }
+            if (!should_retry) {
+                qpair =
+                    spdk_nvme_ctrlr_alloc_io_qpair(info->ctrlr, nullptr, 0);
+                if (!qpair) {
+                    LOG(ERROR) << "alloc spdk_nvme_qpair failed"
+                               << ", ctrlr_key=" << tr.ctrlr_key
+                               << ", attempt=" << attempt;
+                    should_retry = true;
+                } else {
+                    seg_handle = new nof_seg_handle;
+                    if (!seg_handle) {
+                        spdk_nvme_ctrlr_free_io_qpair(qpair);
+                        LOG(ERROR) << "alloc nof_seg_handle failed";
+                        return nullptr;
+                    }
 
-                seg_handle->qpair = qpair;
-                seg_handle->ns = ns;
-                ns_seg[tr.ns] = seg_handle;
-                return seg_handle;
+                    seg_handle->qpair = qpair;
+                    seg_handle->ns = ns;
+                    ns_seg[tr.ns] = seg_handle;
+                    return seg_handle;
+                }
             }
         }
 

@@ -985,5 +985,46 @@ stress_cluster_bench \
 
 # 7 mooncake性能信息
 
+## 日志采集分析工具
 使用脚本```Mooncake/mooncake-store/benchmarks/cluster_mooncake_diag.py```
 参考其中的使用方法，在对应脚本当中设置对应log日志，则可以进行读取。
+
+## Spdiag
+### SpDiag 简介
+
+SpDiag（SuperPoD Diagnostics）是一套面向超节点应用的性能诊断工具。该工具可实现代码段运行时长的记录与统计该工具可实现代码段运行时长的记录与统计，并结合 eBPF 与 perf_event 实现内存占用率监测与缓存命中率观测。
+
+### SpDiag 解决的问题
+
+当请求延迟升高，但还不知道时间花在计算、IO、锁等待还是某个处理阶段时，可以在关键路径加入命名 PerfPoint。SpDiag 会按点位汇总调用次数、成功/失败次数、总耗时以及平均、最小、最大耗时及P99/P999/P9999。
+
+PerfPoint 使用编译期定义的点位和共享内存分核写入，热路径不执行字符串查找、哈希查找或互斥锁操作。适合在高频路径中保留长期观测点。
+
+### SpDiag 使用指导
+
+开启 spdiag
+```
+spdiag start
+```
+查看 spdiag 数据
+```
+spdiag show
+```
+清除 spdiag 数据
+```
+spdiag clear
+```
+关闭 spdiag
+```
+spdiag stop
+```
+重启 spdiag
+```
+spdiag restart
+```
+### spdiag 输出示例
+```
+ #     Program           Module            Point                 Lvl          Ticks       Good         Bad           Not          Total(ns)       Avg(ns)       Min(ns)       Max(ns)       P99(ns)       P999(ns)      P9999(ns)   
+ ----  ----------------  ----------------  --------------------  ---------    --------    --------     --------      --------     --------------  ------------  ------------  ------------  ------------  ------------  ------------
+       项目名称           模块名            点位名                 点位level    总调用次数   成功调用次数  失败调用次数   异常返回次数   总耗时          平均耗时       最小耗时      最大耗时       P99耗时        P999耗时      P9999耗时
+ ```

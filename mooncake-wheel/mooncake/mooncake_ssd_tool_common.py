@@ -536,7 +536,6 @@ done"""
             ssh = self._ssh_connect(ip, self.username, self.password, self.key_file)
 
             try:
-                auto_discovered = not pci_devices
                 if not pci_devices:
                     pci_devices = self._discover_nvme_pci_devices(ssh)
                 else:
@@ -547,7 +546,7 @@ done"""
                 pci_devices = self._filter_spdk_ready_pci_devices(
                     ssh,
                     pci_devices,
-                    strict=not auto_discovered
+                    strict=False
                 )
                 self.logger.info(f"Target {ip} will expose PCI devices: {', '.join(pci_devices)}")
 

@@ -635,7 +635,10 @@ bool SpdkWrapper::WaitForActiveNamespace(struct spdk_nvme_ctrlr *ctrlr,
 
 void SpdkWrapper::DropNofControllerLocked(const std::string &ctrlr_key,
                                           bool detach) {
-    auto it = connected_ctrlrs.find(ctrlr_key);
+    // ctrlr_key may refer to connected_ctrlrs' map key. Keep a copy because
+    // this function erases that entry before it finishes logging/retiring it.
+    const std::string key = ctrlr_key;
+    auto it = connected_ctrlrs.find(key);
     if (it == connected_ctrlrs.end()) {
         return;
     }
@@ -661,7 +664,7 @@ void SpdkWrapper::DropNofControllerLocked(const std::string &ctrlr_key,
             seg->qpair = nullptr;
             seg->ns = nullptr;
             LOG(WARNING) << "invalidate nof segment handle"
-                         << ", ctrlr_key=" << ctrlr_key
+                         << ", ctrlr_key=" << key
                          << ", nsid=" << nsid;
         }
         info->ns_seg.clear();
@@ -683,12 +686,12 @@ void SpdkWrapper::DropNofControllerLocked(const std::string &ctrlr_key,
         info->ctrlr = nullptr;
         delete info;
     } else if (!detach) {
-        stale_ctrlrs_[ctrlr_key].push_back(info);
+        stale_ctrlrs_[key].push_back(info);
     }
 
     connected_ctrlrs.erase(it);
     LOG(WARNING) << "invalidate nof controller"
-                 << ", ctrlr_key=" << ctrlr_key
+                 << ", ctrlr_key=" << key
                  << ", action="
                  << (detach ? "detach_after_open_failure"
                             : "drop_cache_without_detach");
@@ -885,23 +888,37 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
         {
             auto &ns_seg = info->ns_seg;
             std::lock_guard<std::mutex> lock(info->ns_mutex);
-            if (ns_seg.find(tr.ns) != ns_seg.end()) {
-                return ns_seg[tr.ns];
+            auto cached_seg = ns_seg.find(tr.ns);
+            if (cached_seg != ns_seg.end()) {
+                nof_seg_handle *handle = cached_seg->second;
+                if (handle && handle->ns &&
+                    spdk_nvme_ns_get_sector_size(handle->ns) != 0 &&
+                    spdk_nvme_ns_get_size(handle->ns) != 0) {
+                    return handle;
+                }
+
+                LOG(WARNING) << "cached nof namespace has invalid geometry"
+                             << ", ctrlr_key=" << tr.ctrlr_key
+                             << ", nsid=" << tr.ns
+                             << ", action=reconnect_controller";
+                should_retry = true;
             }
 
             int32_t namespace_refresh_error = 0;
-            if (WaitForActiveNamespace(info->ctrlr, tr.ns, tr.ctrlr_key,
-                                       &namespace_refresh_error)) {
-                ns = spdk_nvme_ctrlr_get_ns(info->ctrlr, tr.ns);
-            } else {
-                LOG(ERROR) << "spdk_nvme_ctrlr_is_active_ns failed"
-                           << ", ctrlr_key=" << tr.ctrlr_key
-                           << ", nsid=" << tr.ns
-                           << ", admin_error=" << namespace_refresh_error;
-                if (IsConnectionError(namespace_refresh_error)) {
-                    should_retry = true;
+            if (!should_retry) {
+                if (WaitForActiveNamespace(info->ctrlr, tr.ns, tr.ctrlr_key,
+                                           &namespace_refresh_error)) {
+                    ns = spdk_nvme_ctrlr_get_ns(info->ctrlr, tr.ns);
                 } else {
-                    return nullptr;
+                    LOG(ERROR) << "spdk_nvme_ctrlr_is_active_ns failed"
+                               << ", ctrlr_key=" << tr.ctrlr_key
+                               << ", nsid=" << tr.ns
+                               << ", admin_error=" << namespace_refresh_error;
+                    if (IsConnectionError(namespace_refresh_error)) {
+                        should_retry = true;
+                    } else {
+                        return nullptr;
+                    }
                 }
             }
 
@@ -910,6 +927,20 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
                            << ", ctrlr_key=" << tr.ctrlr_key
                            << ", nsid=" << tr.ns;
                 return nullptr;
+            }
+
+            if (!should_retry &&
+                (spdk_nvme_ns_get_sector_size(ns) == 0 ||
+                 spdk_nvme_ns_get_size(ns) == 0)) {
+                LOG(WARNING) << "nof namespace geometry is not ready"
+                             << ", ctrlr_key=" << tr.ctrlr_key
+                             << ", nsid=" << tr.ns
+                             << ", block_size="
+                             << spdk_nvme_ns_get_sector_size(ns)
+                             << ", capacity=" << spdk_nvme_ns_get_size(ns)
+                             << ", attempt=" << attempt
+                             << ", action=reconnect_controller";
+                should_retry = true;
             }
 
             if (!should_retry) {
@@ -938,7 +969,11 @@ nof_seg_handle *SpdkWrapper::OpenNofSegment(const std::string &tr_str) {
 
         if (should_retry) {
             std::lock_guard<std::mutex> lock(ctrlrs_mutex);
-            DropNofControllerLocked(tr.ctrlr_key, true);
+            auto ctrlr_it = connected_ctrlrs.find(tr.ctrlr_key);
+            if (ctrlr_it != connected_ctrlrs.end() &&
+                ctrlr_it->second == info) {
+                DropNofControllerLocked(tr.ctrlr_key, true);
+            }
         }
     }
 

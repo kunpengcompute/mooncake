@@ -244,13 +244,13 @@ python3 -m mooncake.mooncake_ssd_create_and_register \
 
 ### 功能
 
-`mooncake_ssd_unregister_and_remove`固定按照以下顺序执行：
+`mooncake_ssd_unregister_and_remove`默认按照以下顺序执行：
 
 1. 先从Mooncake master解注册namespace，停止该NoF segment继续参与分配。
 2. 如果指定`--remove-target-namespace`，再通过SPDK RPC执行`nvmf_subsystem_remove_ns`，从target subsystem中移除对应namespace。
 3. 如果同时指定`--detach-bdev`，最后执行`bdev_nvme_detach_controller`，释放对应SPDK NVMe bdev controller。
 
-工具不支持“只移除target、不解注册master”的模式，避免出现target盘已下线但master仍残留可分配元数据的风险。
+指定`--target-only`可独立清理target资源，跳过master解注册且不连接master；该模式自动执行namespace移除，无需再指定`--remove-target-namespace`。
 
 ### 只从master解注册指定namespace
 
@@ -306,14 +306,48 @@ python3 -m mooncake.mooncake_ssd_unregister_and_remove \
   --detach-bdev
 ```
 
+### 独立移除target上的故障盘或残留资源
+
+适用情况：盘故障后master已通过heartbeat将其卸载，但target仍保留对应namespace和bdev，需要独立清理这些资源后更换盘。使用前确认相关客户端I/O已停止，且target能够正常完成资源移除。应先移除namespace并完成controller detach，再进行驱动切换或物理替换，避免旧资源残留影响后续创建和注册。
+
+**误操作风险：** 如果target尚未完成相关namespace移除和controller detach，就执行`setup.sh reset`，设备会被解绑并重新绑定回原驱动，但旧target可能仍保留controller、队列和在途请求。未限定设备范围的reset可能影响多块盘，因此不能只清理部分盘后就执行全量reset；master已卸载segment也不代表target资源已释放。
+
+此时可能出现以下异常：
+
+- `nvmf_get_subsystems`仍显示原namespace，但盘已无法正常读写，master探测超时并卸载对应segment。
+- 本地NVMe controller反复出现Identify超时、`controller reinitialization failed`或`Resetting controller failed`。
+- 移除namespace时等待在途请求结束，RPC超时；再次移除返回`subsystem busy, retry later`。detach命令返回成功也不代表异步资源清理已全部完成。
+- 再次创建注册时可能长时间停留在`Setting up SPDK with PCI devices`；旧target可能出现`COMMAND ID CONFLICT`、`cpl does not map to outstanding cmd`，甚至异常退出。若创建工具随后发现进程不存在，会启动新target并仅配置本次指定的盘，原来的其他namespace不会自动恢复。
+
+上述情况不属于`--target-only`能够保证恢复的场景。
+
+移除指定namespace，并detach对应NVMe controller（`ns`为当前target中的namespace ID，不是PCI地址）：
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --target-only \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1" \
+  --detach-bdev
+```
+
+移除该target上所有NVMe subsystem中的namespace，并detach对应NVMe controller：
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --target-only \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk" \
+  --detach-bdev
+```
+
 ### 参数说明
 
 | 参数 | 是否必选 | 说明 |
 | --- | --- | --- |
-| `--master_server_address` | 是 | Mooncake master地址，例如`192.168.65.81:50051`。 |
+| `--master_server_address` | 条件必选 | 默认流程必选；`--target-only`模式不使用。 |
+| `--target-only` | 否 | 跳过master，独立移除target namespace；支持配合`--detach-bdev`清理底层controller。 |
 | `--spdk_target_info` | 是 | target/namespace描述，可重复指定。格式为`ip:<target_ip> path:<spdk_path> [ns:<nsid>] [nqn:<subsystem_nqn>]`。 |
 | `--remove-target-namespace` | 否 | master解注册成功后，从SPDK target subsystem中移除匹配namespace。 |
-| `--detach-bdev` | 否 | 移除namespace后detach对应SPDK NVMe bdev controller。必须配合`--remove-target-namespace`使用。 |
+| `--detach-bdev` | 否 | 移除namespace后detach对应SPDK NVMe bdev controller。必须配合`--remove-target-namespace`或`--target-only`使用。 |
 | `--dry-run` | 否 | 只打印流程，不执行远端操作。 |
 | `--username` | 否 | SSH用户名，默认`root`。 |
 | `--port` | 否 | SSH 端口，默认`22`。 |
@@ -533,6 +567,7 @@ extra_config:
   metadata_server: "http://192.168.65.81:8080/metadata"
   master_server_address: "192.168.65.81:50051"
   global_segment_size: 0
+  local_buffer_size: 167772160
   protocol: "rdma"
   device_name: "mlx5_0"
 ```

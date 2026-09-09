@@ -201,13 +201,37 @@ git submodule update --init
 
 ./scripts/pkgdep.sh
 
+# DPDK bundled with SPDK v23.01.1 does not recognize HiSilicon part 0xd06.
+# Keep explicit platform and cross-compilation settings supplied by the user.
+case "$(uname -m)" in
+    aarch64|arm64)
+        case " ${DPDKBUILD_FLAGS:-} " in
+            *-Dplatform=*|*"-Dplatform "*|*--cross-file*) ;;
+            *)
+                spdk_cpu_info=$(python3 dpdk/config/arm/armv8_machine.py)
+                check_success "Failed to identify ARM CPU for DPDK configuration"
+                read -r spdk_cpu_implementer spdk_cpu_variant spdk_cpu_arch \
+                    spdk_cpu_part spdk_cpu_revision <<< "$spdk_cpu_info"
+                if [[ "$spdk_cpu_implementer" == "0x48" && "$spdk_cpu_part" == "0xd06" ]]; then
+                    export DPDKBUILD_FLAGS="${DPDKBUILD_FLAGS:+${DPDKBUILD_FLAGS} }-Dplatform=generic"
+                    echo "HiSilicon CPU part 0xd06: using DPDK platform=generic for compatibility"
+                fi
+                ;;
+        esac
+        ;;
+esac
+
 ./configure --with-rdma
+check_success "Failed to configure spdk"
 
 make -j
+check_success "Failed to build spdk"
 
 make install
+check_success "Failed to install spdk"
 
 cp dpdk/build/lib/*.a /usr/local/lib
+check_success "Failed to install DPDK static libraries"
 
 print_success "spdk installed successfully"
 

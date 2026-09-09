@@ -202,17 +202,29 @@ def run_unregister_phase(args) -> bool:
     ).start_ssd_unregister_service()
 
 
-def parse_arguments():
+def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(
         description="Unregister SSD namespaces from Mooncake master and optionally remove them from SPDK target",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=r"""
 Workflow:
-  1. Always unregister matching namespace(s) from Mooncake master first.
+  1. Unregister matching namespace(s) from Mooncake master first, unless --target-only is set.
   2. If --remove-target-namespace is set, remove matching namespace(s) from SPDK target.
   3. If --detach-bdev is also set, detach the corresponding SPDK NVMe bdev controller.
 
 Examples:
+  # Clean target resources after master has already unmounted the failed namespace.
+  python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+    --target-only \
+    --spdk_target_info "ip:192.168.65.57 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1" \
+    --detach-bdev
+
+  # Clean all target namespaces without contacting master.
+  python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+    --target-only \
+    --spdk_target_info "ip:192.168.65.57 path:/home/spdk" \
+    --detach-bdev
+
   # Unregister one namespace from master only.
   python3 -m mooncake.mooncake_ssd_unregister_and_remove \
     --master_server_address 192.168.65.13:50051 \
@@ -252,14 +264,15 @@ Examples:
 Notes:
   - Omitting ns means "all namespaces discoverable from the target".
   - Discovering all namespaces requires a valid path to SPDK and SSH access to the target.
-  - The tool does not support removing target namespaces without first unregistering from master.
+  - --target-only implies namespace removal and never contacts master.
+  - Use --target-only after master has stopped allocating the affected segments and I/O is stopped.
+  - Target RPC must remain responsive; this tool does not restart target or run setup.sh.
 """
     )
     parser.add_argument(
         "--master_server_address",
         type=str,
-        required=True,
-        help="Mooncake master server address, for example 192.168.65.81:50051",
+        help="Mooncake master server address; required unless --target-only is set",
     )
     parser.add_argument(
         "--spdk_target_info",
@@ -270,6 +283,11 @@ Notes:
             "\"ip:192.168.65.56 path:/home/spdk\"; add ns/nqn to restrict removal, "
             "for example \"ip:192.168.65.56 path:/home/spdk ns:2 nqn:nqn.2016-06.io.spdk:cnode1\"."
         ),
+    )
+    parser.add_argument(
+        "--target-only",
+        action="store_true",
+        help="Remove matching target namespaces without contacting master; optionally use --detach-bdev",
     )
     parser.add_argument(
         "--remove-target-namespace",
@@ -293,7 +311,23 @@ Notes:
         default=[],
         help="Override unregister configuration fields globally, for example -Dtrsvcid=4420",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.target_only:
+        if args.master_server_address or args.define:
+            parser.error("--target-only cannot be combined with --master_server_address or --define")
+        args.remove_target_namespace = True
+    elif not args.master_server_address:
+        parser.error("--master_server_address is required unless --target-only is set")
+    if args.detach_bdev and not args.remove_target_namespace:
+        parser.error("--detach-bdev requires --remove-target-namespace or --target-only")
+    if args.target_only:
+        for target_info in args.spdk_target_info:
+            target = _parse_target_info(target_info)
+            if not target.get("ip") or not target.get("path"):
+                parser.error("--target-only requires ip and path in every --spdk_target_info")
+            if "ns" in target and (not target["ns"].isdigit() or int(target["ns"]) <= 0):
+                parser.error("namespace ID must be a positive integer")
+    return args
 
 
 def main():
@@ -304,7 +338,7 @@ def main():
         logging.error("--detach-bdev requires --remove-target-namespace")
         sys.exit(1)
 
-    if not run_unregister_phase(args):
+    if not args.target_only and not run_unregister_phase(args):
         sys.exit(1)
 
     if args.remove_target_namespace:
@@ -312,7 +346,7 @@ def main():
         if not SPDKNamespaceRemover(args).remove_all():
             sys.exit(1)
 
-    logging.info("SSD unregister/remove workflow completed")
+    logging.info("SSD target removal completed" if args.target_only else "SSD unregister/remove workflow completed")
 
 
 if __name__ == "__main__":

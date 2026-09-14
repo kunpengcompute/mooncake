@@ -2,11 +2,12 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <vector>
 #include <set>
 #include <thread>
@@ -21,15 +22,15 @@ bool ParseEnvU64(const char *name, uint64_t *out) {
         return false;
     }
 
-    errno = 0;
-    char *end = nullptr;
-    unsigned long long parsed = std::strtoull(val, &end, 10);
-    if (errno != 0 || end == val || (end && *end != '\0')) {
+    uint64_t parsed = 0;
+    const char *end = val + std::strlen(val);
+    const auto result = std::from_chars(val, end, parsed, 10);
+    if (result.ec != std::errc() || result.ptr != end) {
         LOG(WARNING) << "Invalid value for " << name << ": " << val;
         return false;
     }
 
-    *out = static_cast<uint64_t>(parsed);
+    *out = parsed;
     return true;
 }
 
@@ -42,26 +43,33 @@ bool ParseEnvBool(const char *name, bool *out) {
     return true;
 }
 
+template <typename T>
+bool ParseEnvUnsigned(const char *name, T *out) {
+    uint64_t value = 0;
+    if (!ParseEnvU64(name, &value)) {
+        return false;
+    }
+    if (value > static_cast<uint64_t>(std::numeric_limits<T>::max())) {
+        LOG(WARNING) << "Value out of range for " << name << ": " << value;
+        return false;
+    }
+
+    *out = static_cast<T>(value);
+    return true;
+}
+
 void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts *opts) {
-    uint64_t v = 0;
     bool bv = false;
     opts->keep_alive_timeout_ms = 0;
 
-    if (ParseEnvU64("MC_NVME_NUM_IO_QUEUES", &v)) {
-        opts->num_io_queues = static_cast<uint32_t>(v);
-    }
-    if (ParseEnvU64("MC_NVME_IO_QUEUE_SIZE", &v)) {
-        opts->io_queue_size = static_cast<uint32_t>(v);
-    }
-    if (ParseEnvU64("MC_NVME_IO_QUEUE_REQUESTS", &v)) {
-        opts->io_queue_requests = static_cast<uint32_t>(v);
-    }
-    if (ParseEnvU64("MC_NVME_TRANSPORT_ACK_TIMEOUT", &v)) {
-        opts->transport_ack_timeout = static_cast<uint8_t>(v);
-    }
-    if (ParseEnvU64("MC_NVME_ADMIN_QUEUE_SIZE", &v)) {
-        opts->admin_queue_size = static_cast<uint16_t>(v);
-    }
+    ParseEnvUnsigned("MC_NVME_NUM_IO_QUEUES", &opts->num_io_queues);
+    ParseEnvUnsigned("MC_NVME_IO_QUEUE_SIZE", &opts->io_queue_size);
+    ParseEnvUnsigned("MC_NVME_IO_QUEUE_REQUESTS", &opts->io_queue_requests);
+    ParseEnvUnsigned("MC_NVME_TRANSPORT_ACK_TIMEOUT",
+                     &opts->transport_ack_timeout);
+    ParseEnvUnsigned("MC_NVME_ADMIN_QUEUE_SIZE", &opts->admin_queue_size);
+
+    uint64_t v = 0;
     if (ParseEnvU64("MC_NVME_FABRICS_CONNECT_TIMEOUT_US", &v)) {
         opts->fabrics_connect_timeout_us = v;
     }
@@ -675,17 +683,19 @@ void SpdkWrapper::DropNofControllerLocked(const std::string &ctrlr_key,
         last_admin_poll_.erase(ctrlr);
     }
 
-    if (detach && ctrlr) {
-        for (auto *qpair : info->retired_qpairs) {
-            if (qpair) {
-                spdk_nvme_ctrlr_free_io_qpair(qpair);
+    if (detach) {
+        if (ctrlr) {
+            for (auto *qpair : info->retired_qpairs) {
+                if (qpair) {
+                    spdk_nvme_ctrlr_free_io_qpair(qpair);
+                }
             }
+            spdk_nvme_detach(ctrlr);
         }
         info->retired_qpairs.clear();
-        spdk_nvme_detach(ctrlr);
         info->ctrlr = nullptr;
         delete info;
-    } else if (!detach) {
+    } else {
         stale_ctrlrs_[key].push_back(info);
     }
 
@@ -1050,42 +1060,6 @@ void SpdkWrapper::CloseNofSegment(nof_seg_handle *seg) {
         LOG(INFO) << "close nof segment handle"
                   << ", ctrlr_key=" << ctrlr_key
                   << ", nsid=" << nsid;
-        return;
-    }
-
-    seg->qpair = nullptr;
-    seg->ns = nullptr;
-}
-
-void SpdkWrapper::AbandonNofSegment(nof_seg_handle *seg) {
-    if (!seg || !seg->ns) {
-        return;
-    }
-
-    struct spdk_nvme_ctrlr *ctrlr = spdk_nvme_ns_get_ctrlr(seg->ns);
-    if (!ctrlr) {
-        seg->qpair = nullptr;
-        seg->ns = nullptr;
-        return;
-    }
-    uint32_t nsid = spdk_nvme_ns_get_id(seg->ns);
-
-    std::lock_guard<std::mutex> lock(ctrlrs_mutex);
-    for (auto &[ctrlr_key, info] : connected_ctrlrs) {
-        if (!info || info->ctrlr != ctrlr) {
-            continue;
-        }
-
-        std::lock_guard<std::mutex> ns_lock(info->ns_mutex);
-        auto seg_it = info->ns_seg.find(nsid);
-        if (seg_it != info->ns_seg.end() && seg_it->second == seg) {
-            info->ns_seg.erase(seg_it);
-        }
-        seg->qpair = nullptr;
-        seg->ns = nullptr;
-        LOG(WARNING) << "abandon nof segment handle without freeing qpair"
-                     << ", ctrlr_key=" << ctrlr_key
-                     << ", nsid=" << nsid;
         return;
     }
 

@@ -429,6 +429,15 @@ A100显卡对应的CUDA驱动本文档选择版本为12.9.0。
 wget https://developer.download.nvidia.com/compute/cuda/12.9.0/local_installers/cuda_12.9.0_575.51.03_linux_sbsa.run
 ```
 
+安装前下载 NVIDIA 官方校验清单并验证安装包完整性：
+
+```bash
+wget https://developer.download.nvidia.com/compute/cuda/12.9.0/docs/sidebar/md5sum.txt
+grep ' cuda_12.9.0_575.51.03_linux_sbsa.run$' md5sum.txt | md5sum -c -
+```
+
+仅当命令返回 `OK` 时继续安装；校验失败时应删除安装包并重新从 NVIDIA 官方地址下载。
+
 安装CUDA 12.9.0驱动：
 
 ```bash
@@ -454,6 +463,14 @@ sudo sh cuda_12.9.0_575.51.03_linux_sbsa.run
 ```bash
 wget https://repo.anaconda.com/archive/Anaconda3-2025.12-2-Linux-aarch64.sh
 ```
+
+使用 Anaconda 官方归档页发布的 SHA256 摘要验证安装脚本完整性：
+
+```bash
+echo "be13a20f31d82508a061984fa3555369cfd8e4692643721415c19e7dc2e9e0f9  Anaconda3-2025.12-2-Linux-aarch64.sh" | sha256sum -c -
+```
+
+仅当命令返回 `OK` 时继续安装。升级 Anaconda 版本时，应从 [Anaconda 官方归档页](https://repo.anaconda.com/archive/) 获取并更新对应版本的 SHA256 摘要。
 
 安装conda：
 

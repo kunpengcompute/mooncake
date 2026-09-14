@@ -406,6 +406,9 @@ static int64_t FailSpdkNofSegmentTasks(nof_seg_handle *seg_handle,
         task->outstanding_sub_io = 0;
         task->on_chain = false;
         task->state->set_completed(ErrorCode::TRANSFER_FAIL);
+        if (!task->abandoned) {
+            delete task;
+        }
     }
 
     for (int i = 0; i < kSpdkNofOpNum; ++i) {
@@ -491,6 +494,11 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                     SpdkNofTask(std::move(task_queue.front()));
                 if (task == nullptr) {
                     LOG(ERROR) << "alloc SpdkNofTask failed, worker " << work_idx;
+                    if (task_queue.front().state) {
+                        task_queue.front().state->set_completed(
+                            ErrorCode::TRANSFER_FAIL);
+                    }
+                    task_queue.pop();
                     continue;
                 }
                 if (failed_seg_handles.count(task->seg_handle)) {
@@ -511,7 +519,12 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                             SpdkWrapper::GetInstance().GetBlockSize(task->seg_handle));
                     if (qos == nullptr) {
                         LOG(ERROR) << "alloc SpdkNofQos failed, worker " << work_idx;
+                        if (task->state) {
+                            task->state->set_completed(
+                                ErrorCode::TRANSFER_FAIL);
+                        }
                         delete task;
+                        task_queue.pop();
                         continue;
                     }
                     seg_to_qos[task->seg_handle] = qos;
@@ -566,6 +579,9 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                         int ret = SpdkWrapper::GetInstance().SubmitRequest(task->seg_handle,
                             submit_ptr, submit_lba, submit_lba_count, task->op, nvmf_io_complete, sub_task);
                         if (ret != 0) {
+                            sub_task->task = nullptr;
+                            sub_task->submit_lba_count = 0;
+                            sub_task_pool.push(sub_task);
                             LOG(ERROR) << "work " << work_idx << ", seg " << task->seg_handle << " submit io fail";
                             task->failed = true;
                             task->remaining_lba = 0;
@@ -575,6 +591,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                                     work_idx,
                                     "submit_connection_error:" +
                                         std::to_string(ret));
+                                task = nullptr;
                                 failed_seg_handles.insert(seg_handle);
                                 SpdkWrapper::GetInstance()
                                     .InvalidateNofController(seg_handle);
@@ -593,7 +610,7 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
                             total_outstanding_io++;
                         }
                     }
-                    if (task->remaining_lba == 0) {
+                    if (task && task->remaining_lba == 0) {
                         nof_qos->PopTask(i);
                         task->on_chain = false;
                         SpdkNofTaskCompletion(task);

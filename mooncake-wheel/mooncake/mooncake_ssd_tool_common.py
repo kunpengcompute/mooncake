@@ -1123,20 +1123,10 @@ class MooncakeNoFUnregister:
 
                 except Exception as e:
                     logging.error(f"Failed to get namespace info from {ip}: {e}")
-                    logging.warning("Falling back to unregistering default namespace (nsid=1)")
-                    # Fall back to unregistering default namespace
-                    ssd_config = {
-                        'nqn': nqn,
-                        'nsid': 1,
-                        'traddr': ip,
-                        'trsvcid': trsvcid,
-                        'base': 0,
-                        'size': 0,
-                        'master_server_address': master_server_address,
-                        'metadata_server': ''
-                    }
-                    ssd_configs.append(ssd_config)
-                    logging.info(f"Will unregister SSD (fallback): nqn={nqn}, nsid=1, traddr={ip}")
+                    raise RuntimeError(
+                        f"Unable to discover namespaces from target {ip}; "
+                        "unregister operation aborted"
+                    ) from e
             else:
                 # No path provided, unregister default namespace only
                 logging.warning("No 'path' provided in spdk_target_info, cannot query actual namespaces from SPDK target")

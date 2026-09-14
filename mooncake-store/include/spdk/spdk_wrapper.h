@@ -64,7 +64,6 @@ public:
 
     void CloseNofSegment(const std::string &tr_str);
     void CloseNofSegment(nof_seg_handle *seg);
-    void AbandonNofSegment(nof_seg_handle *seg);
 
     uint32_t GetBlockSize(const nof_seg_handle *seg_handle);
 

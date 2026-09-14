@@ -53,6 +53,9 @@ Notes:
   - When pci is specified, both create and register phases are limited to
     namespaces backed by those PCI devices.
   - If pci is omitted during create, the tool auto-discovers available NVMe PCI devices.
+  - Devices not bound to an SPDK-compatible driver (for example mounted system
+    disks) are skipped with a warning, including explicitly selected PCI devices.
+    Creation fails if no selected devices are available to SPDK.
 """
     )
     parser.add_argument(

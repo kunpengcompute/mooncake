@@ -101,7 +101,7 @@ set(SPDK_STATIC_LIBS
     ${DPDK_LIB_DIR}/librte_rcu.a
 
     # 系统库
-    pthread dl numa rt m uuid crypto aio z elf ibverbs rdmacm ssl
+    pthread dl numa rt m uuid crypto aio z elf ibverbs rdmacm ssl bsd
 )
 
 target_link_libraries(mooncake_store

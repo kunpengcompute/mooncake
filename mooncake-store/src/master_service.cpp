@@ -2372,6 +2372,10 @@ bool MasterService::TryUnmountNoFSegmentByHeartbeat(
         std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
         nof_heartbeat_states_.erase(snapshot.segment_id);
     }
+    // The allocator metadata is gone, so the cached qpair/segment handle must
+    // not survive this unmount. A later register will open a new qpair and, if
+    // the target has restarted, OpenNofSegment will reconnect the controller.
+    SpdkWrapper::GetInstance().CloseNofSegment(snapshot.segment.te_endpoint);
     MasterMetricManager::instance()
         .inc_nof_segments_unmounted_by_heartbeat_total();
     LOG(INFO) << "segment_id=" << snapshot.segment_id

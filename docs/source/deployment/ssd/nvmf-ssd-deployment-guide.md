@@ -57,7 +57,7 @@ Create `store_service.json` under `/home`:
   "master_server_address": "192.168.65.81:50051",
   "protocol": "rdma",
   "device_name": "mlx5_0",
-  "global_segment_size": "50gb",
+  "global_segment_size": "50GB",
   "local_buffer_size": 0
 }
 ```
@@ -195,15 +195,15 @@ Enter the SPDK directory on the target node and run the following commands.
 
 1. Show subsystem information, including NQN and namespace IDs:
 
-```bash
-./scripts/rpc.py nvmf_get_subsystems
-```
+    ```bash
+    ./scripts/rpc.py nvmf_get_subsystems
+    ```
 
 2. Show disk details, including block size and PCI address:
 
-```bash
-./scripts/rpc.py bdev_get_bdevs
-```
+    ```bash
+    ./scripts/rpc.py bdev_get_bdevs
+    ```
 
 ## 6. Performance Tests
 

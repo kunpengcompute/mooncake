@@ -24,7 +24,8 @@ UB (Unified Bus) is a transport protocol at the same abstraction layer as RDMA, 
 Install UMDK (URMA development package):
 
 ```bash
-# Install via yum
+# Install via yum (yum automatically verifies the RPM package signature and
+# blocks the installation if verification fails)
 yum install umdk-urma-devel
 
 # Or build from source

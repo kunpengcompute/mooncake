@@ -44,7 +44,7 @@ Environment=ETCD_INITIAL_ADVERTISE_PEER_URLS=http://<node1 IP>:2380
 Environment=ETCD_ADVERTISE_CLIENT_URLS=http://<node1 IP>:2379
 Environment=ETCD_INITIAL_CLUSTER="<nodename1>=http://<node1 IP>:2380,<nodename2>=http://<node2 IP>:2380"
 Environment=ETCD_INITIAL_CLUSTER_STATE="new"
-Environment=ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+Environment=ETCD_INITIAL_CLUSTER_TOKEN=     # 配置为实际内容
 ExecStart=/usr/local/bin/etcd
 Restart=on-failure
 RestartSec=5
@@ -98,7 +98,7 @@ Environment=ETCD_INITIAL_ADVERTISE_PEER_URLS=http://<node1 IP>:2380
 Environment=ETCD_ADVERTISE_CLIENT_URLS=http://<node1 IP>:2379
 Environment=ETCD_INITIAL_CLUSTER="<nodename1>=http://<node1 IP>:2380"
 Environment=ETCD_INITIAL_CLUSTER_STATE="new"
-Environment=ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+Environment=ETCD_INITIAL_CLUSTER_TOKEN=     # 配置为实际内容
 ExecStart=/usr/local/bin/etcd
 Restart=on-failure
 RestartSec=5
@@ -154,7 +154,7 @@ Environment=ETCD_INITIAL_ADVERTISE_PEER_URLS=http://<node2 IP>:2380
 Environment=ETCD_ADVERTISE_CLIENT_URLS=http://<node2 IP>:2379
 Environment=ETCD_INITIAL_CLUSTER="<nodename2>=http://<node2 IP>:2380,node182=http://<node1 IP>:2380"
 Environment=ETCD_INITIAL_CLUSTER_STATE="existing"
-Environment=ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster"
+Environment=ETCD_INITIAL_CLUSTER_TOKEN=     # 配置为实际内容
 ExecStart=/usr/local/bin/etcd
 Restart=on-failure
 RestartSec=5
@@ -233,11 +233,9 @@ mkdir -p /home/minio_data
 
 ### 2.5 启动MinIO
 
-设置管理员用户名和密码
-
 ```bash
-export MINIO_ROOT_USER=admin
-export MINIO_ROOT_PASSWORD=adminadmin
+export MINIO_ROOT_USER= # 配置实际内容
+export MINIO_ROOT_PASSWORD= # 配置实际内容
 ```
 
 配置中写好所有节点的地址，在所有设备中运行
@@ -266,8 +264,8 @@ After=network-online.target
 User=root
 Group=root
 # 直接设置环境变量，不依赖外部文件
-Environment="MINIO_ROOT_USER=admin"
-Environment="MINIO_ROOT_PASSWORD=admin12345"
+Environment="MINIO_ROOT_USER=" # 配置实际内容
+Environment="MINIO_ROOT_PASSWORD=" # 配置实际内容
 Environment="MINIO_VOLUMES=http://<node1 IP>/home/minio_data http://<node2 IP>/home/minio_data"
 ExecStart=/usr/local/bin/minio server --address ":9000" --console-address ":9001" $MINIO_VOLUMES
 Restart=always
@@ -378,8 +376,8 @@ export URMA_RPC_DEVICE=bonding_dev_0
 export URMA_RPC_EID_INDEX=0
 
 export MOONCAKE_SNAPSHOT_LOCAL_PATH=/home/mooncake_snapshot
-export MOONCAKE_AWS_ACCESS_KEY_ID="admin"
-export MOONCAKE_AWS_SECRET_ACCESS_KEY="adminadmin"
+export MOONCAKE_AWS_ACCESS_KEY_ID= # 配置实际内容
+export MOONCAKE_AWS_SECRET_ACCESS_KEY= # 配置实际内容
 export MOONCAKE_AWS_REGION="us-east-1"
 export MOONCAKE_AWS_BUCKET_NAME="mooncake-snapshot"
 export MOONCAKE_AWS_S3_ENDPOINT="http://<node ip>:9000"
@@ -442,7 +440,7 @@ mooncake_client \
 
 ```bash
 export MC_STORE_CLIENT_SETUP_RETRIES=3
-export no_proxy="127.0.0.1,localhost,local,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,141.61.0.0/16"
+export no_proxy= # 配置为实际内容
 export MC_STORE_CLIENT_METRIC_BANDWIDTH=0
 export MC_TCP_BIND_ADDRESS=<node1 ip>
 export MC_URMA_TRANS_MODE=RM
@@ -484,7 +482,7 @@ stress_cluster_bench \
 
 ```bash
 export MC_STORE_CLIENT_SETUP_RETRIES=3
-export no_proxy="127.0.0.1,localhost,local,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,141.61.0.0/16"
+export no_proxy=    # 配置为实际内容
 export MC_STORE_CLIENT_METRIC_BANDWIDTH=0
 export MC_TCP_BIND_ADDRESS=<node1 ip>
 export MC_URMA_TRANS_MODE=RM
@@ -528,7 +526,7 @@ stress_cluster_bench \
 ### 配置说明：replica_num / nof_replica_num 与 client TTL
 
 > 代码基线：kvcache-ai/Mooncake `main`
-> 内容：① 多副本参数 `replica_num` / `nof_replica_num` 的设置位置与方式；② client TTL 的两种配置途径（摘自《故障感知延迟分析-master多久发现节点故障.md》）
+> 内容：① 多副本参数 `replica_num` / `nof_replica_num` 的设置位置与方式；② client TTL 的两种配置途径
 
 ---
 
@@ -721,7 +719,7 @@ mooncake_client \
 
 ```
 export MC_STORE_CLIENT_SETUP_RETRIES=3
-export no_proxy="127.0.0.1,localhost,local,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,141.61.0.0/16"
+export no_proxy= # 配置为实际内容
 export MC_STORE_CLIENT_METRIC_BANDWIDTH=0
 export MC_TCP_BIND_ADDRESS=<node1 ip>
 export MC_URMA_TRANS_MODE=RM

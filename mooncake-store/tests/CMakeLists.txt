@@ -20,6 +20,49 @@ add_store_test(eviction_strategy_test eviction_strategy_test.cpp)
 add_store_test(master_service_test master_service_test.cpp)
 add_store_test(master_service_ssd_test master_service_ssd_test.cpp)
 add_store_test(nof_heartbeat_test nof_heartbeat_test.cpp)
+add_store_test(spdk_wrapper_test spdk_wrapper_test.cpp)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_options(spdk_wrapper_test PRIVATE
+        -Wl,--wrap=spdk_env_opts_init
+        -Wl,--wrap=spdk_env_init
+        -Wl,--wrap=spdk_env_fini
+        -Wl,--wrap=spdk_zmalloc
+        -Wl,--wrap=spdk_free
+        -Wl,--wrap=spdk_nvme_transport_id_parse
+        -Wl,--wrap=spdk_nvme_cpl_get_status_string
+        -Wl,--wrap=spdk_nvme_probe
+        -Wl,--wrap=spdk_nvme_detach
+        -Wl,--wrap=spdk_nvme_ctrlr_register_aer_callback
+        -Wl,--wrap=spdk_nvme_ctrlr_get_transport_id
+        -Wl,--wrap=spdk_nvme_ctrlr_is_failed
+        -Wl,--wrap=spdk_nvme_ctrlr_is_active_ns
+        -Wl,--wrap=spdk_nvme_ctrlr_get_first_active_ns
+        -Wl,--wrap=spdk_nvme_ctrlr_get_next_active_ns
+        -Wl,--wrap=spdk_nvme_ctrlr_get_ns
+        -Wl,--wrap=spdk_nvme_ctrlr_alloc_io_qpair
+        -Wl,--wrap=spdk_nvme_ctrlr_free_io_qpair
+        -Wl,--wrap=spdk_nvme_ctrlr_process_admin_completions
+        -Wl,--wrap=spdk_nvme_ns_get_ctrlr
+        -Wl,--wrap=spdk_nvme_ns_get_sector_size
+        -Wl,--wrap=spdk_nvme_ns_get_size
+        -Wl,--wrap=spdk_nvme_ns_get_id
+        -Wl,--wrap=spdk_nvme_qpair_process_completions
+        -Wl,--wrap=spdk_nvme_ns_cmd_write
+        -Wl,--wrap=spdk_nvme_ns_cmd_read
+    )
+endif()
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_store_test(ssd_register_client_test
+        ssd_register_client_test.cpp
+        ../src/ssd_register_client.cpp
+    )
+    target_link_options(ssd_register_client_test PRIVATE
+        -Wl,--wrap=_ZN8mooncake12MasterClient7ConnectERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE
+        -Wl,--wrap=_ZN8mooncake12MasterClient15MountNoFSegmentERKNS_10NoFSegmentE
+        -Wl,--wrap=_ZN8mooncake12MasterClient20GetNoFSegmentsByNameERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE
+        -Wl,--wrap=_ZN8mooncake12MasterClient17UnmountNoFSegmentERKSt4pairImmE
+    )
+endif()
 add_store_test(client_integration_test client_integration_test.cpp)
 add_store_test(master_metrics_test master_metrics_test.cpp)
 add_store_test(posix_file_test posix_file_test.cpp)

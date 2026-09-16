@@ -503,6 +503,7 @@ int UrmaContext::openDevice(const std::string& device_name, int8_t port,
             if (ret != URMA_SUCCESS) {
                 LOG(ERROR) << "Failed to set bonding BALANCE/IODIE mode, ret = "
                            << ret;
+                urma_delete_context(context);
                 return ERR_CONTEXT;
             }
             LOG(INFO) << "[multipath ON] bonding mode set on " << device_name
@@ -524,6 +525,7 @@ int UrmaContext::openDevice(const std::string& device_name, int8_t port,
             if (ret != URMA_SUCCESS) {
                 LOG(ERROR) << "Failed to set bonding STANDALONE/PORT mode, ret = "
                            << ret;
+                urma_delete_context(context);   
                 return ERR_CONTEXT;
             }
             LOG(INFO) << "[multipath OFF] bonding mode set on " << device_name

@@ -344,6 +344,7 @@ int RdmaContext::deconstruct() {
 
 int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
                                               int access,
+                                              bool allow_gpu_dmabuf,
                                               MemoryRegionMeta &mrMeta) {
     if (length > (size_t)globalConfig().max_mr_size) {
         PLOG(WARNING) << "The buffer length exceeds device max_mr_size, "
@@ -351,91 +352,100 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
         length = (size_t)globalConfig().max_mr_size;
     }
 #if defined(USE_MLU) || defined(USE_MACA) || defined(USE_CUDA)
-    // Implement register memory in a way that does not assume the presence of
-    // nvidia-peermem. If memory is on CPU call ibv_reg_mr() as usual. If memory
-    // is on GPU then use ibv_reg_dmabuf_mr() instead which does not require
-    // nvidia-peermem.
-    CUmemorytype memType;
-    CUresult result = cuPointerGetAttribute(
-        &memType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, (CUdeviceptr)addr);
-
-    // Register memory depending on whether memory is on host or GPU.
-    if (result != CUDA_SUCCESS || memType == CU_MEMORYTYPE_HOST) {
+    if (!allow_gpu_dmabuf) {
         mrMeta.addr = addr;
         mrMeta.mr = ibv_reg_mr(pd_, addr, length, access);
-#if defined(USE_CUDA)
-    } else if (memType == CU_MEMORYTYPE_DEVICE &&
-               Environ::Get().GetWithNvidiaPeermem()) {
-        // WITH_NVIDIA_PEERMEM env var is set: use ibv_reg_mr() directly for
-        // GPU memory (requires the nvidia-peermem kernel module to be loaded).
-        mrMeta.addr = addr;
-        mrMeta.mr = ibv_reg_mr(pd_, addr, length, access);
-#endif
-    } else if (memType == CU_MEMORYTYPE_DEVICE) {
-#if defined(USE_CUDA)
-        // Ensure a CUDA context is current — worker threads or callers
-        // from non-CUDA threads may lack one.
-        unsigned int devOrd = 0;
-        cuPointerGetAttribute(&devOrd, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
-                              (CUdeviceptr)addr);
-        CUdevice cuDev;
-        CUcontext cuCtx;
-        cuDeviceGet(&cuDev, devOrd);
-        cuDevicePrimaryCtxRetain(&cuCtx, cuDev);
-        cuCtxSetCurrent(cuCtx);
+    } else {
+        // Implement register memory in a way that does not assume the presence
+        // of nvidia-peermem. If memory is on CPU call ibv_reg_mr() as usual. If
+        // memory is on GPU then use ibv_reg_dmabuf_mr() instead which does not
+        // require nvidia-peermem.
+        CUmemorytype memType;
+        CUresult result = cuPointerGetAttribute(
+            &memType, CU_POINTER_ATTRIBUTE_MEMORY_TYPE, (CUdeviceptr)addr);
 
-        // Use cuMemGetAddressRange to get the true allocation base and
-        // size — addr may sit at an offset within a larger cudaMalloc
-        // block (e.g. PyTorch caching allocator packs multiple tensors
-        // into one allocation).  cuMemGetHandleForAddressRange requires
-        // the exact allocation boundaries.
+        // Register memory depending on whether memory is on host or GPU.
+        if (result != CUDA_SUCCESS || memType == CU_MEMORYTYPE_HOST ||
+            memType == cudaMemoryTypeUnregistered) {
+            mrMeta.addr = addr;
+            mrMeta.mr = ibv_reg_mr(pd_, addr, length, access);
+#if defined(USE_CUDA)
+        } else if (memType == CU_MEMORYTYPE_DEVICE &&
+                   Environ::Get().GetWithNvidiaPeermem()) {
+            // WITH_NVIDIA_PEERMEM env var is set: use ibv_reg_mr() directly
+            // for GPU memory (requires the nvidia-peermem kernel module to be
+            // loaded).
+            mrMeta.addr = addr;
+            mrMeta.mr = ibv_reg_mr(pd_, addr, length, access);
 #endif
-        CUdeviceptr allocBase;
-        size_t allocSize;
-        result =
-            cuMemGetAddressRange(&allocBase, &allocSize, (CUdeviceptr)addr);
-        if (result != CUDA_SUCCESS) {
-            const char *errStr;
-            cuGetErrorString(result, &errStr);
-            LOG(ERROR) << "Failed to call cuMemGetAddressRange for "
-                       << (uintptr_t)addr << " cuda error=" << errStr;
+        } else if (memType == CU_MEMORYTYPE_DEVICE) {
+#if defined(USE_CUDA)
+            // Ensure a CUDA context is current — worker threads or callers
+            // from non-CUDA threads may lack one.
+            unsigned int devOrd = 0;
+            cuPointerGetAttribute(&devOrd, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
+                                  (CUdeviceptr)addr);
+            CUdevice cuDev;
+            CUcontext cuCtx;
+            cuDeviceGet(&cuDev, devOrd);
+            cuDevicePrimaryCtxRetain(&cuCtx, cuDev);
+            cuCtxSetCurrent(cuCtx);
+
+            // Use cuMemGetAddressRange to get the true allocation base and
+            // size — addr may sit at an offset within a larger cudaMalloc
+            // block (e.g. PyTorch caching allocator packs multiple tensors
+            // into one allocation).  cuMemGetHandleForAddressRange requires
+            // the exact allocation boundaries.
+#endif
+            CUdeviceptr allocBase;
+            size_t allocSize;
+            result =
+                cuMemGetAddressRange(&allocBase, &allocSize, (CUdeviceptr)addr);
+            if (result != CUDA_SUCCESS) {
+                const char *errStr;
+                cuGetErrorString(result, &errStr);
+                LOG(ERROR) << "Failed to call cuMemGetAddressRange for "
+                           << (uintptr_t)addr << " cuda error=" << errStr;
+#if defined(USE_CUDA)
+                cuDevicePrimaryCtxRelease(cuDev);
+#endif
+                return ERR_CONTEXT;
+            }
+
+            int dmabuf_fd;
+            result = cuMemGetHandleForAddressRange(
+                &dmabuf_fd, allocBase, allocSize,
+                CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+            if (result != CUDA_SUCCESS) {
+                const char *errStr;
+                cuGetErrorString(result, &errStr);
+                LOG(ERROR) << "Failed to retrieve dmabuf for "
+                           << (uintptr_t)addr << " base=" << (uintptr_t)allocBase
+                           << " size=" << allocSize
+                           << " cuda error=" << errStr;
+#if defined(USE_CUDA)
+                cuDevicePrimaryCtxRelease(cuDev);
+#endif
+                return ERR_CONTEXT;
+            }
+            mrMeta.addr = addr;
+            uint64_t dmabuf_offset = (uintptr_t)addr - (uintptr_t)allocBase;
+            mrMeta.mr = ibv_reg_dmabuf_mr(pd_, dmabuf_offset, length,
+                                          (uintptr_t)addr, dmabuf_fd, access);
+            const int regErrno = errno;
+            if (close(dmabuf_fd) != 0) {
+                PLOG(WARNING) << "Failed to close dmabuf fd";
+            }
+            if (!mrMeta.mr) {
+                errno = regErrno;
+            }
 #if defined(USE_CUDA)
             cuDevicePrimaryCtxRelease(cuDev);
 #endif
-            return ERR_CONTEXT;
         }
-
-        int dmabuf_fd;
-        result = cuMemGetHandleForAddressRange(
-            &dmabuf_fd, allocBase, allocSize,
-            CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
-        if (result != CUDA_SUCCESS) {
-            const char *errStr;
-            cuGetErrorString(result, &errStr);
-            LOG(ERROR) << "Failed to retrieve dmabuf for " << (uintptr_t)addr
-                       << " base=" << (uintptr_t)allocBase
-                       << " size=" << allocSize << " cuda error=" << errStr;
-#if defined(USE_CUDA)
-            cuDevicePrimaryCtxRelease(cuDev);
-#endif
-            return ERR_CONTEXT;
-        }
-        mrMeta.addr = addr;
-        uint64_t dmabuf_offset = (uintptr_t)addr - (uintptr_t)allocBase;
-        mrMeta.mr = ibv_reg_dmabuf_mr(pd_, dmabuf_offset, length,
-                                      (uintptr_t)addr, dmabuf_fd, access);
-        const int regErrno = errno;
-        if (close(dmabuf_fd) != 0) {
-            PLOG(WARNING) << "Failed to close dmabuf fd";
-        }
-        if (!mrMeta.mr) {
-            errno = regErrno;
-        }
-#if defined(USE_CUDA)
-        cuDevicePrimaryCtxRelease(cuDev);
-#endif
     }
 #elif defined(USE_HIP_DMABUF)
+    (void)allow_gpu_dmabuf;
     hipPointerAttribute_t hipAttr{};
     hipError_t hipRes = hipPointerGetAttributes(&hipAttr, addr);
 
@@ -529,6 +539,7 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
         }
     }
 #else
+    (void)allow_gpu_dmabuf;
     mrMeta.addr = addr;
     mrMeta.mr = ibv_reg_mr(pd_, addr, length, access);
 #endif
@@ -539,9 +550,11 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
     return 0;
 }
 
-int RdmaContext::registerMemoryRegion(void *addr, size_t length, int access) {
-    MemoryRegionMeta mrMeta;
-    int ret = registerMemoryRegionInternal(addr, length, access, mrMeta);
+int RdmaContext::registerMemoryRegion(void *addr, size_t length, int access,
+                                      bool allow_gpu_dmabuf) {
+    MemoryRegionMeta mrMeta{nullptr, nullptr};
+    int ret = registerMemoryRegionInternal(addr, length, access,
+                                           allow_gpu_dmabuf, mrMeta);
     if (ret != 0) {
         return ret;
     }
@@ -564,10 +577,11 @@ int RdmaContext::unregisterMemoryRegion(void *addr) {
     return 0;
 }
 
-int RdmaContext::preTouchMemory(void *addr, size_t length) {
-    MemoryRegionMeta mrMeta;
+int RdmaContext::preTouchMemory(void *addr, size_t length,
+                                bool allow_gpu_dmabuf) {
+    MemoryRegionMeta mrMeta{nullptr, nullptr};
     int ret = registerMemoryRegionInternal(addr, length, IBV_ACCESS_LOCAL_WRITE,
-                                           mrMeta);
+                                           allow_gpu_dmabuf, mrMeta);
     if (ret != 0) {
         return ret;
     }

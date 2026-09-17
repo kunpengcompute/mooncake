@@ -85,8 +85,8 @@ int GetCurrentNumaSocketId() {
 #endif
 
 #ifdef USE_NOF
-bool IsCudaLocationForSpdk(const std::string& location) {
-    return location.rfind("cuda:", 0) == 0;
+bool IsGpuLocationForSpdk(const std::string& location) {
+    return location.rfind(GPU_PREFIX, 0) == 0;
 }
 
 bool IsSpdkGpuDmabufRequested() {
@@ -2926,7 +2926,7 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
 #ifdef USE_NOF
-    if (IsCudaLocationForSpdk(location) && IsSpdkGpuDmabufRequested()) {
+    if (IsGpuLocationForSpdk(location) && IsSpdkGpuDmabufRequested()) {
         if (!SpdkWrapper::GetInstance().InitializeEnv()) {
             (void)this->transfer_engine_->unregisterLocalMemory(
                 addr, update_metadata);
@@ -2941,7 +2941,7 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
             SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
             (void)this->transfer_engine_->unregisterLocalMemory(
                 addr, update_metadata);
-            LOG(ERROR) << "Failed to register CUDA buffer with SPDK GPU "
+            LOG(ERROR) << "Failed to register GPU buffer with SPDK GPU "
                        << "dma-buf domain, addr=" << addr
                        << ", length=" << length << ", rc=" << spdk_rc;
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -2953,13 +2953,14 @@ tl::expected<void, ErrorCode> Client::RegisterLocalMemory(
 
 tl::expected<void, ErrorCode> Client::unregisterLocalMemory(
     void* addr, bool update_metadata) {
-    if (this->transfer_engine_->unregisterLocalMemory(addr, update_metadata) !=
-        0) {
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
+    const int rdma_rc =
+        this->transfer_engine_->unregisterLocalMemory(addr, update_metadata);
 #ifdef USE_NOF
     SpdkWrapper::GetInstance().UnregisterGpuMemoryRegion(addr);
 #endif
+    if (rdma_rc != 0) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
     return {};
 }
 

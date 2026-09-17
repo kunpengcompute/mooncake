@@ -34,9 +34,8 @@ struct MemoryLocationEntry {
 // If only_first_page is true, only the location of the first page will be
 // returned. Scan all pages may take a long time, so set only_first_page if only
 // the location of the first page is needed.
-const std::vector<MemoryLocationEntry> getMemoryLocation(void *start,
-                                                         size_t len,
-                                                         bool only_first_page);
+const std::vector<MemoryLocationEntry> getMemoryLocation(
+    void *start, size_t len, bool only_first_page, bool probe_gpu = true);
 
 const static std::string kWildcardLocation = "*";
 const static std::string kSegmentsLocationPrefix = "segments:";

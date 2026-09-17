@@ -140,8 +140,15 @@ python3 -m mooncake.mooncake_store_service --config=/home/store_service.json --p
 
 ### 4.1 前置条件
 
-1. 在Mooncake节点（192.168.65.81）配置到SSD池节点（192.168.65.56）的免密登录
-   参考[配置免密登录](https://www.hikunpeng.com/document/detail/zh/kunpengsdss/ecosystemEnable/Ceph/kunpengcephblock_04_0017_0.html)。
+1. 在Mooncake节点（192.168.65.81）配置到SSD池节点（192.168.65.56）的免密登录：
+
+   ```bash
+   ssh-keygen -t rsa
+   ssh-copy-id root@192.168.65.56
+   ssh root@192.168.65.56
+   ```
+
+   执行最后一条命令，确认无需输入密码即可登录SSD池节点。
 2. SSD池节点需提前编译好SPDK，参考[SPDK 编译安装](https://github.com/spdk/spdk/blob/master/README.md#build)。
 
 ### 4.2 安装SSH依赖
@@ -537,25 +544,25 @@ taskset -c 0-31 pip install -e . --no-build-isolation
 
 1. 设置环境变量：
 
-```bash
-export LMCACHE_CONFIG_FILE="/path/vllm-lmcache-mooncake-config.yaml"
-export MC_STORE_NUMA_SOCKET_ID=0
-export MC_NOF_WORKERS=4
-export MC_NOF_SUBMIT_CHUNK_BYTES=$((1 << 17))  # 128KB
-export MC_NOF_INFLIGHT_BYTES_LIMIT=$((1 << 23))  # 8MB
-```
+    ```bash
+    export LMCACHE_CONFIG_FILE="/path/vllm-lmcache-mooncake-config.yaml"
+    export MC_STORE_NUMA_SOCKET_ID=0
+    export MC_NOF_WORKERS=4
+    export MC_NOF_SUBMIT_CHUNK_BYTES=$((1 << 17))  # 128KB
+    export MC_NOF_INFLIGHT_BYTES_LIMIT=$((1 << 23))  # 8MB
+    ```
 
-1. 启动服务：
+2. 启动服务：
 
-```bash
-vllm serve --port 7070 \
-           --tensor-parallel-size 1 \
-           --gpu-memory-utilization 0.8 \
-           --trust-remote-code \
-           --kv-transfer-config \
-           '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
-           --model /home/Qwen3-8B
-```
+    ```bash
+    vllm serve --port 7070 \
+               --tensor-parallel-size 1 \
+               --gpu-memory-utilization 0.8 \
+               --trust-remote-code \
+               --kv-transfer-config \
+               '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}' \
+               --model /home/Qwen3-8B
+    ```
 
 参数说明：
 
@@ -591,11 +598,11 @@ extra_config:
 
 **说明**：
 
+- `enable_mooncake_nof_pool`：设为`True`时启用NoF池化功能（使用SPDK申请大页内存）；
+  设为`False`时申请普通内存，KVCache无法写入NoF SSD池。
 - `extra_config`中的`local_hostname`、`metadata_server`、
   `master_server_address`、`protocol`参数与`store_service.json`一致。由于本节点单独作为计算节点不提供存储服务，`global_segment_size`配置为`0`，
   `device_name`同样可通过`ibv_devices`命令查看192.168.65.57节点的网卡名称。
-- `enable_mooncake_nof_pool=True`：启用NOF池化功能（使用SPDK申请大页内存）。
-- 若设为 `False`，则申请普通内存，KVCache无法写入SSD池。
 
 #### 环境变量说明
 

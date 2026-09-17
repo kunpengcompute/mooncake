@@ -111,10 +111,17 @@ class SPDKTgtCreatorTest(unittest.TestCase):
         creator = _creator()
         output = "READY 0000:01:00.0 vfio-pci\nNOT_READY 0000:02:00.0 nvme"
         with patch.object(creator, "_execute_command", return_value=(output, "")):
-            self.assertEqual(
-                creator._filter_spdk_ready_pci_devices(None, ["0000:01:00.0", "0000:02:00.0"], False),
-                ["0000:01:00.0"],
-            )
+            with self.assertLogs(creator.logger, level="INFO") as logs:
+                self.assertEqual(
+                    creator._filter_spdk_ready_pci_devices(
+                        None, ["0000:01:00.0", "0000:02:00.0"], False
+                    ),
+                    ["0000:01:00.0"],
+                )
+            self.assertTrue(any(
+                "requested=2, available=1, skipped=1" in message
+                for message in logs.output
+            ))
             with self.assertRaisesRegex(RuntimeError, "not available"):
                 creator._filter_spdk_ready_pci_devices(None, ["0000:01:00.0", "0000:02:00.0"], True)
         self.assertEqual(creator._filter_spdk_ready_pci_devices(None, [], False), [])

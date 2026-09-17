@@ -336,6 +336,13 @@ done"""
                 )
             self.logger.warning(f"Skipping PCI devices not available to SPDK after setup.sh: {details}")
 
+        self.logger.info(
+            "SPDK PCI device selection summary: requested=%d, available=%d, skipped=%d",
+            len(pci_devices),
+            len(ready_devices),
+            len(not_ready_devices),
+        )
+
         if not ready_devices:
             raise RuntimeError("No PCI devices are available to SPDK after setup.sh")
 
@@ -639,7 +646,10 @@ class MooncakeNoFRegister:
             # Remove duplicate SSDs based on their unique identifiers
             self._remove_duplicate_ssds()
 
-            logging.info("Loaded %d SSD configuration(s)", len(self.config_list))
+            logging.info(
+                "Loaded %d registerable namespace configuration(s)",
+                len(self.config_list),
+            )
         except Exception as e:
             logging.error("Configuration load failed: %s", e)
             raise
@@ -869,7 +879,14 @@ class MooncakeNoFRegister:
 
         for i, cfg in enumerate(self.config_list):
             try:
-                logging.info("Registering SSD %d/%d: nqn=%s, traddr=%s", i + 1, total, cfg.get("nqn"), cfg.get("traddr"))
+                logging.info(
+                    "Registering namespace %d/%d: nqn=%s, nsid=%s, traddr=%s",
+                    i + 1,
+                    total,
+                    cfg.get("nqn"),
+                    cfg.get("nsid"),
+                    cfg.get("traddr"),
+                )
 
                 # Create register instance and register SSD
                 from mooncake.store import MooncakeDistributedNoFRegister
@@ -888,25 +905,36 @@ class MooncakeNoFRegister:
                 if ret != 0:
                     raise RuntimeError(f"Registration failed with code {ret}")
 
-                logging.info("Register SSD %d/%d succeeded", i + 1, total)
+                logging.info("Register namespace %d/%d succeeded", i + 1, total)
                 success_count += 1
 
             except Exception as e:
                 # Check if the error is due to the segment already existing on the server
                 if "SEGMENT_ALREADY_EXISTS" in str(e) or "segment already exists" in str(e):
-                    logging.info("SSD %d/%d (nqn=%s, traddr=%s) already registered on server, skipping",
-                                i + 1, total, cfg.get("nqn"), cfg.get("traddr"))
+                    logging.info(
+                        "Namespace %d/%d (nqn=%s, nsid=%s, traddr=%s) already registered on server, skipping",
+                        i + 1,
+                        total,
+                        cfg.get("nqn"),
+                        cfg.get("nsid"),
+                        cfg.get("traddr"),
+                    )
                     skipped_count += 1
                 else:
-                    logging.error("Failed to register SSD %d/%d: %s", i + 1, total, e)
+                    logging.error(
+                        "Failed to register namespace %d/%d: %s",
+                        i + 1,
+                        total,
+                        e,
+                    )
                     failed_count += 1
 
         # Summary
-        logging.info("SSD registration summary:")
-        logging.info("- Total SSDs: %d", total)
-        logging.info("- Successfully registered: %d", success_count)
-        logging.info("- Already registered (skipped): %d", skipped_count)
-        logging.info("- Failed: %d", failed_count)
+        logging.info("Namespace registration summary:")
+        logging.info("- Registerable namespaces: %d", total)
+        logging.info("- Successfully registered namespaces: %d", success_count)
+        logging.info("- Already registered namespaces (skipped): %d", skipped_count)
+        logging.info("- Failed namespaces: %d", failed_count)
 
         # Return success if all SSDs were either registered or already existed
         return failed_count == 0

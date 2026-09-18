@@ -518,13 +518,35 @@ void SpdkNofWorkerPool::workerThread(int work_idx) {
             for (int i = 0; i < kSpdkNofOpNum; ++i) {
                 int avail_blocks = nof_qos->inflight_blocks_limit -
                                    nof_qos->inflight_blocks[i];
-                while (nof_qos->head[i] && avail_blocks > 0) {
+                bool wait_for_credit = false;
+                while (nof_qos->head[i] && avail_blocks > 0 &&
+                       !wait_for_credit) {
                     SpdkNofTask* task = nof_qos->head[i];
                     SpdkNofSubTask* sub_task;
                     while (task->remaining_lba > 0 && avail_blocks > 0) {
-                        uint32_t submit_lba_count = std::min(
-                            avail_blocks, std::min(task->remaining_lba,
-                                                   nof_qos->blocks_per_chunk));
+                        // Do not fragment a normal chunk merely to consume the
+                        // last few available inflight credits. Wait for
+                        // completions and submit the whole chunk on the next
+                        // worker iteration instead. This also keeps the final
+                        // task tail in one request. Clamp by the configured
+                        // inflight limit so configurations where the limit is
+                        // smaller than a chunk continue to make progress.
+                        const int desired_lba_count = std::min(
+                            task->remaining_lba,
+                            std::min(nof_qos->blocks_per_chunk,
+                                     nof_qos->inflight_blocks_limit));
+                        if (avail_blocks < desired_lba_count) {
+                            // Some credit remains, but it is not enough for the
+                            // next complete chunk. Leave this QoS round and
+                            // poll completions below to replenish credits.
+                            // Merely breaking the inner loop would immediately
+                            // revisit the same task with unchanged state and
+                            // spin forever.
+                            wait_for_credit = true;
+                            break;
+                        }
+                        const uint32_t submit_lba_count =
+                            static_cast<uint32_t>(desired_lba_count);
                         int lba_off = task->lba_count - task->remaining_lba;
                         uint64_t submit_lba = task->lba + lba_off;
                         if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks,

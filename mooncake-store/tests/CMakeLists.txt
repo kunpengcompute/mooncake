@@ -55,6 +55,20 @@ add_store_test(master_service_promotion_test_for_snapshot
                ha/snapshot/master_service_promotion_test_for_snapshot.cpp)
 if(USE_NOF)
   add_store_test(nof_heartbeat_test nof_heartbeat_test.cpp)
+  # Exercise the real scheduling loop without controllers or SPDK libraries.
+  add_executable(nof_worker_scheduling_test nof_worker_scheduling_test.cpp
+                 ../src/transfer_task.cpp)
+  target_include_directories(nof_worker_scheduling_test PRIVATE ${SPDK_INCLUDE_DIR})
+  target_compile_options(nof_worker_scheduling_test PRIVATE
+                         -ffunction-sections -fdata-sections)
+  target_link_options(nof_worker_scheduling_test PRIVATE -Wl,--gc-sections)
+  target_link_libraries(nof_worker_scheduling_test PRIVATE glog pthread numa)
+  foreach(scenario partial_credit small_limit submit_failure)
+    add_test(NAME nof_worker_scheduling_${scenario}
+             COMMAND nof_worker_scheduling_test ${scenario})
+    set_tests_properties(nof_worker_scheduling_${scenario}
+                         PROPERTIES TIMEOUT 10)
+  endforeach()
 endif()
 add_store_test(client_integration_test client_integration_test.cpp)
 if(USE_CXL)

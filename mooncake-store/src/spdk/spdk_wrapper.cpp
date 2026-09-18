@@ -1,4 +1,6 @@
 #include <glog/logging.h>
+#include <pthread.h>
+#include <sched.h>
 
 #include <atomic>
 #include <cerrno>
@@ -77,10 +79,36 @@ struct ProcessSpdkEnvironment {
         if (did_init != nullptr) {
             *did_init = true;
         }
+        // DPDK may pin the calling thread to its main lcore. Preserve the
+        // embedding application's CPU/NUMA affinity around the actual init,
+        // not around subsequent users acquiring the shared environment.
+        cpu_set_t original_affinity;
+        int affinity_rc = pthread_getaffinity_np(
+            pthread_self(), sizeof(original_affinity), &original_affinity);
+        if (affinity_rc != 0) {
+            LOG(ERROR) << "Failed to save caller CPU affinity before SPDK init: "
+                       << std::strerror(affinity_rc);
+            init_result = -affinity_rc;
+            return init_result;
+        }
+
         init_result = spdk_env_init(opts);
+        affinity_rc = pthread_setaffinity_np(
+            pthread_self(), sizeof(original_affinity), &original_affinity);
+        if (affinity_rc != 0) {
+            LOG(ERROR) << "Failed to restore caller CPU affinity after SPDK init: "
+                       << std::strerror(affinity_rc);
+            if (init_result == 0) {
+                spdk_env_fini();
+                fini_called = true;
+                init_result = -affinity_rc;
+            }
+            return init_result;
+        }
         if (init_result != 0) {
             return init_result;
         }
+        LOG(INFO) << "Restored caller CPU affinity after SPDK initialization";
 
         env_initialized = true;
         users = 1;
@@ -220,7 +248,6 @@ bool SpdkWrapper::InitializeEnv(const std::string &app_name) {
         initialization_error_ = rc;
         return false;
     }
-
     env_acquired_ = true;
 
     // Mark SPDK as initialized.

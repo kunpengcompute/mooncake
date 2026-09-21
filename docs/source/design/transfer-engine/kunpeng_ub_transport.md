@@ -216,10 +216,10 @@ export MC_LOCAL_SERVER_NAME=127.0.0.1:12345  # default
 
 ### Key Components
 
-1. **UbTransport**: The main transport class that manages URMA resources and endpoints.
-2. **UrmaContext**: Represents a URMA device context, handling device initialization and resource management.
-3. **UrmaEndpoint**: Represents a connection to a remote peer, handling data transfer operations.
-4. **mock_urma_api.cpp**: Mock implementation of URMA API for testing without real URMA hardware.
+- **UbTransport**: The main transport class that manages URMA resources and endpoints.
+- **UrmaContext**: Represents a URMA device context, handling device initialization and resource management.
+- **UrmaEndpoint**: Represents a connection to a remote peer, handling data transfer operations.
+- **mock_urma_api.cpp**: Mock implementation of URMA API for testing without real URMA hardware.
 
 ### Protocol Advantages
 

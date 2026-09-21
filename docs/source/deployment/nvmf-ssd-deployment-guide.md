@@ -104,7 +104,7 @@ pip3 install aiohttp
   "master_server_address": "192.168.65.81:50051",
   "protocol": "rdma",
   "device_name": "mlx5_0",
-  "global_segment_size": "50gb",
+  "global_segment_size": "50GB",
   "local_buffer_size": 0
 }
 ```
@@ -226,26 +226,26 @@ python3 -m mooncake.mooncake_ssd_create_and_register \
 
 | 参数 | 是否必选 | 说明 |
 | --- | --- | --- |
-| `--master_server_address` | 是 | Mooncake master地址，例如`192.168.65.81:50051`。 |
-| `--spdk_target_info` | 是 | target描述，可重复指定。格式为`ip:<target_ip> path:<spdk_path> [pci:<pci1>,<pci2>]`。 |
-| `--skip-create` | 否 | 跳过target创建阶段，只执行注册。 |
-| `--skip-register` | 否 | 跳过master注册阶段，只执行target创建。 |
-| `--dry-run` | 否 | 只打印流程，不执行远端操作。 |
-| `--core-mask` | 否 | 启动 `nvmf_tgt` 使用的CPU core mask，默认`0xff`。 |
-| `--transport-type` | 否 | NVMe-oF transport类型，默认`RDMA`。 |
-| `--max-queue-depth` | 否 | transport最大队列深度，默认`128`。 |
-| `--max-io-qpairs-per-ctrlr` | 否 | 每个controller最大I/O qpair数，默认`127`。 |
-| `--max-io-size` | 否 | 最大I/O大小，默认`4096`。 |
-| `--in-capsule-data-size` | 否 | in-capsule data size，默认`131072`。 |
-| `--io-unit-size` | 否 | I/O unit size，默认`131072`。 |
-| `--max-aq-depth` | 否 | admin queue depth，默认`128`。 |
-| `--num-shared-buffers` | 否 | transport shared buffer数量，默认`4096`。 |
-| `--buf-cache-size` | 否 | 每个poll group的buffer cache size，默认`32`。 |
-| `--username` | 否 | SSH用户名，默认`root`。 |
-| `--port` | 否 | SSH端口，默认`22`。 |
-| `--password` | 否 | SSH密码。 |
-| `--key-file` | 否 | SSH私钥文件。 |
-| `-D, --define` | 否 | 注册阶段字段覆盖，例如`-Dtrsvcid=4420`。 |
+| --master_server_address | 是 | Mooncake master地址，例如192.168.65.81:50051。 |
+| --spdk_target_info | 是 | target描述，可重复指定。格式为ip:<target_ip> path:<spdk_path> [pci:<pci1>,<pci2>]。 |
+| --skip-create | 否 | 跳过target创建阶段，只执行注册。 |
+| --skip-register | 否 | 跳过master注册阶段，只执行target创建。 |
+| --dry-run | 否 | 只打印流程，不执行远端操作。 |
+| --core-mask | 否 | 启动nvmf_tgt使用的CPU core mask，默认0xff。 |
+| --transport-type | 否 | NVMe-oF transport类型，默认RDMA。 |
+| --max-queue-depth | 否 | transport最大队列深度，默认128。 |
+| --max-io-qpairs-per-ctrlr | 否 | 每个controller最大I/O qpair数，默认127。 |
+| --max-io-size | 否 | 最大I/O大小，默认4096。 |
+| --in-capsule-data-size | 否 | in-capsule data size，默认131072。 |
+| --io-unit-size | 否 | I/O unit size，默认131072。 |
+| --max-aq-depth | 否 | admin queue depth，默认128。 |
+| --num-shared-buffers | 否 | transport shared buffer数量，默认4096。 |
+| --buf-cache-size | 否 | 每个poll group的buffer cache size，默认32。 |
+| --username | 否 | SSH用户名，默认root。 |
+| --port | 否 | SSH端口，默认22。 |
+| --password | 否 | SSH密码。 |
+| --key-file | 否 | SSH私钥文件。 |
+| -D, --define | 否 | 注册阶段字段覆盖，例如-Dtrsvcid=4420。 |
 
 ## 6. 解注册并可选移除 SSD
 
@@ -350,17 +350,19 @@ python3 -m mooncake.mooncake_ssd_unregister_and_remove \
 
 | 参数 | 是否必选 | 说明 |
 | --- | --- | --- |
-| `--master_server_address` | 条件必选 | 默认流程必选；`--target-only`模式不使用。 |
-| `--target-only` | 否 | 跳过master，独立移除target namespace；支持配合`--detach-bdev`清理底层controller。 |
-| `--spdk_target_info` | 是 | target/namespace描述，可重复指定。格式为`ip:<target_ip> path:<spdk_path> [ns:<nsid>] [nqn:<subsystem_nqn>]`。 |
-| `--remove-target-namespace` | 否 | master解注册成功后，从SPDK target subsystem中移除匹配namespace。 |
-| `--detach-bdev` | 否 | 移除namespace后detach对应SPDK NVMe bdev controller。必须配合`--remove-target-namespace`或`--target-only`使用。 |
-| `--dry-run` | 否 | 只打印流程，不执行远端操作。 |
-| `--username` | 否 | SSH用户名，默认`root`。 |
-| `--port` | 否 | SSH 端口，默认`22`。 |
-| `--password` | 否 | SSH密码。 |
-| `--key-file` | 否 | SSH私钥文件。 |
-| `-D, --define` | 否 | 解注册阶段字段覆盖，例如`-Dtrsvcid=4420`。 |
+
+| --master_server_address | 条件必选 | 默认流程必选；--target-only模式不使用。 |
+| --target-only | 否 | 跳过master，独立移除target namespace；支持配合--detach-bdev清理底层controller。 |
+| --spdk_target_info | 是 | target/namespace描述，可重复指定。格式为ip:<target_ip> path:<spdk_path> [ns:<nsid>] [nqn:<subsystem_nqn>]。 |
+| --remove-target-namespace | 否 | master解注册成功后，从SPDK target subsystem中移除匹配namespace。 |
+| --detach-bdev | 否 | 移除namespace后detach对应SPDK NVMe bdev controller。必须配合--remove-target-namespace或--target-only使用。 |
+| --dry-run | 否 | 只打印流程，不执行远端操作。 |
+| --username | 否 | SSH用户名，默认root。 |
+| --port | 否 | SSH 端口，默认22。 |
+| --password | 否 | SSH密码。 |
+| --key-file | 否 | SSH私钥文件。 |
+| -D, --define | 否 | 解注册阶段字段覆盖，例如-Dtrsvcid=4420。 |
+
 
 ### 6.8 获取 Target 端盘信息
 
@@ -372,7 +374,7 @@ python3 -m mooncake.mooncake_ssd_unregister_and_remove \
 ./scripts/rpc.py nvmf_get_subsystems
 ```
 
-1. 查看盘的详细信息（块大小、PCI号等）：
+2. 查看盘的详细信息（块大小、PCI号等）：
 
 ```bash
 ./scripts/rpc.py bdev_get_bdevs
@@ -412,12 +414,12 @@ ENDPOINTS+='adrfam:IPv4 ns:2'
 
 | 参数             | 说明                       |
 | ---------------- | -------------------------- |
-| `--endpoints`    | 测试盘信息                 |
-| `--op`           | 读写操作类型（read/write） |
-| `--io_size`      | 块大小（字节）             |
-| `--iodepth`      | 读写队列深度               |
-| `--warmup_sec`   | 预热时间（秒）             |
-| `--duration_sec` | 测试时长（秒）             |
+| --endpoints    | 测试盘信息                 |
+| --op          | 读写操作类型（read/write） |
+| --io_size      | 块大小（字节）             |
+| --iodepth      | 读写队列深度               |
+| --warmup_sec   | 预热时间（秒）             |
+| --duration_sec | 测试时长（秒）             |
 
 ### 7.2 VLLM+LMCache+Mooncake端到端测试
 
@@ -536,7 +538,7 @@ cd vllm
 git checkout v0.15.2rc0
 python use_existing_torch.py   #指向已经安装的pytorch
 pip install -r requirements/build.txt
-#编译vllm非常吃内存，建议用taskset -c限制下编译的核心数
+#编译vllm非常消耗内存，建议用taskset -c限制下编译的核心数
 taskset -c 0-31 pip install -e . --no-build-isolation
 ```
 
@@ -568,12 +570,12 @@ taskset -c 0-31 pip install -e . --no-build-isolation
 
 | 参数                       | 说明                            |
 | -------------------------- | ------------------------------- |
-| `--port`                   | VLLM服务端口号                 |
-| `--tensor-parallel-size`   | 张量并行度（与GPU数量一致）   |
-| `--gpu-memory-utilization` | GPU内存利用率（0.8表示80%）  |
-| `--trust-remote-code`      | 信任远程代码执行                |
-| `--kv-transfer-config`     | KV缓存传输配置（LMCache插件） |
-| `--model`                  | 模型路径（Qwen3-8B）            |
+| --port                   | VLLM服务端口号                 |
+| --tensor-parallel-size   | 张量并行度（与GPU数量一致）   |
+| --gpu-memory-utilization | GPU内存利用率（0.8表示80%）  |
+| --trust-remote-code      | 信任远程代码执行                |
+| --kv-transfer-config     | KV缓存传输配置（LMCache插件） |
+| --model                  | 模型路径（Qwen3-8B）            |
 
 #### LMCache配置文件
 
@@ -608,10 +610,10 @@ extra_config:
 
 | 环境变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `MC_STORE_NUMA_SOCKET_ID` | NoF worker绑定的NUMA节点编号。 | 当前CPU所在NUMA节点 |
-| `MC_NOF_WORKERS` | 处理SPDK NoF IO操作的工作线程数量。 | 4 |
-| `MC_NOF_SUBMIT_CHUNK_BYTES` | 每次向SPDK提交的IO操作大小。 | 128KB |
-| `MC_NOF_INFLIGHT_BYTES_LIMIT` | 单个NoF segment、单个读或写方向允许的最大未完成IO字节数。 | 32MB |
+| MC_STORE_NUMA_SOCKET_ID | NoF worker绑定的NUMA节点编号。 | 当前CPU所在NUMA节点 |
+| MC_NOF_WORKERS | 处理SPDK NoF IO操作的工作线程数量。 | 4 |
+| MC_NOF_SUBMIT_CHUNK_BYTES | 每次向SPDK提交的IO操作大小。 | 128KB |
+| MC_NOF_INFLIGHT_BYTES_LIMIT | 单个NoF segment、单个读或写方向允许的最大未完成IO字节数。 | 32MB |
 
 **注意**：后三个参数共同构成SPDK NoF IO的QoS控制机制；`MC_STORE_NUMA_SOCKET_ID`用于控制NoF worker的NUMA affinity。
 
@@ -655,22 +657,22 @@ vllm bench serve \
 
 | 参数                | 说明                            |
 | ------------------- | ------------------------------- |
-| `--backend`         | 后端服务类型（openai）          |
-| `--model`           | 模型路径（Qwen3-8B）            |
-| `--dataset-name`    | 测试数据集名称                  |
-| `--dataset-path`    | 测试数据集路径（ShareGPT.json） |
-| `--burstiness`      | 最大请求并发数                  |
-| `--input-len`       | 输入序列长度                    |
-| `--output-len`      | 输出序列长度                    |
-| `--request-rate`    | 请求速率（QPS）                 |
-| `--max-concurrency` | 最大并发数                      |
-| `--save-result`     | 保存测试结果                    |
-| `--result-dir`      | 测试结果保存目录                |
-| `--host`            | 服务主机名                      |
-| `--port`            | 服务端口号                      |
-| `--num-clients`     | 客户端数量                      |
-| `--num-rounds`      | 测试轮数                        |
-| `--save-detailed`   | 保存详细测试结果                |
+| --backend         | 后端服务类型（openai）          |
+| --model           | 模型路径（Qwen3-8B）            |
+| --dataset-name    | 测试数据集名称                  |
+| --dataset-path    | 测试数据集路径（ShareGPT.json） |
+| --burstiness      | 最大请求并发数                  |
+| --input-len       | 输入序列长度                    |
+| --output-len      | 输出序列长度                    |
+| --request-rate    | 请求速率（QPS）                 |
+| --max-concurrency | 最大并发数                      |
+| --save-result     | 保存测试结果                    |
+| --result-dir      | 测试结果保存目录                |
+| --host            | 服务主机名                      |
+| --port            | 服务端口号                      |
+| --num-clients     | 客户端数量                      |
+| --num-rounds      | 测试轮数                        |
+| --save-detailed   | 保存详细测试结果                |
 
 ## 修订记录
 

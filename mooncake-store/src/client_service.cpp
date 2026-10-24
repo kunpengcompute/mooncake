@@ -1001,7 +1001,7 @@ ErrorCode Client::InitTransferEngine(
     }
     auto [hostname, port] = parseHostNameWithPort(local_hostname);
     int rc = transfer_engine_->init(metadata_connstring, local_hostname,
-                                    hostname, port);
+                                    hostname, port, protocol);
     if (rc != 0) {
         LOG(ERROR) << "Failed to initialize transfer engine, rc=" << rc;
         return ErrorCode::INTERNAL_ERROR;

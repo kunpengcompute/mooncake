@@ -35,6 +35,8 @@ class DirectGpuReadTest : public ::testing::Test {
             MemoryReplica(replica_protocol), buffer, size);
     }
 
+    void EnableAscendStaging() { client_.ascend_data_staging_ = true; }
+
     RealClient client_;
 };
 
@@ -62,6 +64,14 @@ TEST_F(DirectGpuReadTest, OtherReplicaProtocolsKeepStagingFallback) {
     RegisterRange(buffer, sizeof(buffer));
 
     EXPECT_FALSE(CanUseDirectRead("tcp", buffer, sizeof(buffer)));
+}
+
+TEST_F(DirectGpuReadTest,
+       AscendStagingNeverTreatsAddressMetadataAsRdmaRegistration) {
+    char buffer[16];
+    RegisterRange(buffer, sizeof(buffer));
+    EnableAscendStaging();
+    EXPECT_FALSE(CanUseDirectRead("rdma", buffer, sizeof(buffer)));
 }
 
 }  // namespace mooncake

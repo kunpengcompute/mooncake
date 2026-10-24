@@ -1,3 +1,4 @@
+#include "transport/rdma_transport/ascend_storage_config.h"
 #include "transfer_task.h"
 
 #include <set>
@@ -954,9 +955,9 @@ void MemcpyWorkerPool::workerThread() {
                             device_id = dst_info.device_id;
                             direction = device::CopyDirection::kHostToDevice;
                         }
-                        accelerator->SetContext(device_id);
-                        if (!accelerator->Copy(op.dest, op.src, op.size,
-                                               direction)) {
+                        if (!accelerator->CopyWithContext(op.dest, op.src,
+                                                          op.size, direction,
+                                                          device_id)) {
                             LOG(ERROR) << "GPU memcpy failed: src_dev="
                                        << src_info.device_id
                                        << " dst_dev=" << dst_info.device_id
@@ -986,7 +987,31 @@ void MemcpyWorkerPool::workerThread() {
 // TransferEngineOperationState Implementation
 // ============================================================================
 
+void TransferEngineOperationState::Drain() {
+    if (!drain_before_release_ || tent_engine_) return;
+    auto& batch = Transport::toBatchDesc(batch_id_);
+    for (;;) {
+        bool done = true;
+        for (size_t i = 0; i < batch.task_list.size(); ++i) {
+            if (batch.task_list[i].slice_count == 0) continue;
+            TransferStatus status;
+            auto rc = engine_.getTransferStatus(batch_id_, i, status);
+            if (!rc.ok() || (status.s != TransferStatusEnum::COMPLETED &&
+                             status.s != TransferStatusEnum::FAILED &&
+                             status.s != TransferStatusEnum::CANCELED)) {
+                done = false;
+                break;
+            }
+        }
+        if (done && batch.active_completion_callbacks.load(
+                        std::memory_order_acquire) == 0)
+            return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 TransferEngineOperationState::~TransferEngineOperationState() {
+    Drain();
 #ifdef USE_TENT
     if (tent_engine_)
         tent_engine_->freeBatch(batch_id_);
@@ -1106,6 +1131,7 @@ void TransferEngineOperationState::set_result_internal(ErrorCode error_code) {
         return;  // Don't crash, just return early
     }
 
+    Drain();
     VLOG(1) << "Setting transfer result for batch " << batch_id_ << " to "
             << static_cast<int>(error_code);
     result_.emplace(error_code);
@@ -2025,13 +2051,19 @@ std::optional<TransferFuture> TransferSubmitter::submitTransfer(
         if (!s.ok()) {
             LOG(ERROR) << "Failed to submit all transfers, error code is "
                        << s.code();
-            engine_.freeBatchID(batch_id);
+            if (AscendStorageConfig::GetInstance().HasRoute()) {
+                TransferEngineOperationState drain(engine_, batch_id,
+                                                   batch_size, true);
+            } else {
+                engine_.freeBatchID(batch_id);
+            }
             return std::nullopt;
         }
     }
 
     auto state = std::make_shared<TransferEngineOperationState>(
-        engine_, batch_id, batch_size);
+        engine_, batch_id, batch_size,
+        AscendStorageConfig::GetInstance().HasRoute());
 
     return TransferFuture(state);
 }

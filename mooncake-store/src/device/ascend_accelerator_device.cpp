@@ -1,11 +1,15 @@
 #include "device/accelerator_registry.h"
 #include "pinned_host_buffer.h"
 
-#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT) || defined(USE_UBSHMEM)
+#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT) || \
+    defined(USE_UBSHMEM) || defined(USE_ASCEND_NDR) ||   \
+    defined(USE_ASCEND_STAGING)
 #include <acl/acl_rt.h>
 #endif
 
-#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT) || defined(USE_UBSHMEM)
+#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT) || \
+    defined(USE_UBSHMEM) || defined(USE_ASCEND_NDR) ||   \
+    defined(USE_ASCEND_STAGING)
 
 namespace mooncake {
 namespace device {
@@ -82,6 +86,31 @@ class AscendAcceleratorDevice final : public ProbeCachedAcceleratorDevice {
         return aclrtMemcpy(dst, size, src, size, kind) == ACL_SUCCESS;
     }
 
+    bool ValidateRange(const void* ptr, size_t length) const override {
+        void* base = nullptr;
+        size_t capacity = 0;
+        if (aclrtMemGetAddressRange(const_cast<void*>(ptr), &base, &capacity) !=
+            ACL_SUCCESS)
+            return false;
+        const auto address = reinterpret_cast<uintptr_t>(ptr);
+        const auto start = reinterpret_cast<uintptr_t>(base);
+        return address >= start && length <= capacity &&
+               address - start <= capacity - length;
+    }
+
+    bool CopyWithContext(void* dst, const void* src, size_t size,
+                         CopyDirection direction,
+                         int32_t device_id) const override {
+        aclrtContext previous = nullptr;
+        (void)aclrtGetCurrentContext(&previous);
+        if (device_id >= 0 && aclrtSetDevice(device_id) != ACL_SUCCESS)
+            return false;
+        bool ok = Copy(dst, src, size, direction);
+        if (previous && aclrtSetCurrentContext(previous) != ACL_SUCCESS)
+            ok = false;
+        return ok;
+    }
+
     PinnedHostBuffer AllocatePinnedHost(size_t size) const override {
         void* addr = nullptr;
         if (aclrtMallocHost(&addr, size) != ACL_SUCCESS) {
@@ -100,6 +129,9 @@ const AcceleratorDeviceRegistrar registered_ascend_device(
     AscendDeviceInstance());
 
 }  // namespace
+
+void EnsureAscendAcceleratorDeviceLinked() { (void)AscendDeviceInstance(); }
+
 }  // namespace device
 }  // namespace mooncake
 

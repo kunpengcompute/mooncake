@@ -35,8 +35,8 @@ bool RuntimeAccelerator::CopyToHost(void* dst, const void* src,
         std::memcpy(dst, src, size);
         return true;
     }
-    accelerator->SetContext(pointer_info.device_id);
-    return accelerator->Copy(dst, src, size, CopyDirection::kDeviceToHost);
+    return accelerator->CopyWithContext(
+        dst, src, size, CopyDirection::kDeviceToHost, pointer_info.device_id);
 }
 
 bool RuntimeAccelerator::CopyFromHost(void* dst, const void* src,
@@ -47,8 +47,8 @@ bool RuntimeAccelerator::CopyFromHost(void* dst, const void* src,
         std::memcpy(dst, src, size);
         return true;
     }
-    accelerator->SetContext(pointer_info.device_id);
-    return accelerator->Copy(dst, src, size, CopyDirection::kHostToDevice);
+    return accelerator->CopyWithContext(
+        dst, src, size, CopyDirection::kHostToDevice, pointer_info.device_id);
 }
 
 bool RuntimeAccelerator::CopyAuto(void* dst, const void* src,
@@ -67,8 +67,8 @@ bool RuntimeAccelerator::CopyAuto(void* dst, const void* src,
     }
     auto* accelerator = dst_device ? dst_device : src_device;
     const auto& info = dst_device ? dst_info : src_info;
-    accelerator->SetContext(info.device_id);
-    return accelerator->Copy(dst, src, size, CopyDirection::kAuto);
+    return accelerator->CopyWithContext(dst, src, size, CopyDirection::kAuto,
+                                        info.device_id);
 }
 
 }  // namespace device

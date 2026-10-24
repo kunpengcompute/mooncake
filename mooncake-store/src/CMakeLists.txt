@@ -571,7 +571,9 @@ elseif(USE_XPU)
 endif()
 if(USE_ASCEND
    OR USE_ASCEND_DIRECT
-   OR USE_UBSHMEM)
+   OR USE_UBSHMEM
+   OR USE_ASCEND_NDR
+   OR USE_ASCEND_STAGING)
   target_include_directories(mooncake_store_client_objects
                              PRIVATE $ENV{ASCEND_PATH}/include)
 endif()
@@ -663,7 +665,9 @@ elseif(USE_HIP)
 endif()
 if(USE_ASCEND
    OR USE_ASCEND_DIRECT
-   OR USE_UBSHMEM)
+   OR USE_UBSHMEM
+   OR USE_ASCEND_NDR
+   OR USE_ASCEND_STAGING)
   target_link_libraries(mooncake_store PRIVATE ascendcl)
 endif()
 if(USE_SUNRISE)
@@ -731,7 +735,9 @@ elseif(USE_HIP)
 endif()
 if(USE_ASCEND
    OR USE_ASCEND_DIRECT
-   OR USE_UBSHMEM)
+   OR USE_UBSHMEM
+   OR USE_ASCEND_NDR
+   OR USE_ASCEND_STAGING)
   target_include_directories(mooncake_client PRIVATE $ENV{ASCEND_PATH}/include)
   target_link_libraries(mooncake_client PRIVATE ascendcl)
 endif()

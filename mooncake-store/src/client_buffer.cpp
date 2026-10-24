@@ -98,6 +98,19 @@ std::optional<BufferHandle> ClientBufferAllocator::allocate(size_t size) {
                                             std::move(*handle));
 }
 
+std::optional<BufferHandle> ClientBufferAllocator::allocateAligned(
+    size_t size, size_t alignment) {
+    if (!size || !alignment || (alignment & (alignment - 1)) ||
+        size > SIZE_MAX - (alignment - 1))
+        return std::nullopt;
+    auto allocation = allocate(size + alignment - 1);
+    if (!allocation) return std::nullopt;
+    auto owner = std::make_shared<BufferHandle>(std::move(*allocation));
+    uintptr_t address = reinterpret_cast<uintptr_t>(owner->ptr());
+    uintptr_t aligned = (address + alignment - 1) & ~(alignment - 1);
+    return BufferHandle(reinterpret_cast<void*>(aligned), size, [owner]() {});
+}
+
 BufferHandle::BufferHandle(
     std::shared_ptr<ClientBufferAllocator> allocator,
     mooncake::offset_allocator::OffsetAllocationHandle handle)

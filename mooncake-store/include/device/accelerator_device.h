@@ -53,6 +53,13 @@ class AcceleratorDevice {
     virtual bool Copy(void* dst, const void* src, size_t size,
                       CopyDirection direction) const = 0;
     virtual PinnedHostBuffer AllocatePinnedHost(size_t size) const = 0;
+    virtual bool ValidateRange(const void*, size_t) const { return true; }
+    virtual bool CopyWithContext(void* dst, const void* src, size_t size,
+                                 CopyDirection direction,
+                                 int32_t device_id) const {
+        SetContext(device_id);
+        return Copy(dst, src, size, direction);
+    }
 };
 
 class ProbeCachedAcceleratorDevice : public AcceleratorDevice {

@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <thread>
 #include <stop_token>
+#include "transport/rdma_transport/ascend_parameter_plane.h"
 
 #include <dlfcn.h>  // for dlsym (Python detection)
 #include <cstdlib>  // for atexit
@@ -230,7 +231,7 @@ BuildNestedSlicesFromBuffers(
 tl::expected<std::vector<Slice>, ErrorCode> StageWriteSlices(
     const std::shared_ptr<ClientBufferAllocator> &allocator,
     const std::vector<Slice> &slices,
-    std::vector<BufferHandle> &staging_handles) {
+    std::vector<BufferHandle> &staging_handles, size_t alignment = 1) {
     if (!allocator) {
         LOG(ERROR) << "Client buffer allocator is not provided";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -243,7 +244,9 @@ tl::expected<std::vector<Slice>, ErrorCode> StageWriteSlices(
         }
         total_size += slice.size;
     }
-    auto allocation = allocator->allocate(total_size);
+    auto allocation = alignment == 1
+                          ? allocator->allocate(total_size)
+                          : allocator->allocateAligned(total_size, alignment);
     if (!allocation) {
         return tl::unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
     }
@@ -277,7 +280,7 @@ std::vector<tl::expected<void, ErrorCode>> BatchWriteFromMultiBuffers(
     const std::vector<std::vector<size_t>> &all_sizes,
     const ReplicateConfig &config,
     const std::shared_ptr<ClientBufferAllocator> &allocator,
-    bool stage_nonlocal, BatchWriteMethod write) {
+    bool stage_nonlocal, BatchWriteMethod write, size_t alignment = 1) {
     if (!client) {
         LOG(ERROR) << "Client is not initialized";
         return std::vector<tl::expected<void, ErrorCode>>(
@@ -295,7 +298,8 @@ std::vector<tl::expected<void, ErrorCode>> BatchWriteFromMultiBuffers(
     Client::WriteBufferStager stager;
     if (stage_nonlocal) {
         stager = [&](const std::vector<Slice> &slices) {
-            return StageWriteSlices(allocator, slices, staging_handles);
+            return StageWriteSlices(allocator, slices, staging_handles,
+                                    alignment);
         };
     }
     return ((*client).*write)(keys, batched_slices.value(), config, stager);
@@ -1045,7 +1049,8 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     // to release a record, and stays false when NoF is unavailable — a clean
     // non-NoF teardown that leaves register_buffer() records behind is NOT
     // refused. Refuse to re-init this object; create a new client instead.
-    if (nof_buffer_cleanup_failed_.load(std::memory_order_acquire)) {
+    if (local_buffer_cleanup_failed_ ||
+        nof_buffer_cleanup_failed_.load(std::memory_order_acquire)) {
         LOG(ERROR) << "Cannot re-initialize: a previous teardown left "
                       "un-released NoF registrations; create a new client "
                       "instead";
@@ -1077,6 +1082,39 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     nof_host_staging_ = *staging_mode;
     this->protocol = protocol;
     this->ipc_socket_path_ = ipc_socket_path;
+    auto &storage_config = AscendStorageConfig::GetInstance();
+    if (protocol == "rdma") {
+        if (storage_config.InitializeFromEnvironment() != 0)
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        ascend_data_staging_ =
+            storage_config.Mode() == AscendTransferMode::DataStaging;
+        ascend_parameter_direct_ =
+            storage_config.Mode() == AscendTransferMode::ParameterDirect;
+        if (storage_config.HasRoute()) {
+            if (transfer_engine || !ipc_socket_path.empty() ||
+                (ascend_data_staging_ && local_buffer_size == 0) ||
+                Environ::Process().GetTypedOr(
+                    EnvironmentVariable<bool>{"MC_USE_TENT"}, false) ||
+                Environ::Process().GetTypedOr(
+                    EnvironmentVariable<bool>{"MC_USE_TEV1"}, false) ||
+                std::getenv("MC_FORCE_TCP") || std::getenv("MC_FORCE_SHM")) {
+                LOG(ERROR)
+                    << "Ascend Store modes require an independent classic RDMA "
+                       "engine; staging requires local_buffer_size > 0";
+                return tl::unexpected(ErrorCode::INVALID_PARAMS);
+            }
+#ifndef USE_ASCEND_STAGING
+            if (ascend_data_staging_)
+                return tl::unexpected(ErrorCode::INVALID_PARAMS);
+#endif
+#ifndef USE_ASCEND_NDR
+            if (ascend_parameter_direct_)
+                return tl::unexpected(ErrorCode::INVALID_PARAMS);
+#endif
+        }
+    }
+    if (protocol == "rpc_only" && (local_buffer_size || global_segment_size))
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
     if (!enable_embedded_master &&
         Environ::Process().GetTypedOr(
             EmbeddedMasterEnvironmentVariables::MOONCAKE_ENABLE_EMBEDDED_MASTER,
@@ -1102,9 +1140,11 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     nof_runtime_ = nof_factory ? nof_factory() : CreateNofRuntime();
 
     std::optional<std::string> device_name =
-        ((rdma_devices.empty() || rdma_devices == "auto-discovery")
-             ? std::nullopt
-             : std::make_optional(rdma_devices));
+        storage_config.HasRoute() && protocol == "rdma"
+            ? std::make_optional(storage_config.Device().rdma_device)
+            : ((rdma_devices.empty() || rdma_devices == "auto-discovery")
+                   ? std::nullopt
+                   : std::make_optional(rdma_devices));
 
     // Validate required parameters
     if (local_hostname.empty()) {
@@ -1203,6 +1243,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
                       "check MC_MS_AUTO_DISC and MC_FORCE_MNNVL";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
+    if (protocol == "rpc_only") return {};
 
     // Local_buffer_size is allowed to be 0, but we only register memory when
     // local_buffer_size > 0. Invoke ibv_reg_mr() with size=0 is UB, and may
@@ -1217,7 +1258,11 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
         client_buffer_allocator_ = ClientBufferAllocator::create(
             local_buffer_size, this->protocol,
             use_hugepage_ && !globalConfig().ascend_use_fabric_mem,
-            nof_runtime_.initiator ? nof_runtime_.dma_allocator : nullptr);
+            nof_runtime_.initiator
+                ? nof_runtime_.dma_allocator
+                : ((ascend_data_staging_ || ascend_parameter_direct_)
+                       ? std::make_shared<SystemDmaAllocator>()
+                       : nullptr));
     } catch (const std::bad_alloc &) {
         // The NoF DMA allocator yields nullptr when the SPDK env is
         // unavailable; report an error instead of a silent generic-allocation
@@ -1237,6 +1282,14 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
             LOG(ERROR) << "Failed to register local memory: "
                        << toString(result.error());
             return tl::unexpected(result.error());
+        }
+        if ((ascend_data_staging_ || ascend_parameter_direct_) &&
+            nof_runtime_.initiator) {
+            const auto rc = nof_runtime_.initiator->RegisterMemory(
+                client_buffer_allocator_->getBase(), local_buffer_size);
+            local_buffer_nof_registered_ =
+                rc == ErrorCode::OK || rc == ErrorCode::NOF_REGISTRATION_STUCK;
+            if (rc != ErrorCode::OK) return tl::unexpected(rc);
         }
         {
             std::unique_lock<std::shared_mutex> lock(registered_buffer_mutex_);
@@ -1894,6 +1947,19 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
     nof_staging_pool_.reset();
 
     ErrorCode cleanup_error = ErrorCode::OK;
+    if (client_ && (ascend_data_staging_ || ascend_parameter_direct_)) {
+        std::unique_lock<std::shared_mutex> lock(registered_buffer_mutex_);
+        std::vector<void *> buffers;
+        for (auto &[buffer, refs] : ascend_registration_refs_) {
+            refs = 1;
+            buffers.push_back(buffer);
+        }
+        for (auto *buffer : buffers) {
+            auto result = UnregisterAscendBufferLocked(buffer);
+            if (!result && cleanup_error == ErrorCode::OK)
+                cleanup_error = result.error();
+        }
+    }
     if (client_) {
         if (!egm_segment_ptrs_.empty()) {
             // Callers must quiesce in-flight requests before close. FileStorage
@@ -1930,6 +1996,10 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
                 LOG(WARNING)
                     << "Failed to unregister client local buffer on tear down: "
                     << toString(unregister_result.error());
+                if (ascend_data_staging_ || ascend_parameter_direct_) {
+                    local_buffer_cleanup_failed_ = true;
+                    cleanup_error = unregister_result.error();
+                }
             }
             std::unique_lock<std::shared_mutex> lock(registered_buffer_mutex_);
             local_buffer_region_.reset();
@@ -1971,6 +2041,24 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
     egm_segment_ptrs_.clear();
     ReleaseAllMountedSegmentRecords();
     ReleaseAllAllocatedSegmentRecords();
+    if (local_buffer_nof_registered_ && nof_runtime_.initiator) {
+        const auto rc = nof_runtime_.initiator->UnregisterMemory(
+            client_buffer_allocator_->getBase());
+        if (rc != ErrorCode::OK) {
+            local_buffer_cleanup_failed_ = true;
+            cleanup_error = rc;
+        } else {
+            local_buffer_nof_registered_ = false;
+        }
+    }
+    if (local_buffer_cleanup_failed_ && client_buffer_allocator_) {
+        // Keep the allocation alive until process exit if a backend may
+        // still DMA to it. Do not recycle its virtual address or pool slots.
+        (void)new std::shared_ptr<ClientBufferAllocator>(
+            std::move(client_buffer_allocator_));
+        LOG(ERROR)
+            << "Retaining Client buffer after registration cleanup failure";
+    }
     client_buffer_allocator_.reset();
     port_binder_.reset();
     const bool setup_segments_safe_to_free = ReleasePinnedRegionsForFree(
@@ -2055,13 +2143,19 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
 
 ErrorCode RealClient::CleanupNofRegisteredBuffers() {
     if (!nof_runtime_.initiator) {
-        nof_buffer_cleanup_failed_.store(false, std::memory_order_release);
-        return ErrorCode::OK;
+        const bool failed = !ascend_registration_refs_.empty();
+        nof_buffer_cleanup_failed_.store(failed, std::memory_order_release);
+        return failed ? ErrorCode::INTERNAL_ERROR : ErrorCode::OK;
     }
     bool failed = false;
     std::unique_lock<std::shared_mutex> lock(registered_buffer_mutex_);
     for (auto it = registered_buffer_sizes_.begin();
          it != registered_buffer_sizes_.end();) {
+        if (ascend_registration_refs_.count(it->first)) {
+            failed = true;
+            ++it;
+            continue;
+        }
         const ErrorCode rc =
             nof_runtime_.initiator->UnregisterMemory(it->first);
         if (rc != ErrorCode::OK) {
@@ -4624,6 +4718,74 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
 
+    if (ascend_data_staging_ || ascend_parameter_direct_) {
+        if (!buffer || !size ||
+            size > SIZE_MAX - reinterpret_cast<uintptr_t>(buffer))
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        std::unique_lock<std::shared_mutex> lock(registered_buffer_mutex_);
+        if (closed_.load(std::memory_order_acquire))
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        auto existing = registered_buffer_sizes_.find(buffer);
+        if (existing != registered_buffer_sizes_.end()) {
+            if (existing->second.size != size ||
+                existing->second.cleanup_pending)
+                return tl::unexpected(ErrorCode::INVALID_PARAMS);
+            ++ascend_registration_refs_[buffer];
+            return {};
+        }
+        const uintptr_t begin = reinterpret_cast<uintptr_t>(buffer);
+        for (const auto &[other, record] : registered_buffer_sizes_) {
+            uintptr_t start = reinterpret_cast<uintptr_t>(other);
+            if (begin < start + record.size && start < begin + size)
+                return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        }
+        auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
+        device::PointerInfo info;
+        auto *accelerator = runtime.FindDeviceForPointer(buffer, &info);
+        const bool npu = accelerator && accelerator->Vendor() ==
+                                            device::AcceleratorVendor::kAscend;
+        if (accelerator &&
+            (!npu ||
+             info.device_id !=
+                 AscendStorageConfig::GetInstance().Device().logical_device_id))
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        if (npu && !accelerator->ValidateRange(buffer, size))
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        size_t registration_size = size;
+        const bool te_registered = !npu || !ascend_data_staging_;
+        if (te_registered) {
+            auto *shm_helper = ShmHelper::getInstance();
+            if (!npu && shm_helper->is_hugepage()) {
+                auto shm = shm_helper->get_shm(buffer);
+                if (shm && buffer == shm->base_addr && size < shm->size)
+                    registration_size = shm->size;
+            }
+            auto rc = client_->RegisterLocalMemory(
+                buffer, registration_size, kWildcardLocation, false, true);
+            if (!rc) return rc;
+        }
+        if (npu) ascend_device_buffers_.insert(buffer);
+        registered_buffer_sizes_[buffer] = {size, te_registered, false};
+        ascend_registration_refs_[buffer] = 1;
+        if (nof_runtime_.initiator && te_registered) {
+            const auto rc =
+                npu ? nof_runtime_.initiator->RegisterDeviceMemory(buffer, size)
+                    : nof_runtime_.initiator->RegisterMemory(buffer,
+                                                             registration_size);
+            if (rc != ErrorCode::OK &&
+                (npu || rc == ErrorCode::NOF_REGISTRATION_STUCK)) {
+                registered_buffer_sizes_[buffer].cleanup_pending = true;
+                // Keep the record if either backend cannot confirm cleanup.
+                (void)UnregisterAscendBufferLocked(buffer);
+                return tl::unexpected(rc);
+            }
+            if (rc != ErrorCode::OK)
+                LOG(WARNING)
+                    << "NoF Host registration failed: " << toString(rc);
+        }
+        return {};
+    }
+
     // Only a HugeTLB segment's base address is widened to the physical
     // segment. ShmHelper::allocate rounds the mapping up to hugepage
     // granularity, so the MR bounds must coincide with the mapping bounds;
@@ -4694,6 +4856,44 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
     return result;
 }
 
+bool RealClient::ValidateAscendBufferRangesLocked(
+    const std::vector<std::vector<void *>> &buffers,
+    const std::vector<std::vector<size_t>> &sizes) const {
+    if (closed_.load(std::memory_order_acquire) || !client_ ||
+        buffers.size() != sizes.size())
+        return false;
+    for (size_t i = 0; i < buffers.size(); ++i) {
+        if (buffers[i].size() != sizes[i].size()) return false;
+        for (size_t j = 0; j < buffers[i].size(); ++j) {
+            const uintptr_t address =
+                reinterpret_cast<uintptr_t>(buffers[i][j]);
+            const size_t length = sizes[i][j];
+            if (!address || !length || length > SIZE_MAX - address)
+                return false;
+            bool found = false;
+            for (const auto &[base, record] : registered_buffer_sizes_) {
+                if (record.cleanup_pending) continue;
+                const size_t capacity = record.size;
+                uintptr_t start = reinterpret_cast<uintptr_t>(base);
+                if (address >= start && length <= capacity &&
+                    address - start <= capacity - length) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && local_buffer_region_) {
+                uintptr_t start =
+                    reinterpret_cast<uintptr_t>(local_buffer_region_->base);
+                size_t capacity = local_buffer_region_->size;
+                found = address >= start && length <= capacity &&
+                        address - start <= capacity - length;
+            }
+            if (!found) return false;
+        }
+    }
+    return true;
+}
+
 int RealClient::register_buffer(void *buffer, size_t size) {
     return to_py_ret(register_buffer_internal(buffer, size));
 }
@@ -4703,6 +4903,10 @@ tl::expected<void, ErrorCode> RealClient::unregister_buffer_internal(
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    if (ascend_data_staging_ || ascend_parameter_direct_) {
+        std::unique_lock<std::shared_mutex> lock(registered_buffer_mutex_);
+        return UnregisterAscendBufferLocked(buffer);
     }
     auto unregister_result = [&]() -> tl::expected<void, ErrorCode> {
         auto &hook = TeUnregisterHookForTestingSlot();
@@ -4750,6 +4954,38 @@ tl::expected<void, ErrorCode> RealClient::unregister_buffer_internal(
     return {};
 }
 
+tl::expected<void, ErrorCode> RealClient::UnregisterAscendBufferLocked(
+    void *buffer) {
+    auto refs = ascend_registration_refs_.find(buffer);
+    auto record = registered_buffer_sizes_.find(buffer);
+    if (refs == ascend_registration_refs_.end() ||
+        record == registered_buffer_sizes_.end())
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    if (refs->second > 1) {
+        --refs->second;
+        return {};
+    }
+    record->second.cleanup_pending = true;
+    if (record->second.te_registered) {
+        auto &hook = TeUnregisterHookForTestingSlot();
+        auto result =
+            hook ? hook(buffer) : client_->unregisterLocalMemory(buffer, true);
+        if (!result && result.error() != ErrorCode::NOT_REGISTERED)
+            return tl::unexpected(result.error());
+        record->second.te_registered = false;
+    }
+    const bool staged_device =
+        ascend_data_staging_ && ascend_device_buffers_.count(buffer);
+    if (nof_runtime_.initiator && !staged_device) {
+        const auto rc = nof_runtime_.initiator->UnregisterMemory(buffer);
+        if (rc != ErrorCode::OK) return tl::unexpected(rc);
+    }
+    ascend_device_buffers_.erase(buffer);
+    ascend_registration_refs_.erase(refs);
+    registered_buffer_sizes_.erase(record);
+    return {};
+}
+
 int RealClient::unregister_buffer(void *buffer) {
     return to_py_ret(unregister_buffer_internal(buffer));
 }
@@ -4759,6 +4995,7 @@ RealClient::resolve_writable_buffer_region(void *buffer) const {
     std::shared_lock<std::shared_mutex> lock(registered_buffer_mutex_);
     const auto target = reinterpret_cast<uintptr_t>(buffer);
     for (const auto &[registered_buffer, record] : registered_buffer_sizes_) {
+        if (record.cleanup_pending) continue;
         const auto base = reinterpret_cast<uintptr_t>(registered_buffer);
         if (target < base) {
             continue;
@@ -4795,6 +5032,7 @@ RealClient::resolve_writable_buffer_region(void *buffer) const {
 
 bool RealClient::can_use_direct_memory_read(const Replica::Descriptor &replica,
                                             void *buffer, size_t size) const {
+    if (ascend_data_staging_) return false;
     if (!replica.is_memory_replica()) return false;
     // The selected replica's descriptor controls Transfer Engine routing.
     // NVLink accepts ordinary CUDA allocations as local endpoints, while RDMA
@@ -5110,6 +5348,14 @@ tl::expected<int64_t, ErrorCode> RealClient::execute_ranged_read(
 tl::expected<int64_t, ErrorCode> RealClient::get_into_range_internal(
     const std::string &key, void *buffer, size_t dst_offset, size_t src_offset,
     size_t size, bool size_is_buffer_capacity, bool verify_checksum) {
+    if (ascend_data_staging_) {
+        if (src_offset != 0 || dst_offset != 0 || !size_is_buffer_capacity)
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        auto result = batch_get_into_multi_buffers_internal({key}, {{buffer}},
+                                                            {{size}}, false);
+        return result.front();
+    }
+
     auto metadata_result = resolve_ranged_read_metadata(key);
     if (!metadata_result) {
         if ((metadata_result.error() == ErrorCode::OBJECT_NOT_FOUND ||
@@ -5611,6 +5857,15 @@ RealClient::batch_put_from_dummy_helper(
 std::vector<tl::expected<void, ErrorCode>> RealClient::batch_put_from_internal(
     const std::vector<std::string> &keys, const std::vector<void *> &buffers,
     const std::vector<size_t> &sizes, const ReplicateConfig &config) {
+    if (ascend_data_staging_ || ascend_parameter_direct_) {
+        std::vector<std::vector<void *>> nested_buffers;
+        std::vector<std::vector<size_t>> nested_sizes;
+        for (auto *ptr : buffers) nested_buffers.push_back({ptr});
+        for (auto length : sizes) nested_sizes.push_back({length});
+        return batch_put_from_multi_buffers_internal(keys, nested_buffers,
+                                                     nested_sizes, config);
+    }
+
     if (config.prefer_alloc_in_same_node) {
         LOG(ERROR) << "prefer_alloc_in_same_node is not supported.";
         return std::vector<tl::expected<void, ErrorCode>>(
@@ -5659,6 +5914,12 @@ std::vector<tl::expected<void, ErrorCode>> RealClient::batch_put_from_internal(
 tl::expected<void, ErrorCode> RealClient::put_from_internal(
     const std::string &key, void *buffer, size_t size,
     const ReplicateConfig &config) {
+    if (ascend_data_staging_ || ascend_parameter_direct_) {
+        auto result = batch_put_from_multi_buffers_internal({key}, {{buffer}},
+                                                            {{size}}, config);
+        return result.front();
+    }
+
     // NOTE: The buffer address must resolve to Store-managed registered
     // memory for zero-copy RDMA operations to work correctly
     if (config.prefer_alloc_in_same_node) {
@@ -7091,6 +7352,10 @@ std::vector<int> RealClient::batch_put_from_multi_buffers(
 
 std::vector<int> RealClient::batch_get_session_start(
     const std::vector<std::string> &keys) {
+    if (ascend_data_staging_)
+        return std::vector<int>(
+            keys.size(), static_cast<int>(toInt(ErrorCode::INVALID_PARAMS)));
+
     std::vector<int> results(
         keys.size(), static_cast<int>(toInt(ErrorCode::INVALID_PARAMS)));
     if (!client_) {
@@ -7720,6 +7985,10 @@ std::vector<int> RealClient::batch_get_into_multi_buffer_ranges(
     const std::vector<std::vector<void *>> &all_buffers,
     const std::vector<std::vector<size_t>> &all_sizes,
     const std::vector<std::vector<size_t>> &all_src_offsets) {
+    if (ascend_data_staging_)
+        return std::vector<int>(
+            keys.size(), static_cast<int>(toInt(ErrorCode::INVALID_PARAMS)));
+
     std::vector<int> results(
         keys.size(), static_cast<int>(toInt(ErrorCode::INVALID_PARAMS)));
     if (!validate_session_range_batch_arguments(keys, all_buffers, all_sizes,
@@ -7765,6 +8034,10 @@ void RealClient::wait_session_put_idle(std::unique_lock<std::mutex> &lock,
 std::vector<int> RealClient::batch_put_session_start(
     const std::vector<std::string> &keys, const std::vector<size_t> &sizes,
     const ReplicateConfig &config) {
+    if (ascend_data_staging_)
+        return std::vector<int>(
+            keys.size(), static_cast<int>(toInt(ErrorCode::INVALID_PARAMS)));
+
     std::vector<int> results(keys.size(), 0);
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
@@ -8167,9 +8440,17 @@ RealClient::batch_upsert_from_multi_buffers_internal(
     const std::vector<std::vector<void *>> &all_buffers,
     const std::vector<std::vector<size_t>> &all_sizes,
     const ReplicateConfig &config, bool stage_nonlocal) {
-    return BatchWriteFromMultiBuffers(client_, keys, all_buffers, all_sizes,
-                                      config, client_buffer_allocator_,
-                                      stage_nonlocal, &Client::BatchUpsert);
+    std::shared_lock<std::shared_mutex> registration_lock;
+    if (ascend_data_staging_ || ascend_parameter_direct_) {
+        registration_lock = std::shared_lock(registered_buffer_mutex_);
+        if (!ValidateAscendBufferRangesLocked(all_buffers, all_sizes))
+            return std::vector<tl::expected<void, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+    }
+    return BatchWriteFromMultiBuffers(
+        client_, keys, all_buffers, all_sizes, config, client_buffer_allocator_,
+        stage_nonlocal || ascend_data_staging_, &Client::BatchUpsert,
+        ascend_data_staging_ ? 4096 : 1);
 }
 
 std::vector<tl::expected<void, ErrorCode>>
@@ -8178,6 +8459,13 @@ RealClient::batch_put_from_multi_buffers_internal(
     const std::vector<std::vector<void *>> &all_buffers,
     const std::vector<std::vector<size_t>> &all_sizes,
     const ReplicateConfig &config, bool stage_nonlocal) {
+    std::shared_lock<std::shared_mutex> registration_lock;
+    if (ascend_data_staging_ || ascend_parameter_direct_) {
+        registration_lock = std::shared_lock(registered_buffer_mutex_);
+        if (!ValidateAscendBufferRangesLocked(all_buffers, all_sizes))
+            return std::vector<tl::expected<void, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+    }
     if (!client_) {
         return std::vector<tl::expected<void, ErrorCode>>(
             keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
@@ -8211,10 +8499,11 @@ RealClient::batch_put_from_multi_buffers_internal(
     }
     std::vector<BufferHandle> remote_staging_handles;
     Client::WriteBufferStager stager;
-    if (stage_nonlocal) {
+    if (stage_nonlocal || ascend_data_staging_) {
         stager = [&](const std::vector<Slice> &slices) {
             return StageWriteSlices(client_buffer_allocator_, slices,
-                                    remote_staging_handles);
+                                    remote_staging_handles,
+                                    ascend_data_staging_ ? 4096 : 1);
         };
     }
     auto results =
@@ -8281,6 +8570,14 @@ RealClient::batch_get_into_multi_buffers_internal(
             keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
     }
 
+    std::shared_lock<std::shared_mutex> registration_lock;
+    if (ascend_data_staging_ || ascend_parameter_direct_) {
+        registration_lock = std::shared_lock(registered_buffer_mutex_);
+        if (!ValidateAscendBufferRangesLocked(all_buffers, all_sizes))
+            return std::vector<tl::expected<int64_t, ErrorCode>>(
+                keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+    }
+    auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
     const size_t num_keys = keys.size();
     std::vector<tl::expected<int64_t, ErrorCode>> results;
     results.reserve(num_keys);
@@ -8297,6 +8594,8 @@ RealClient::batch_get_into_multi_buffers_internal(
         std::vector<Slice> slices;
         uint64_t total_size;
         std::optional<NofStagedTransfer> staging;
+        std::optional<BufferHandle> ascend_staging;
+        std::vector<Slice> ascend_io_slices;
     };
 
     // Built lazily only for staged NoF reads. The lower BatchGet slice map is
@@ -8365,6 +8664,11 @@ RealClient::batch_get_into_multi_buffers_internal(
             continue;
         }
         const auto replica = *best_replica;
+        if (ascend_data_staging_ && !replica.is_memory_replica() &&
+            !replica.is_nof_replica()) {
+            results.emplace_back(tl::unexpected(ErrorCode::INVALID_REPLICA));
+            continue;
+        }
         uint64_t total_size = calculate_total_size(replica);
         const auto &sizes = all_sizes[i];
         if (all_buffers[i].size() != sizes.size()) {
@@ -8388,8 +8692,11 @@ RealClient::batch_get_into_multi_buffers_internal(
         key_slices.reserve(buffers.size());
         if (replica.is_memory_replica() || replica.is_nof_replica()) {
             // MEMORY / NOF: RDMA directly to the user buffers.
-            for (size_t j = 0; j < buffers.size(); ++j) {
-                key_slices.emplace_back(Slice{buffers[j], sizes[j]});
+            size_t remaining = total_size;
+            for (size_t j = 0; j < buffers.size() && remaining; ++j) {
+                size_t take = std::min<uint64_t>(sizes[j], remaining);
+                key_slices.emplace_back(Slice{buffers[j], take});
+                remaining -= take;
             }
         } else if (replica.is_local_disk_replica() ||
                    replica.is_disk_replica() || replica.is_dfs_replica()) {
@@ -8427,6 +8734,8 @@ RealClient::batch_get_into_multi_buffers_internal(
         }
 
         std::optional<NofStagedTransfer> staging;
+        std::optional<BufferHandle> ascend_staging;
+        std::vector<Slice> ascend_io_slices;
         if (nof_host_staging_ && replica.is_nof_replica()) {
             tl::expected<std::optional<NofStagedTransfer>, ErrorCode> prepared =
                 tl::unexpected(ErrorCode::INTERNAL_ERROR);
@@ -8456,13 +8765,30 @@ RealClient::batch_get_into_multi_buffers_internal(
                 }
             }
         }
+        if (!staging && ascend_data_staging_ &&
+            !client_->CanUseLocalMemcpy(replica)) {
+            ascend_staging =
+                client_buffer_allocator_->allocateAligned(total_size, 4096);
+            if (!ascend_staging) {
+                results.emplace_back(
+                    tl::unexpected(ErrorCode::NO_AVAILABLE_HANDLE));
+                continue;
+            }
+            char *cursor = static_cast<char *>(ascend_staging->ptr());
+            for (const auto &slice : key_slices) {
+                if (slice.size) ascend_io_slices.emplace_back(cursor, slice.size);
+                cursor += slice.size;
+            }
+        }
         valid_operations.push_back(
             {.key = key,
              .original_index = i,
              .query_result = FilterQueryResult(query_result_values, replica),
              .slices = std::move(key_slices),
              .total_size = total_size,
-             .staging = std::move(staging)});
+             .staging = std::move(staging),
+             .ascend_staging = std::move(ascend_staging),
+             .ascend_io_slices = std::move(ascend_io_slices)});
         // Set success result (actual bytes transferred)
         results.emplace_back(static_cast<int64_t>(total_size));
     }
@@ -8505,8 +8831,12 @@ RealClient::batch_get_into_multi_buffers_internal(
             const auto &op = valid_operations[op_idx];
             batch_keys.push_back(op.key);
             batch_query_results.push_back(op.query_result);
-            batch_slices[op.key] =
-                op.staging ? op.staging->io_slices() : op.slices;
+            if (op.staging) {
+                batch_slices[op.key] = op.staging->io_slices();
+            } else {
+                batch_slices[op.key] =
+                    op.ascend_staging ? op.ascend_io_slices : op.slices;
+            }
         }
 
         nof_staging::CopySession copy_session;
@@ -8553,6 +8883,18 @@ RealClient::batch_get_into_multi_buffers_internal(
                 LOG(ERROR) << "BatchGet failed for key '" << op.key
                            << "': " << toString(error);
                 results[op.original_index] = tl::unexpected(error);
+            } else if (op.ascend_staging) {
+                const char *cursor =
+                    static_cast<const char *>(op.ascend_staging->ptr());
+                for (const auto &slice : op.slices) {
+                    if (slice.size &&
+                        !runtime.CopyFromHost(slice.ptr, cursor, slice.size)) {
+                        results[op.original_index] =
+                            tl::unexpected(ErrorCode::TRANSFER_FAIL);
+                        break;
+                    }
+                    cursor += slice.size;
+                }
             }
         }
 

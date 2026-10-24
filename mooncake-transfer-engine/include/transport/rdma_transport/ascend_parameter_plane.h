@@ -50,6 +50,7 @@ class AscendParameterPlane {
     void Shutdown();
 
    private:
+    friend class AscendParameterPlaneTestPeer;
     AscendParameterPlane() = default;
     ~AscendParameterPlane();
 

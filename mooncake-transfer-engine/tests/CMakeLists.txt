@@ -651,3 +651,23 @@ add_executable(ascend_storage_config_test ascend_storage_config_test.cpp)
 target_link_libraries(ascend_storage_config_test PRIVATE transfer_engine
                                                          gtest_main)
 add_test(NAME ascend_storage_config_test COMMAND ascend_storage_config_test)
+
+# Exercise the actual UB/MR registry with fake CANN and wrapped verbs calls. No
+# NPU, RNIC, driver installation, or SPDK environment is needed.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT USE_ASCEND_NDR)
+  add_executable(
+    ascend_parameter_plane_mock_test
+    ascend_parameter_plane_mock_test.cpp
+    ../src/transport/rdma_transport/ascend_parameter_plane.cpp)
+  target_include_directories(ascend_parameter_plane_mock_test BEFORE
+                             PRIVATE ../tent/tests/mock_acl)
+  target_compile_definitions(ascend_parameter_plane_mock_test
+                             PRIVATE USE_ASCEND_NDR)
+  target_link_libraries(ascend_parameter_plane_mock_test
+                        PRIVATE transfer_engine gtest_main ibverbs)
+  target_link_options(
+    ascend_parameter_plane_mock_test PRIVATE -Wl,--wrap=ibv_query_device
+    -Wl,--wrap=ibv_reg_mr -Wl,--wrap=ibv_reg_mr_iova2 -Wl,--wrap=ibv_dereg_mr)
+  add_test(NAME ascend_parameter_plane_mock_test
+           COMMAND ascend_parameter_plane_mock_test)
+endif()

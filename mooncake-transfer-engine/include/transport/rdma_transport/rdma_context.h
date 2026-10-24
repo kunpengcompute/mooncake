@@ -102,6 +102,7 @@ struct MemoryRegionMeta {
     void *addr;
     size_t length;
     struct ibv_mr *mr;
+    bool externally_managed{false};
 };
 
 // A dma_buf handle exported once for a buffer and shared across every NIC's

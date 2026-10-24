@@ -115,8 +115,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     worker_pool_rail_state_test
     PRIVATE
     "-Wl,--wrap=_ZN8mooncake11RdmaContext17refreshCurrentGidEPNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEES7_"
-    "-Wl,--wrap=_ZNK8mooncake11RdmaContext14queryPortStateEP14ibv_port_state"
-  )
+    "-Wl,--wrap=_ZNK8mooncake11RdmaContext14queryPortStateEP14ibv_port_state")
 endif()
 add_test(NAME worker_pool_rail_state_test COMMAND worker_pool_rail_state_test)
 
@@ -648,3 +647,7 @@ add_executable(batch_counter_wait_test ${WORKSPACE}/batch_counter_wait_test.cpp)
 target_link_libraries(batch_counter_wait_test PUBLIC transfer_engine gtest
                                                      gtest_main)
 add_test(NAME batch_counter_wait_test COMMAND batch_counter_wait_test)
+add_executable(ascend_storage_config_test ascend_storage_config_test.cpp)
+target_link_libraries(ascend_storage_config_test PRIVATE transfer_engine
+                                                         gtest_main)
+add_test(NAME ascend_storage_config_test COMMAND ascend_storage_config_test)

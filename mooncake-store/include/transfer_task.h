@@ -460,6 +460,7 @@ struct NofMetric;
  * @brief NoF operation descriptor (byte-oriented, opaque handle)
  */
 struct NofTask {
+    std::vector<NofBuffer> buffers;
     NofSegmentHandle* seg_handle;
     void* ptr;
     std::vector<Slice> slices;
@@ -780,7 +781,8 @@ class TransferSubmitter {
 
     std::optional<TransferFuture> submitNofOperation(
         const AllocatedBuffer::Descriptor& handle, void* ptr, size_t size,
-        const TransferRequest::OpCode op_code);
+        const TransferRequest::OpCode op_code,
+        const std::vector<Slice>* slices = nullptr);
 
     /**
      * @brief Submit transfer engine operation asynchronously

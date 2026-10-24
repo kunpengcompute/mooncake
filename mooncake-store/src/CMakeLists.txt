@@ -381,6 +381,11 @@ if(USE_NOF)
     mooncake_nof_spdk PRIVATE ${SPDK_STATIC_LIBS} glog::glog mooncake_nof_core
                               yalantinglibs::yalantinglibs)
 
+  if(USE_ASCEND_NDR OR USE_ASCEND_STAGING)
+    target_link_libraries(mooncake_nof_spdk PRIVATE transfer_engine
+                                                    JsonCpp::JsonCpp)
+  endif()
+
   # spdk_mem_register (SPDK >= 22.05) compile-time probe.
   # CMAKE_TRY_COMPILE_TARGET_TYPE was added in CMake 3.6 (project requires
   # 3.16), so check_cxx_source_compiles compiles to a static library and never

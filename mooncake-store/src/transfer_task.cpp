@@ -712,9 +712,9 @@ void NofWorkerPool::workerThread(int work_idx) {
                         const uint64_t submit_off =
                             task->byte_offset + sent_bytes;
                         void* submit_ptr =
-                            task->ptr ? reinterpret_cast<char*>(task->ptr) +
-                                            sent_bytes
-                                      : nullptr;
+                            task->ptr
+                                ? static_cast<char*>(task->ptr) + sent_bytes
+                                : nullptr;
 
                         if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks,
                                               work_idx)) {
@@ -732,15 +732,21 @@ void NofWorkerPool::workerThread(int work_idx) {
                         sub_task->payload_byte_offset = sent_bytes;
                         sub_task->payload_byte_length = submit_bytes;
 
-                        int ret = task->slices.empty()
-                                      ? initiator_->SubmitIO(
-                                            task->seg_handle, submit_ptr,
-                                            submit_off, submit_bytes, task->op,
-                                            &sub_task->adaptor)
-                                      : initiator_->SubmitIOV(
-                                            task->seg_handle, submit_off,
-                                            submit_bytes, task->op,
-                                            &sub_task->adaptor);
+                        int ret;
+                        if (!task->buffers.empty()) {
+                            ret = initiator_->SubmitIOV(
+                                task->seg_handle, task->buffers, submit_off,
+                                submit_bytes, task->op, &sub_task->adaptor,
+                                sent_bytes);
+                        } else if (!task->slices.empty()) {
+                            ret = initiator_->SubmitIOV(
+                                task->seg_handle, submit_off, submit_bytes,
+                                task->op, &sub_task->adaptor);
+                        } else {
+                            ret = initiator_->SubmitIO(
+                                task->seg_handle, submit_ptr, submit_off,
+                                submit_bytes, task->op, &sub_task->adaptor);
+                        }
                         if (ret != 0) {
 #ifdef USE_NOF
                             if (task->metric) {
@@ -2248,6 +2254,13 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
     std::vector<Slice> io_slices;
     if (!BuildNofLogicalSlices(slices, logical_size, &io_slices))
         return std::nullopt;
+    auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
+    if (std::any_of(io_slices.begin(), io_slices.end(), [&](const Slice& slice) {
+            return runtime.FindDeviceForPointer(slice.ptr) != nullptr;
+        })) {
+        return submitNofOperation(handle, nullptr, logical_size, op_code,
+                                  &io_slices);
+    }
     const auto caps = nof_initiator_->GetCapabilities();
     // Preserve the contiguous path for backends without SGL support.
     if (!caps.supports_sgl) {
@@ -2259,11 +2272,9 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
         return submitNofOperation(handle, io_slices.front().ptr, logical_size,
                                   op_code);
     }
-    auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
     for (const auto& slice : io_slices) {
         if (!caps.dma_alignment ||
-            reinterpret_cast<uintptr_t>(slice.ptr) % caps.dma_alignment != 0 ||
-            runtime.FindDeviceForPointer(slice.ptr)) {
+            reinterpret_cast<uintptr_t>(slice.ptr) % caps.dma_alignment != 0) {
             LOG(ERROR) << "NoF SGL requires DMA-compatible Host slices";
             return std::nullopt;
         }
@@ -2296,7 +2307,7 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
 
 std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
     const AllocatedBuffer::Descriptor& handle, void* ptr, size_t size,
-    const TransferRequest::OpCode op_code) {
+    const TransferRequest::OpCode op_code, const std::vector<Slice>* slices) {
     if (!nof_pool_) {
         // Runtime form of the former "NoF transfer requested while USE_NOF
         // is disabled" error.
@@ -2304,7 +2315,7 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
                       "(no initiator in this process)";
         return std::nullopt;
     }
-    if (handle.transport_endpoint_.empty() || handle.size_ < size) {
+    if (!size || handle.transport_endpoint_.empty() || handle.size_ < size) {
         LOG(ERROR) << "Invalid NoF request endpoint="
                    << handle.transport_endpoint_
                    << ", buffer_size=" << handle.size_
@@ -2336,10 +2347,19 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
         return std::nullopt;
     }
 
+    if (slices) {
+        if (!caps.supports_sgl) return std::nullopt;
+        for (const auto& slice : *slices)
+            if (reinterpret_cast<uintptr_t>(slice.ptr) % ptr_alignment)
+                return std::nullopt;
+    }
     const NofIOOp op =
         (op_code == TransferRequest::READ) ? NofIOOp::kRead : NofIOOp::kWrite;
     auto state = std::make_shared<NofOperationState>();
     NofTask task(seg_handle, ptr, handle.buffer_address_, size, op, state);
+    if (slices)
+        for (const auto& slice : *slices)
+            task.buffers.push_back({slice.ptr, slice.size});
     task.metric = nof_metric_;
     nof_pool_->submitTask(std::move(task));
 

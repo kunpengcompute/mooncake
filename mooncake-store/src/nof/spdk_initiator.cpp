@@ -20,7 +20,18 @@
 #include <thread>
 #include <vector>
 
+#include <spdk/dma.h>
 #include <spdk/env.h>
+#include <list>
+#include <limits>
+#include <cstdio>
+#include <infiniband/verbs.h>
+#if defined(USE_ASCEND_NDR) || defined(USE_ASCEND_STAGING)
+#include "transport/rdma_transport/ascend_storage_config.h"
+#endif
+#ifdef USE_SPDK_NPU_UB
+#include "transport/rdma_transport/ascend_parameter_plane.h"
+#endif
 #include <spdk/nvme.h>
 
 #include "config/spdk_controller_config.h"
@@ -35,6 +46,61 @@ namespace {
 bool IsControllerConnectionError(int64_t ret) {
     return ret == -ENXIO || ret == -EIO || ret == -ECONNRESET ||
            ret == -ENODEV || ret == -EPIPE || ret == -ETIMEDOUT;
+}
+
+#ifdef USE_SPDK_NPU_UB
+ibv_pd* GetRdmaPd(spdk_memory_domain* domain) {
+    if (!domain || spdk_memory_domain_get_dma_device_type(domain) !=
+                       SPDK_DMA_DEVICE_TYPE_RDMA)
+        return nullptr;
+    auto* ctx = spdk_memory_domain_get_context(domain);
+    if (!ctx || ctx->size < sizeof(*ctx) || !ctx->user_ctx) return nullptr;
+    auto* rdma = static_cast<spdk_memory_domain_rdma_ctx*>(ctx->user_ctx);
+    return rdma->size >= sizeof(*rdma) ? static_cast<ibv_pd*>(rdma->ibv_pd)
+                                       : nullptr;
+}
+std::shared_ptr<ibv_pd> RetainSpdkPd(ibv_pd* pd) {
+    struct Owners {
+        std::mutex mutex;
+        std::map<ibv_pd*, size_t> counts;
+    };
+    static auto* owners = new Owners;
+    auto* registry = owners;
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    ++registry->counts[pd];
+    return std::shared_ptr<ibv_pd>(pd, [registry](ibv_pd* value) {
+        std::lock_guard<std::mutex> lock(registry->mutex);
+        auto it = registry->counts.find(value);
+        if (--it->second == 0) {
+            AscendParameterPlane::GetInstance().InvalidatePd(value);
+            registry->counts.erase(it);
+        }
+    });
+}
+#endif
+
+struct VectorIo : NofSglCursor {
+    NofIOAdaptor adaptor{};
+    spdk_nvme_ns_cmd_ext_io_opts opts{};
+    spdk_nvme_cpl completion{};
+    bool completed{false};
+};
+void ResetVector(void* arg, uint32_t offset) {
+    static_cast<VectorIo*>(arg)->Reset(offset);
+}
+int NextVector(void* arg, void** address, uint32_t* length) {
+    return static_cast<VectorIo*>(arg)->Next(address, length);
+}
+void VectorComplete(void* arg, const spdk_nvme_cpl* cpl) {
+    auto& io = *static_cast<VectorIo*>(arg);
+    io.completion = *cpl;
+    io.completed = true;
+}
+
+// Newer SPDK releases require opts_size; older headers do not have it.
+template <typename T>
+void SetEnvOptsSize(T& opts) {
+    if constexpr (requires { opts.opts_size; }) opts.opts_size = sizeof(opts);
 }
 
 void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts* opts) {
@@ -194,7 +260,8 @@ class SpdkEnvGuard {
                                    &orig_cpuset) == 0;
 #endif
 
-        struct spdk_env_opts opts;
+        struct spdk_env_opts opts{};
+        SetEnvOptsSize(opts);
         spdk_env_opts_init(&opts);
         opts.name = "mooncake";
         // Containers without physical-address access (restricted
@@ -325,6 +392,11 @@ class NofSegmentHandle {
     uint32_t nsid{0};
     uint32_t block_size{0};
     uint64_t capacity{0};
+    spdk_memory_domain* rdma_domain{nullptr};
+#ifdef USE_SPDK_NPU_UB
+    std::shared_ptr<ibv_pd> pd_lease;
+#endif
+    std::list<std::unique_ptr<VectorIo>> vector_ios;
 };
 
 namespace {
@@ -332,6 +404,7 @@ namespace {
 struct tr_info {
     struct spdk_nvme_transport_id trid;
     std::string ctrlr_key;
+    std::string src_addr;
     uint32_t ns;
 };
 
@@ -343,6 +416,7 @@ struct ctrlr_info {
     std::chrono::steady_clock::time_point last_admin_poll{};
     std::mutex admin_mutex;
     std::vector<std::unique_ptr<NofSegmentHandle>> retired_segments;
+    std::string src_addr;
     std::map<uint32_t, std::unique_ptr<NofSegmentHandle>> ns_seg;
     std::mutex ns_mutex;
 };
@@ -373,29 +447,21 @@ class SpdkInitiator::Impl {
             std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
             std::lock_guard<std::mutex> nvme_lock(NvmeCtrlrStateMutex());
             for (auto& [_, info] : connected_ctrlrs_) {
-                if (info) {
-                    for (auto& [_, seg] : info->ns_seg) {
-                        if (seg && seg->qpair) {
-                            spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
-                        }
-                    }
-                    for (auto& seg : info->retired_segments) {
-                        if (seg->qpair)
-                            spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
-                    }
-                    if (info->ctrlr) {
-                        UnsubscribeNamespaceNotices(info->ctrlr,
-                                                    &info->namespace_changed);
-                        spdk_nvme_detach(info->ctrlr);
-                    }
-                }
+                if (info) DestroyController(*info);
             }
             for (auto& info : retired_ctrlrs_) {
                 DestroyController(*info);
             }
             connected_ctrlrs_.clear();
         }
-
+#ifdef USE_SPDK_NPU_UB
+        for (auto& [ptr, size] : device_buffers_) {
+            if (AscendParameterPlane::GetInstance().UnregisterRegion(ptr))
+                LOG(ERROR) << "Could not release NoF UB registration at "
+                           << ptr;
+        }
+        if (npu_domain_) spdk_memory_domain_destroy(npu_domain_);
+#endif
 #ifdef HAVE_SPDK_MEM_REGISTER
         // Backstop, after all I/O teardown above: release every page
         // registration this instance still holds, in case the real-client
@@ -472,6 +538,7 @@ class SpdkInitiator::Impl {
             // Connect OUTSIDE the mutex: spdk_nvme_probe may block for
             // seconds and would stall first-time opens of other endpoints.
             auto new_info = std::make_unique<ctrlr_info>();
+            new_info->src_addr = tr.src_addr;
             if (ConnectController(&tr.trid, new_info.get()) != 0 ||
                 !new_info->ctrlr) {
                 return nullptr;
@@ -580,6 +647,44 @@ class SpdkInitiator::Impl {
             new_seg->ns = ns;
             new_seg->block_size = block_size;
             new_seg->capacity = capacity;
+#if defined(USE_ASCEND_NDR) || defined(USE_ASCEND_STAGING)
+            auto& route = AscendStorageConfig::GetInstance();
+            if (route.HasRoute()) {
+                const int count =
+                    spdk_nvme_ctrlr_get_memory_domains(info->ctrlr, nullptr, 0);
+                std::vector<spdk_memory_domain*> domains(std::max(count, 0));
+                if (count > 0)
+                    spdk_nvme_ctrlr_get_memory_domains(info->ctrlr,
+                                                       domains.data(), count);
+                for (auto* domain : domains) {
+                    if (spdk_memory_domain_get_dma_device_type(domain) !=
+                        SPDK_DMA_DEVICE_TYPE_RDMA)
+                        continue;
+                    auto* ctx = spdk_memory_domain_get_context(domain);
+                    if (!ctx || !ctx->user_ctx || ctx->size < sizeof(*ctx))
+                        continue;
+                    auto* rdma = static_cast<spdk_memory_domain_rdma_ctx*>(
+                        ctx->user_ctx);
+                    if (rdma->size < sizeof(*rdma)) continue;
+                    auto* pd = static_cast<ibv_pd*>(rdma->ibv_pd);
+                    if (pd && pd->context &&
+                        route.Device().rdma_device ==
+                            ibv_get_device_name(pd->context->device)) {
+                        new_seg->rdma_domain = domain;
+#ifdef USE_SPDK_NPU_UB
+                        new_seg->pd_lease = RetainSpdkPd(pd);
+#endif
+                        break;
+                    }
+                }
+                if (!new_seg->rdma_domain) {
+                    LOG(ERROR) << "NoF PD does not match worker RDMA device "
+                               << route.Device().rdma_device;
+                    spdk_nvme_ctrlr_free_io_qpair(qpair);
+                    return nullptr;
+                }
+            }
+ #endif
             seg_handle = new_seg.get();
             ns_seg[tr.ns] = std::move(new_seg);
         }
@@ -610,6 +715,12 @@ class SpdkInitiator::Impl {
             return -EINVAL;
         }
 
+#ifdef USE_SPDK_NPU_UB
+        if (AscendParameterPlane::GetInstance().Contains(buffer, byte_length))
+            return SubmitIOV(handle,
+                             {{buffer, static_cast<size_t>(byte_length)}},
+                             byte_offset, byte_length, op, adaptor, 0);
+#endif
         const uint64_t lba = byte_offset / block_size;
         const uint32_t lba_count =
             static_cast<uint32_t>(byte_length / block_size);
@@ -664,8 +775,25 @@ class SpdkInitiator::Impl {
         if (handle->failed) return -ENXIO;
         // max_completions == 0 means "all pending" (SPDK dialect, kept as an
         // explicit interface contract).
-        return spdk_nvme_qpair_process_completions(handle->qpair,
-                                                   max_completions);
+        const int64_t rc =
+            spdk_nvme_qpair_process_completions(handle->qpair, max_completions);
+        // Even synchronous -EFAULT completions are delivered only after the
+        // worker has accounted for the successfully submitted I/O.
+        DrainVectorCompletions(handle);
+        return rc;
+    }
+
+    static void DrainVectorCompletions(NofSegmentHandle* handle) {
+        for (auto it = handle->vector_ios.begin();
+             it != handle->vector_ios.end();) {
+            if (!(*it)->completed) {
+                ++it;
+                continue;
+            }
+            auto io = std::move(*it);
+            it = handle->vector_ios.erase(it);
+            IOCompleteTrampoline(&io->adaptor, &io->completion);
+        }
     }
 
     static void MarkFailed(ctrlr_info& info) {
@@ -682,11 +810,17 @@ class SpdkInitiator::Impl {
     }
 
     static void DestroyController(ctrlr_info& info) {
+        auto destroy_segment = [](NofSegmentHandle* segment) {
+            if (segment->qpair) spdk_nvme_ctrlr_free_io_qpair(segment->qpair);
+#ifdef USE_SPDK_NPU_UB
+            segment->pd_lease.reset();
+#endif
+        };
         for (auto& [_, seg] : info.ns_seg) {
-            if (seg->qpair) spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
+            destroy_segment(seg.get());
         }
         for (auto& seg : info.retired_segments) {
-            if (seg->qpair) spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
+            destroy_segment(seg.get());
         }
         if (info.ctrlr) {
             UnsubscribeNamespaceNotices(info.ctrlr, &info.namespace_changed);
@@ -837,6 +971,10 @@ class SpdkInitiator::Impl {
         // disconnects it and synchronously aborts its outstanding requests.
         auto* qpair = handle->qpair.load();
         if (qpair && spdk_nvme_ctrlr_free_io_qpair(qpair) != 0) return false;
+        DrainVectorCompletions(handle);
+#ifdef USE_SPDK_NPU_UB
+        handle->pd_lease.reset();
+#endif
         handle->qpair = nullptr;
         return true;
     }
@@ -868,7 +1006,106 @@ class SpdkInitiator::Impl {
 #endif
     }
 
+    ErrorCode RegisterDeviceMemory(void* ptr, size_t size) {
+#ifdef USE_SPDK_NPU_UB
+        if (!ptr || !size || !EnsureEnv()) return ErrorCode::INVALID_PARAMS;
+        std::lock_guard<std::mutex> lock(device_mutex_);
+        auto it = device_buffers_.find(ptr);
+        if (it != device_buffers_.end())
+            return it->second == size ? ErrorCode::OK
+                                      : ErrorCode::INVALID_PARAMS;
+        if (!npu_domain_) {
+            if (spdk_memory_domain_create(
+                    &npu_domain_, SPDK_DMA_DEVICE_VENDOR_SPECIFIC_TYPE_START,
+                    nullptr, "ascend-ub") != 0)
+                return ErrorCode::INTERNAL_ERROR;
+            spdk_memory_domain_set_translation(npu_domain_,
+                                               TranslateNpuUbMemory);
+        }
+        if (AscendParameterPlane::GetInstance().RegisterRegion(ptr, size) != 0)
+            return ErrorCode::INVALID_PARAMS;
+        device_buffers_.emplace(ptr, size);
+        return ErrorCode::OK;
+#else
+        return ErrorCode::INVALID_PARAMS;
+#endif
+    }
+
+    int SubmitIOV(NofSegmentHandle* handle,
+                  const std::vector<NofBuffer>& buffers, uint64_t byte_offset,
+                  uint64_t byte_length, NofIOOp op, NofIOAdaptor* adaptor,
+                  size_t buffer_offset) {
+        if (!handle || !handle->ns || !handle->qpair || !adaptor ||
+            !adaptor->cb || !byte_length ||
+            (op != NofIOOp::kRead && op != NofIOOp::kWrite))
+            return -EINVAL;
+        if (handle->failed) return -ENXIO;
+        const uint32_t block_size = GetBlockSize(handle);
+        if (!block_size || block_size == kInvalidBlockSize ||
+            byte_offset % block_size || byte_length % block_size ||
+            byte_length / block_size > UINT32_MAX)
+            return -EINVAL;
+        size_t total = 0;
+        bool device = false, host = false;
+        for (const auto& buffer : buffers) {
+            if (!buffer.data || !buffer.size || buffer.size > SIZE_MAX - total)
+                return -EINVAL;
+            total += buffer.size;
+#ifdef USE_SPDK_NPU_UB
+            if (AscendParameterPlane::GetInstance().Contains(buffer.data,
+                                                             buffer.size))
+                device = true;
+            else
+#endif
+                host = true;
+        }
+        if (buffer_offset > total || byte_length > total - buffer_offset ||
+            (device && host))
+            return -EINVAL;
+        auto io = std::unique_ptr<VectorIo>(new (std::nothrow) VectorIo);
+        if (!io) return -ENOMEM;
+        io->buffers = buffers;
+        io->start = buffer_offset;
+        io->length = byte_length;
+        io->adaptor = *adaptor;
+        io->opts.size = sizeof(io->opts);
+#ifdef USE_SPDK_NPU_UB
+        if (device) {
+            if (!handle->rdma_domain || !npu_domain_) return -ENOTSUP;
+            io->opts.memory_domain = npu_domain_;
+        }
+#endif
+        auto* request = io.get();
+        handle->vector_ios.push_back(std::move(io));
+        auto entry = std::prev(handle->vector_ios.end());
+        const uint64_t lba = byte_offset / block_size;
+        const uint32_t count = byte_length / block_size;
+        const int rc =
+            op == NofIOOp::kRead
+                ? spdk_nvme_ns_cmd_readv_ext(
+                      handle->ns, handle->qpair, lba, count, VectorComplete,
+                      request, ResetVector, NextVector, &request->opts)
+                : spdk_nvme_ns_cmd_writev_ext(
+                      handle->ns, handle->qpair, lba, count, VectorComplete,
+                      request, ResetVector, NextVector, &request->opts);
+        if (rc == -EFAULT) return 0;
+        if (rc != 0) handle->vector_ios.erase(entry);
+        return rc;
+    }
+
     ErrorCode UnregisterMemory(void* ptr) {
+#ifdef USE_SPDK_NPU_UB
+        {
+            std::lock_guard<std::mutex> lock(device_mutex_);
+            auto it = device_buffers_.find(ptr);
+            if (it != device_buffers_.end()) {
+                if (AscendParameterPlane::GetInstance().UnregisterRegion(ptr))
+                    return ErrorCode::INTERNAL_ERROR;
+                device_buffers_.erase(it);
+                return ErrorCode::OK;
+            }
+        }
+#endif
 #ifdef HAVE_SPDK_MEM_REGISTER
         return GetNofRegistryBundle().registry.Unregister(owner_token_, ptr);
 #else
@@ -1003,6 +1240,31 @@ class SpdkInitiator::Impl {
         IOCompleteTrampoline(static_cast<NofIOAdaptor*>(adaptor), cpl);
     }
 
+#ifdef USE_SPDK_NPU_UB
+    static int TranslateNpuUbMemory(
+        spdk_memory_domain*, void*, spdk_memory_domain* destination,
+        spdk_memory_domain_translation_ctx*, void* addr, size_t length,
+        spdk_memory_domain_translation_result* result) {
+        auto* pd = GetRdmaPd(destination);
+        if (!pd || !result || !addr || !length) return -EINVAL;
+        ibv_mr* mr = nullptr;
+        const int rc = AscendParameterPlane::GetInstance().GetOrCreateMr(
+            pd, addr, length,
+            IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
+                IBV_ACCESS_REMOTE_WRITE,
+            &mr);
+        if (rc) return rc;
+        result->size = sizeof(*result);
+        result->iov_count = 1;
+        result->iov = {addr, length};
+        result->iovs = nullptr;
+        result->dst_domain = destination;
+        result->rdma.lkey = mr->lkey;
+        result->rdma.rkey = mr->rkey;
+        return 0;
+    }
+#endif
+
     static void IOCompleteTrampoline(void* cb_arg,
                                      const struct spdk_nvme_cpl* cpl) {
         auto* adaptor = static_cast<NofIOAdaptor*>(cb_arg);
@@ -1079,10 +1341,18 @@ class SpdkInitiator::Impl {
                             "defaulting to ns=1";
         }
 
+#if defined(USE_ASCEND_NDR) || defined(USE_ASCEND_STAGING)
+        auto& route = AscendStorageConfig::GetInstance();
+        if (route.HasRoute()) {
+            if (info->trid.trtype != SPDK_NVME_TRANSPORT_RDMA) return -EINVAL;
+            info->src_addr = route.Device().rdma_ip;
+        }
+#endif
         info->ctrlr_key = std::string(info->trid.traddr) + "|" +
                           std::string(info->trid.trsvcid) + "|" +
                           std::string(info->trid.subnqn) + "|" +
-                          std::to_string(static_cast<int>(info->trid.trtype));
+                          std::to_string(static_cast<int>(info->trid.trtype)) +
+                          "|" + info->src_addr;
 
         LOG(INFO) << "traddr:" << info->trid.traddr
                   << "trsvcid:" << info->trid.trsvcid << "ns:" << info->ns
@@ -1098,6 +1368,10 @@ class SpdkInitiator::Impl {
                            const struct spdk_nvme_transport_id* trid,
                            struct spdk_nvme_ctrlr_opts* opts) -> bool {
             ApplyCtrlrOptsFromEnv(opts);
+            auto* info = static_cast<ctrlr_info*>(cb_ctx);
+            if (!info->src_addr.empty())
+                std::snprintf(opts->src_addr, sizeof(opts->src_addr), "%s",
+                              info->src_addr.c_str());
             LOG(INFO) << "Attaching to " << trid->traddr << " " << trid->subnqn;
             return true;
         };
@@ -1152,6 +1426,11 @@ class SpdkInitiator::Impl {
     // Member order matters: env_guard_ is declared FIRST so it is destroyed
     // LAST — all qpairs/ctrlrs are detached before spdk_env_fini runs.
     std::shared_ptr<SpdkEnvGuard> env_guard_;
+#ifdef USE_SPDK_NPU_UB
+    std::mutex device_mutex_;
+    std::map<void*, size_t> device_buffers_;
+    spdk_memory_domain* npu_domain_{nullptr};
+#endif
     // Process-unique registry owner token (see g_nof_owner_token).
     const uint64_t owner_token_ =
         g_nof_owner_token.fetch_add(1, std::memory_order_relaxed);
@@ -1239,6 +1518,18 @@ int SpdkInitiator::SubmitIOV(NofSegmentHandle* handle, uint64_t byte_offset,
 int SpdkInitiator::AcquirePadding(size_t size, bool for_write, void** ptr,
                                   std::shared_ptr<void>* owner) {
     return impl_->AcquirePadding(size, for_write, ptr, owner);
+}
+
+int SpdkInitiator::SubmitIOV(NofSegmentHandle* handle,
+                             const std::vector<NofBuffer>& buffers,
+                             uint64_t byte_offset, uint64_t byte_length,
+                             NofIOOp op, NofIOAdaptor* adaptor,
+                             size_t buffer_offset) {
+    return impl_->SubmitIOV(handle, buffers, byte_offset, byte_length, op,
+                            adaptor, buffer_offset);
+}
+ErrorCode SpdkInitiator::RegisterDeviceMemory(void* ptr, size_t size) {
+    return impl_->RegisterDeviceMemory(ptr, size);
 }
 
 int64_t SpdkInitiator::PollCompletion(NofSegmentHandle* handle,

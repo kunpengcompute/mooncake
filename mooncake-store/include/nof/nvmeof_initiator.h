@@ -1,12 +1,13 @@
 #pragma once
 
 #include <cerrno>
-#include <memory>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "nof/io_buffer.h"
 #include "types.h"  // ErrorCode
 
 namespace mooncake {
@@ -139,6 +140,29 @@ class NVMeoFInitiator {
     // completion.
     virtual int AcquirePadding(size_t, bool, void**, std::shared_ptr<void>*) {
         return -ENOTSUP;
+    }
+
+    // Submit a byte range across discontiguous caller-owned buffers. The
+    // buffers and adaptor remain valid until completion. Simple backends can
+    // use this default for one buffer; SGL backends override it.
+    virtual int SubmitIOV(NofSegmentHandle* handle,
+                          const std::vector<NofBuffer>& buffers,
+                          uint64_t byte_offset, uint64_t byte_length,
+                          NofIOOp op, NofIOAdaptor* adaptor,
+                          size_t buffer_offset = 0) {
+        if (buffers.size() != 1) return -ENOTSUP;
+        const auto& buffer = buffers.front();
+        if (!buffer.data || buffer_offset > buffer.size ||
+            byte_length > buffer.size - buffer_offset)
+            return -EINVAL;
+        return SubmitIO(handle, static_cast<char*>(buffer.data) + buffer_offset,
+                        byte_offset, byte_length, op, adaptor);
+    }
+
+    // Register accelerator memory using the backend's device-memory path.
+    // It must never be sent to a Host hugepage registration table.
+    virtual ErrorCode RegisterDeviceMemory(void* ptr, size_t size) {
+        return ErrorCode::INVALID_PARAMS;
     }
 
     // Poll completions on the calling thread. max_completions == 0 means

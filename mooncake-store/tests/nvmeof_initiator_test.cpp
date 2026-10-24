@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <thread>
 #include <cstdint>
 #include <deque>
@@ -105,6 +107,114 @@ class MockInitiator : public NVMeoFInitiator {
     std::map<std::string, NofSegmentHandle*> handles_;
     std::array<uint64_t, 16> sentinels_{};
 };
+
+class VectorMockInitiator : public MockInitiator {
+   public:
+    int SubmitIOV(NofSegmentHandle* handle,
+                  const std::vector<NofBuffer>& buffers, uint64_t byte_offset,
+                  uint64_t byte_length, NofIOOp op, NofIOAdaptor* adaptor,
+                  size_t buffer_offset) override {
+        ++vector_calls;
+        if (fail_submit_) return -ENOMEM;
+        NofSglCursor cursor;
+        cursor.buffers = buffers;
+        cursor.start = buffer_offset;
+        cursor.length = byte_length;
+        cursor.Reset(0);
+        size_t copied = 0;
+        while (copied < byte_length) {
+            void* address = nullptr;
+            uint32_t length = 0;
+            if (cursor.Next(&address, &length) != 0) return -EINVAL;
+            std::memcpy(received.data() + byte_offset + copied, address,
+                        length);
+            copied += length;
+        }
+        return SubmitIO(handle, nullptr, byte_offset, byte_length, op, adaptor);
+    }
+    NofCapabilities GetCapabilities() const override {
+        NofCapabilities caps;
+        caps.supports_sgl = true;
+        return caps;
+    }
+    std::vector<uint8_t> received;
+    size_t vector_calls{0};
+};
+
+TEST(NofWorkerPoolTest, VectorBuffersKeepOffsetsAcrossChunks) {
+    auto mock = std::make_shared<VectorMockInitiator>();
+    constexpr size_t size = 2 * 1024 * 1024;
+    constexpr size_t offset = 8192;
+    mock->received.resize(offset + size);
+    std::vector<uint8_t> first(2048, 0x31), second(size - 2048, 0x72);
+    {
+        NofWorkerPool pool(mock, 0);
+        auto* seg = mock->OpenSegment("vector");
+        auto state = std::make_shared<NofOperationState>();
+        NofTask task(seg, nullptr, offset, size, NofIOOp::kWrite, state);
+        task.buffers = {{first.data(), first.size()},
+                        {second.data(), second.size()}};
+        pool.submitTask(std::move(task));
+        state->wait_for_completion();
+        ASSERT_EQ(state->get_result(), ErrorCode::OK);
+    }
+    EXPECT_GE(mock->vector_calls, 1u);
+    EXPECT_TRUE(std::equal(first.begin(), first.end(),
+                           mock->received.begin() + offset));
+    EXPECT_TRUE(std::equal(second.begin(), second.end(),
+                           mock->received.begin() + offset + first.size()));
+    EXPECT_TRUE(std::all_of(mock->received.begin(),
+                            mock->received.begin() + offset,
+                            [](auto byte) { return byte == 0; }));
+}
+
+TEST(NofWorkerPoolTest, VectorSubmitFailureCompletesWithoutOutstandingIO) {
+    auto mock = std::make_shared<VectorMockInitiator>();
+    mock->fail_submit_ = true;
+    NofWorkerPool pool(mock, 0);
+    auto state = std::make_shared<NofOperationState>();
+    std::array<uint8_t, 8192> buffer{};
+    NofTask task(mock->OpenSegment("failed-vector"), nullptr, 0, buffer.size(),
+                 NofIOOp::kWrite, state);
+    task.buffers = {{buffer.data(), 4096}, {buffer.data() + 4096, 4096}};
+    pool.submitTask(std::move(task));
+    state->wait_for_completion();
+    EXPECT_EQ(state->get_result(), ErrorCode::TRANSFER_FAIL);
+}
+
+TEST(NofInterfaceTest, UnsupportedDeviceMemoryDoesNotRegisterHostPages) {
+    MockInitiator mock;
+    std::array<uint8_t, 8> buffer{};
+    EXPECT_EQ(mock.RegisterDeviceMemory(buffer.data(), buffer.size()),
+              ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(
+        mock.SubmitIOV(nullptr, {{buffer.data(), 4}, {buffer.data() + 4, 4}}, 0,
+                       8, NofIOOp::kRead, nullptr),
+        -ENOTSUP);
+}
+
+TEST(NofSglCursorTest, ResetAndBoundedRangeCrossBufferBoundary) {
+    std::array<char, 16> first{}, second{};
+    NofSglCursor cursor;
+    cursor.buffers = {{first.data(), first.size()},
+                      {second.data(), second.size()}};
+    cursor.start = 12;
+    cursor.length = 12;
+    cursor.Reset(0);
+    void* address = nullptr;
+    uint32_t length = 0;
+    ASSERT_EQ(cursor.Next(&address, &length), 0);
+    EXPECT_EQ(address, first.data() + 12);
+    EXPECT_EQ(length, 4u);
+    ASSERT_EQ(cursor.Next(&address, &length), 0);
+    EXPECT_EQ(address, second.data());
+    EXPECT_EQ(length, 8u);
+    EXPECT_EQ(cursor.Next(&address, &length), -EINVAL);
+    cursor.Reset(6);
+    ASSERT_EQ(cursor.Next(&address, &length), 0);
+    EXPECT_EQ(address, second.data() + 2);
+    EXPECT_EQ(length, 6u);
+}
 
 TEST(NofWorkerPoolTest, SubmitAndComplete) {
     auto mock = std::make_shared<MockInitiator>();

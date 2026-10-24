@@ -362,88 +362,11 @@ target_link_libraries(
                            cachelib_memory_allocator mooncake_common)
 
 if(USE_NOF)
-  set(SPDK_INCLUDE_DIR
-      "/usr/local/include"
-      CACHE PATH "SPDK include directory")
-  set(DPDK_INCLUDE_DIR
-      "/usr/local/include"
-      CACHE PATH "DPDK include directory")
-  set(SPDK_LIB_DIR
-      "/usr/local/lib"
-      CACHE PATH "SPDK static library directory")
-  set(DPDK_LIB_DIR
-      "/usr/local/lib"
-      CACHE PATH "DPDK static library directory")
-
-  set(SPDK_ISA_L_LIB_DIR
-      "${CMAKE_SOURCE_DIR}/extern/spdk/isa-l/.libs"
-      CACHE PATH "isa-l static library directory")
-  if(NOT EXISTS "${SPDK_ISA_L_LIB_DIR}/libisal.a")
-    message(
-      FATAL_ERROR
-        "isa-l not found at ${SPDK_ISA_L_LIB_DIR}/libisal.a. Run "
-        "`sudo bash dependencies.sh --with-spdk`, or set -DSPDK_ISA_L_LIB_DIR.")
-  endif()
-
-  set(SPDK_STATIC_LIBS
-      -Wl,--whole-archive
-      ${SPDK_LIB_DIR}/libspdk_event.a
-      ${SPDK_LIB_DIR}/libspdk_rdma.a
-      ${SPDK_LIB_DIR}/libspdk_nvme.a
-      ${SPDK_LIB_DIR}/libspdk_sock_posix.a
-      -Wl,--no-whole-archive
-      ${SPDK_LIB_DIR}/libspdk_vfio_user.a
-      ${SPDK_LIB_DIR}/libspdk_dma.a
-      ${SPDK_LIB_DIR}/libspdk_init.a
-      ${SPDK_LIB_DIR}/libspdk_env_dpdk.a
-      ${SPDK_LIB_DIR}/libspdk_log.a
-      ${SPDK_LIB_DIR}/libspdk_util.a
-      ${SPDK_LIB_DIR}/libspdk_blob.a
-      ${SPDK_LIB_DIR}/libspdk_blobfs.a
-      ${SPDK_LIB_DIR}/libspdk_bdev.a
-      ${SPDK_LIB_DIR}/libspdk_conf.a
-      ${SPDK_LIB_DIR}/libspdk_json.a
-      ${SPDK_LIB_DIR}/libspdk_jsonrpc.a
-      ${SPDK_LIB_DIR}/libspdk_sock.a
-      ${SPDK_LIB_DIR}/libspdk_thread.a
-      ${SPDK_LIB_DIR}/libspdk_trace.a
-      ${SPDK_LIB_DIR}/libspdk_vmd.a
-      ${SPDK_LIB_DIR}/libspdk_rpc.a
-      ${DPDK_LIB_DIR}/librte_eal.a
-      ${DPDK_LIB_DIR}/librte_mempool.a
-      ${DPDK_LIB_DIR}/librte_ring.a
-      ${DPDK_LIB_DIR}/librte_bus_pci.a
-      ${DPDK_LIB_DIR}/librte_pci.a
-      ${DPDK_LIB_DIR}/librte_timer.a
-      ${DPDK_LIB_DIR}/librte_telemetry.a
-      ${DPDK_LIB_DIR}/librte_kvargs.a
-      ${DPDK_LIB_DIR}/librte_mbuf.a
-      -Wl,--whole-archive
-      ${DPDK_LIB_DIR}/librte_mempool_ring.a
-      -Wl,--no-whole-archive
-      ${DPDK_LIB_DIR}/librte_power.a
-      ${DPDK_LIB_DIR}/librte_ethdev.a
-      ${DPDK_LIB_DIR}/librte_net.a
-      ${DPDK_LIB_DIR}/librte_vhost.a
-      ${DPDK_LIB_DIR}/librte_cryptodev.a
-      ${DPDK_LIB_DIR}/librte_hash.a
-      ${DPDK_LIB_DIR}/librte_rcu.a
-      pthread
-      dl
-      numa
-      rt
-      m
-      uuid
-      crypto
-      aio
-      z
-      -L${SPDK_ISA_L_LIB_DIR}
-      isal
-      elf
-      ibverbs
-      rdmacm
-      ssl
-      bsd)
+  include(${CMAKE_SOURCE_DIR}/cmake/Spdk.cmake)
+  mooncake_configure_spdk()
+  set(SPDK_STATIC_LIBS Mooncake::spdk)
+  get_target_property(SPDK_INCLUDE_DIR Mooncake::spdk
+                      INTERFACE_INCLUDE_DIRECTORIES)
 
   # ---------------------------------------------------------------------------
   # SPDK-backed NoF initiator implementation, linked PRIVATE so SPDK/DPDK static

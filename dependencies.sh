@@ -13,6 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "This installer requires Bash. Run: bash dependencies.sh [OPTIONS]" >&2
+    exit 1
+fi
+
 # Color definitions
 GREEN="\033[0;32m"
 BLUE="\033[0;34m"
@@ -47,6 +52,63 @@ check_success() {
     if [ $? -ne 0 ]; then
         print_error "$1"
     fi
+}
+
+# Keep installing independent dependencies when an RPM package is unavailable.
+# The exit handler also reports these failures if a later installation step fails.
+FAILED_SYSTEM_PACKAGES=()
+report_missing_system_packages() {
+    local status=$?
+    if [ ${#FAILED_SYSTEM_PACKAGES[@]} -gt 0 ]; then
+        echo -e "${RED}System dependencies are incomplete:${NC}" >&2
+        printf '  - %s\n' "${FAILED_SYSTEM_PACKAGES[@]}" >&2
+        echo "Check your enabled repositories, install the missing dependencies, and rerun this script before building Mooncake." >&2
+        status=1
+    fi
+    trap - EXIT
+    exit "$status"
+}
+trap report_missing_system_packages EXIT
+
+install_rpm_packages() {
+    local packages=("$@")
+    local package candidate installed
+    local candidates=()
+
+    # Keep the normal single-transaction path when every package is available.
+    if "${RPM_INSTALL_CMD[@]}" "${packages[@]}"; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}Batch installation failed. Retrying packages individually with compatible names...${NC}"
+    for package in "${packages[@]}"; do
+        candidates=("$package")
+        case "$package" in
+            boost1.78-devel) candidates+=(boost-devel) ;;
+            boost-devel) candidates+=(boost1.78-devel) ;;
+            # Mooncake needs the C++ headers, including msgpack.hpp.
+            msgpack-cxx-devel) candidates+=(msgpack-devel /usr/include/msgpack.hpp) ;;
+        esac
+
+        installed=false
+        for candidate in "${candidates[@]}"; do
+            if "${RPM_INSTALL_CMD[@]}" "$candidate"; then
+                installed=true
+                if [ "$candidate" != "$package" ]; then
+                    print_success "Installed $candidate instead of $package"
+                fi
+                break
+            fi
+        done
+        if [ "$installed" = false ] && [ "$package" = cli11-devel ]; then
+            echo -e "${YELLOW}cli11-devel is not available; install CLI11 headers manually to build the TENT CLI.${NC}"
+            continue
+        fi
+        if [ "$installed" = false ]; then
+            FAILED_SYSTEM_PACKAGES+=("$package (tried: ${candidates[*]})")
+            echo -e "${YELLOW}Could not install $package. Continuing with other dependencies...${NC}"
+        fi
+    done
 }
 
 # Detect ScaleFabric SHCA (shca-tools).
@@ -149,8 +211,10 @@ if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
     apt-get update
     check_success "Failed to update package lists"
 elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS" = "almalinux" ] || [ "$OS" = "euleros" ] || [ "$OS" = "openeuler" ] || [ "$OS" = "kylin" ]; then
-    yum install -y dnf-plugins-core epel-release || true
-    yum config-manager --set-enabled powertools || yum config-manager --set-enabled crb || true
+    if [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS" = "almalinux" ]; then
+        yum install -y dnf-plugins-core epel-release || true
+        yum config-manager --set-enabled powertools || yum config-manager --set-enabled crb || true
+    fi
     yum clean all
     yum makecache
     check_success "Failed to update package lists"
@@ -251,10 +315,12 @@ elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS
         echo -e "${GREEN}shca-tools package detected. Skipping rdma-core-devel (provided by shca-tools).${NC}"
     fi
 
-    yum install -y $SYSTEM_PACKAGES
-    check_success "Failed to install system packages"
-    # The TENT CLI needs CLI11 headers; some releases do not package them.
-    yum install -y cli11-devel || echo -e "${YELLOW}cli11-devel is not available; install CLI11 headers manually to build the TENT CLI.${NC}"
+    # openEuler/EulerOS use the unversioned Boost development package.
+    if [ "$OS" = "openeuler" ] || [ "$OS" = "euleros" ]; then
+        SYSTEM_PACKAGES=${SYSTEM_PACKAGES/boost1.78-devel/boost-devel}
+    fi
+    RPM_INSTALL_CMD=(yum install -y)
+    install_rpm_packages $SYSTEM_PACKAGES cli11-devel
 
 elif [ "$OS" = "kylin" ]; then
     SYSTEM_PACKAGES="@development \
@@ -277,7 +343,7 @@ elif [ "$OS" = "kylin" ]; then
                      hiredis-devel \
                      liburing-devel \
                      jemalloc-devel \
-                     msgpack-devel \
+                     msgpack-cxx-devel \
                      libzstd-devel \
                      pkgconf-pkg-config \
                      elfutils-libelf-devel \
@@ -305,18 +371,19 @@ elif [ "$OS" = "kylin" ]; then
 
         KYLIN_EPKL_URL="https://eps-server.openkylin.top/NS/${KYLIN_VERSION}/${KYLIN_EPKL_RELEASE}/EPKL/main/$(uname -m)/"
     fi
-    dnf --repofrompath="kylin-epkl,$KYLIN_EPKL_URL" \
-        --setopt=kylin-epkl.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-kylin \
-        --enablerepo=kylin-epkl install -y $SYSTEM_PACKAGES
-    check_success "Failed to install system packages"
-    dnf --repofrompath="kylin-epkl,$KYLIN_EPKL_URL" \
-        --setopt=kylin-epkl.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-kylin \
-        --enablerepo=kylin-epkl install -y cli11-devel || echo -e "${YELLOW}cli11-devel is not available; install CLI11 headers manually to build the TENT CLI.${NC}"
+    RPM_INSTALL_CMD=(dnf --repofrompath="kylin-epkl,$KYLIN_EPKL_URL"
+        --setopt=kylin-epkl.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-kylin
+        --enablerepo=kylin-epkl install -y)
+    install_rpm_packages $SYSTEM_PACKAGES cli11-devel
 else
     print_error "Unsupported OS: $OS"
 fi
 
-print_success "System packages installed successfully"
+if [ ${#FAILED_SYSTEM_PACKAGES[@]} -eq 0 ]; then
+    print_success "System packages installed successfully"
+else
+    echo -e "${YELLOW}Some system packages could not be installed. Continuing; missing dependencies will be listed on exit.${NC}"
+fi
 
 # Initialize and update git submodules
 print_section "Initializing Git Submodules"
@@ -547,6 +614,11 @@ fi
 cd "${REPO_ROOT}"
 
 # Print summary
+if [ ${#FAILED_SYSTEM_PACKAGES[@]} -gt 0 ]; then
+    print_section "Installation Incomplete"
+    echo "Later installation steps completed, but some system dependencies still need attention."
+    exit 1
+fi
 print_section "Installation Complete"
 echo -e "${GREEN}All dependencies have been successfully installed!${NC}"
 echo -e "The following components were installed:"

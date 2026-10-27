@@ -110,6 +110,10 @@ class SPDKTgtCreator:
                             pci_list = self._split_pci_devices(value)
                             target["pci_devices"].extend(pci_list)
                         state = "pci"
+                    elif key in ("host_id", "rack_id"):
+                        # Placement metadata is consumed by registration, not
+                        # by target creation or PCI continuation parsing.
+                        state = None
                     elif state == "pci":
                         pci_list = self._split_pci_devices(part)
                         target["pci_devices"].extend(pci_list)
@@ -864,6 +868,8 @@ class MooncakeNoFRegister:
             ip = target.get("ip")
             path = target.get("path")
             selected_pci_devices = self._parse_selected_pci_devices(target)
+            host_id = target.get("host_id", "")
+            rack_id = target.get("rack_id", "")
 
             if not ip or not path:
                 logging.error(f"Invalid target info: {target_info}")
@@ -941,6 +947,8 @@ class MooncakeNoFRegister:
                             "size": size,
                             "master_server_address": master_server_address,
                             "metadata_server": "",
+                            "host_id": host_id,
+                            "rack_id": rack_id,
                         }
 
                         ssd_configs.append(ssd_config)
@@ -992,6 +1000,8 @@ class MooncakeNoFRegister:
                     cfg["base"],
                     cfg["size"],
                     cfg["master_server_address"],
+                    cfg.get("host_id", ""),
+                    cfg.get("rack_id", ""),
                 )
 
                 if ret != 0:

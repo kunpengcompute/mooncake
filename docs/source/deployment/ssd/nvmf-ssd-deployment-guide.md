@@ -126,8 +126,8 @@ python3 -m mooncake.mooncake_ssd_create_and_register \
 ```bash
 python3 -m mooncake.mooncake_ssd_create_and_register \
   --master_server_address 192.168.65.81:50051 \
-  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0" \
-  --spdk_target_info "ip:192.168.65.57 path:/home/spdk pci:0000:02:00.0"
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0 host_id:host1 rack_id:rack1" \
+  --spdk_target_info "ip:192.168.65.57 path:/home/spdk pci:0000:02:00.0 host_id:host2 rack_id:rack2"
 ```
 
 #### Create Target Resources Only
@@ -166,7 +166,7 @@ The command reuses the running `nvmf_tgt`, transport, subsystem, and listener. I
 | Parameter | Required | Description |
 | --- | --- | --- |
 | `--master_server_address` | Conditional | Required unless `--skip-register` is set. For example, `192.168.65.81:50051`. |
-| `--spdk_target_info` | Yes | Target description. Repeat for multiple targets. Format: `ip:<target_ip> path:<spdk_path> [pci:<pci1>,<pci2>]`. |
+| `--spdk_target_info` | Yes | Target description. Repeat for multiple targets. Format: `ip:<target_ip> path:<spdk_path> [pci:<pci1>,<pci2>] [host_id:<host>] [rack_id:<rack>]`. |
 | `--skip-create` | No | Skip target creation and only register namespaces. |
 | `--skip-register` | No | Create target resources without registering them with the master. |
 | `--dry-run` | No | Print the workflow without executing remote operations. |
@@ -185,6 +185,29 @@ The command reuses the running `nvmf_tgt`, transport, subsystem, and listener. I
 | `--password` | No | SSH password. |
 | `--key-file` | No | SSH private key file. |
 | `-D`, `--define` | No | Override registration configuration fields, for example `-Dtrsvcid=4420`. |
+
+The optional `host_id` identifies a physical host independently of its transport endpoint. If omitted, registration resolves it using `MOONCAKE_HOST_ID` and the transport address. The optional `rack_id` identifies a rack or power domain; placement falls back to host-level isolation when it is omitted.
+
+To enable NoF placement tables after building with `-DUSE_NOF=ON`, save the following master configuration as `/home/master.yaml` (or add these fields to an existing master configuration):
+
+```yaml
+enable_nof_pt_allocation: true
+nof_pt_count: 128
+nof_pt_replica_num: 2
+nof_pt_host_increment_skew_k: 1.5
+nof_pt_normal_rebuild_interval_ms: 60000
+nof_pt_fast_rebuild_interval_ms: 5000
+```
+
+Start the master with that configuration:
+
+```bash
+mooncake_master --rpc_address=192.168.65.81 --config_path=/home/master.yaml
+```
+
+PT placement is disabled by default. When enabled, `nof_pt_count` must be a power of two, `nof_pt_replica_num` must be at least two, and the fast rebuild interval must not exceed the normal interval. Writes can request one NoF replica or the configured replica count; zero still disables NoF replicas for that write. PT allocation uses the OFFSET allocator and excludes segments without a usable host identity or known capacity.
+
+The master rebuilds placement tables after topology changes and periodically as space usage changes. Catch-up placement weights writes by space below a 90% utilization target; steady-state placement uses provisioned capacity. When target headroom cannot satisfy replica isolation, the builder retries with a 100% target. These modes affect future allocations and do not migrate existing replicas. Inspect the active table with `GET /api/v1/pt_view` on the master admin server.
 
 ## 4. Unregister and Optionally Remove SSDs
 

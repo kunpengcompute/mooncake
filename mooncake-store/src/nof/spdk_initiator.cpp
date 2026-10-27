@@ -1038,10 +1038,10 @@ class SpdkInitiator::Impl {
                           std::string(info->trid.subnqn) + "|" +
                           std::to_string(static_cast<int>(info->trid.trtype));
 
-        LOG(INFO) << "traddr:" << info->trid.traddr
-                  << "trsvcid:" << info->trid.trsvcid << "ns:" << info->ns
-                  << "subnqn:" << info->trid.subnqn
-                  << "trtype:" << info->trid.trtype;
+        VLOG(1) << "traddr:" << info->trid.traddr
+                << "trsvcid:" << info->trid.trsvcid << "ns:" << info->ns
+                << "subnqn:" << info->trid.subnqn
+                << "trtype:" << info->trid.trtype;
 
         return 0;
     }

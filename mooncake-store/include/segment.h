@@ -1,6 +1,7 @@
 #pragma once
 
 #include <boost/functional/hash.hpp>
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <ostream>
@@ -14,6 +15,7 @@
 
 #include "allocation_strategy.h"
 #include "allocator.h"
+#include "placement/pt_view.h"
 #include "rpc_types.h"
 #include "segment/status.h"
 #include "segment/usage.h"
@@ -434,13 +436,24 @@ class SegmentManager {
 
 class NoFSegmentManager {
    public:
+    struct SegmentSpaceReport {
+        UUID segment_id;
+        std::string name;
+        std::string host_id;
+        std::string rack_id;
+        uint64_t capacity{0};
+        uint64_t used{0};
+        uint64_t largest_free{0};
+        bool unknown_capacity{false};
+    };
+
     /**
      * @brief Constructor for SegmentManager
      * @param memory_allocator Type of buffer allocator to use for new segments
      */
     explicit NoFSegmentManager(
-        BufferAllocatorType memory_allocator = BufferAllocatorType::CACHELIB)
-        : memory_allocator_(memory_allocator) {}
+        BufferAllocatorType memory_allocator = BufferAllocatorType::CACHELIB);
+    ~NoFSegmentManager();
 
     /**
      * @brief Get RAII-style access to segment management operations
@@ -466,6 +479,12 @@ class NoFSegmentManager {
         std::shared_lock<std::shared_mutex> lock(segment_mutex_);
         return mounted_segments_.size();
     }
+
+    tl::expected<std::vector<Replica>, ErrorCode> AllocatePt(
+        size_t size, size_t replica_count);
+    void GetSegmentSpaceReports(std::vector<SegmentSpaceReport>& reports) const;
+    void SetPtEnabled(bool enabled);
+    PtViewManager& GetPtViewManager() { return pt_view_manager_; }
 
     void GetMountedSegmentsSnapshot(
         std::vector<MountedNoFSegmentSnapshot>& segments) const;
@@ -518,6 +537,10 @@ class NoFSegmentManager {
 
     std::unordered_map<std::string, UUID>
         client_by_name_;  // segment name -> client_id
+
+    std::atomic<bool> pt_enabled_{false};
+    PtViewManager pt_view_manager_;
+    std::unique_ptr<class NofPtReplicaAllocator> pt_allocator_;
 
     friend class ScopedNoFSegmentAccess;
     friend class SegmentTest;

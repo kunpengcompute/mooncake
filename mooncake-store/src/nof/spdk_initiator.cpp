@@ -4,7 +4,9 @@
 
 #include <glog/logging.h>
 
+#include <algorithm>
 #include <atomic>
+#include <set>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -24,9 +26,15 @@
 #include "config/spdk_controller_config.h"
 #include "nof/page_registry.h"
 #include "nof/probe_context_pool.h"
+#include "nof/namespace_refresh.h"
 
 namespace mooncake {
 namespace {
+
+bool IsControllerConnectionError(int64_t ret) {
+    return ret == -ENXIO || ret == -EIO || ret == -ECONNRESET ||
+           ret == -ENODEV || ret == -EPIPE || ret == -ETIMEDOUT;
+}
 
 void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts* opts) {
     opts->keep_alive_timeout_ms = 0;
@@ -80,6 +88,58 @@ void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts* opts) {
 std::mutex& NvmeCtrlrStateMutex() {
     static std::mutex* m = new std::mutex();
     return *m;
+}
+
+// SPDK can return the same controller to multiple initiator instances. Its AER
+// callback slot is per controller, so fan out notices to every live instance.
+struct NamespaceNotices {
+    std::mutex mutex;
+    std::map<spdk_nvme_ctrlr*, std::set<std::atomic<bool>*>> subscribers;
+};
+NamespaceNotices& Notices() {
+    static auto* notices = new NamespaceNotices();
+    return *notices;
+}
+void SubscribeNamespaceNotices(spdk_nvme_ctrlr* ctrlr,
+                               std::atomic<bool>* changed) {
+    auto& notices = Notices();
+    bool first = false;
+    {
+        std::lock_guard<std::mutex> lock(notices.mutex);
+        auto& subscribers = notices.subscribers[ctrlr];
+        first = subscribers.empty();
+        subscribers.insert(changed);
+    }
+    if (!first) return;
+    spdk_nvme_ctrlr_register_aer_callback(
+        ctrlr,
+        [](void* ctx, const spdk_nvme_cpl* cpl) {
+            if (spdk_nvme_cpl_is_error(cpl)) return;
+            union spdk_nvme_async_event_completion event;
+            event.raw = cpl->cdw0;
+            if (event.bits.async_event_type !=
+                    SPDK_NVME_ASYNC_EVENT_TYPE_NOTICE ||
+                event.bits.async_event_info !=
+                    SPDK_NVME_ASYNC_EVENT_NS_ATTR_CHANGED)
+                return;
+            auto& notices = Notices();
+            std::lock_guard<std::mutex> lock(notices.mutex);
+            auto it =
+                notices.subscribers.find(static_cast<spdk_nvme_ctrlr*>(ctx));
+            if (it != notices.subscribers.end()) {
+                for (auto* changed : it->second) changed->store(true);
+            }
+        },
+        ctrlr);
+}
+void UnsubscribeNamespaceNotices(spdk_nvme_ctrlr* ctrlr,
+                                 std::atomic<bool>* changed) {
+    auto& notices = Notices();
+    std::lock_guard<std::mutex> lock(notices.mutex);
+    auto it = notices.subscribers.find(ctrlr);
+    if (it == notices.subscribers.end()) return;
+    it->second.erase(changed);
+    if (it->second.empty()) notices.subscribers.erase(it);
 }
 
 }  // namespace
@@ -256,8 +316,13 @@ NofRegistryBundle& GetNofRegistryBundle() {
 
 class NofSegmentHandle {
    public:
-    struct spdk_nvme_qpair* qpair;
-    struct spdk_nvme_ns* ns;
+    std::atomic<struct spdk_nvme_qpair*> qpair{nullptr};
+    struct spdk_nvme_ns* ns{nullptr};
+    std::atomic<bool> failed{false};
+    std::string ctrlr_key;
+    uint32_t nsid{0};
+    uint32_t block_size{0};
+    uint64_t capacity{0};
 };
 
 namespace {
@@ -269,7 +334,13 @@ struct tr_info {
 };
 
 struct ctrlr_info {
-    struct spdk_nvme_ctrlr* ctrlr;
+    struct spdk_nvme_ctrlr* ctrlr{nullptr};
+    std::atomic<bool> failed{false};
+    std::atomic<bool> namespace_changed{false};
+    std::string key;
+    std::chrono::steady_clock::time_point last_admin_poll{};
+    std::mutex admin_mutex;
+    std::vector<std::unique_ptr<NofSegmentHandle>> retired_segments;
     std::map<uint32_t, std::unique_ptr<NofSegmentHandle>> ns_seg;
     std::mutex ns_mutex;
 };
@@ -306,24 +377,23 @@ class SpdkInitiator::Impl {
                             spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
                         }
                     }
+                    for (auto& seg : info->retired_segments) {
+                        if (seg->qpair)
+                            spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
+                    }
                     if (info->ctrlr) {
+                        UnsubscribeNamespaceNotices(info->ctrlr,
+                                                    &info->namespace_changed);
                         spdk_nvme_detach(info->ctrlr);
                     }
                 }
             }
+            for (auto& info : retired_ctrlrs_) {
+                DestroyController(*info);
+            }
             connected_ctrlrs_.clear();
         }
-        {
-            std::lock_guard<std::mutex> lock(probe_buffers_mutex_);
-            for (auto& [_, probe_buffer] : probe_buffers_) {
-                if (probe_buffer && probe_buffer->ptr) {
-                    spdk_free(probe_buffer->ptr);
-                    probe_buffer->ptr = nullptr;
-                    probe_buffer->size = 0;
-                }
-            }
-            probe_buffers_.clear();
-        }
+
 #ifdef HAVE_SPDK_MEM_REGISTER
         // Backstop, after all I/O teardown above: release every page
         // registration this instance still holds, in case the real-client
@@ -350,21 +420,61 @@ class SpdkInitiator::Impl {
             return nullptr;
         }
 
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            bool should_retry = false;
+            if (auto* handle = OpenSegmentOnce(tr, &should_retry))
+                return handle;
+            if (!should_retry) return nullptr;
+            // OpenSegmentOnce marks the exact failed generation. The next
+            // attempt uses the existing retirement path without detaching
+            // a controller while another worker still owns I/O.
+        }
+        return nullptr;
+    }
+
+    NofSegmentHandle* OpenSegmentOnce(const tr_info& tr, bool* should_retry) {
         ctrlr_info* info = nullptr;
         {
             std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
             auto it = connected_ctrlrs_.find(tr.ctrlr_key);
-            if (it != connected_ctrlrs_.end()) {
-                info = it->second.get();
+            if (it != connected_ctrlrs_.end() &&
+                (it->second->failed ||
+                 spdk_nvme_ctrlr_is_failed(it->second->ctrlr))) {
+                MarkFailed(*it->second);
+                retired_ctrlrs_.push_back(std::move(it->second));
+                connected_ctrlrs_.erase(it);
+                it = connected_ctrlrs_.end();
             }
+            // No callback storage or handle is released here.
+            for (auto& retired : retired_ctrlrs_) {
+                if (!retired->ctrlr) continue;
+                bool busy = false;
+                for (auto& [_, seg] : retired->ns_seg)
+                    busy |= seg->qpair != nullptr;
+                for (auto& seg : retired->retired_segments)
+                    busy |= seg->qpair != nullptr;
+                if (!busy) {
+                    std::lock_guard<std::mutex> nvme_lock(
+                        NvmeCtrlrStateMutex());
+                    UnsubscribeNamespaceNotices(retired->ctrlr,
+                                                &retired->namespace_changed);
+                    spdk_nvme_detach(retired->ctrlr);
+                    retired->ctrlr = nullptr;
+                } else if (tr.ctrlr_key == retired->key) {
+                    return nullptr;
+                }
+            }
+            if (it != connected_ctrlrs_.end()) info = it->second.get();
         }
         if (!info) {
             // Connect OUTSIDE the mutex: spdk_nvme_probe may block for
             // seconds and would stall first-time opens of other endpoints.
             auto new_info = std::make_unique<ctrlr_info>();
-            if (ConnectController(&tr.trid, new_info.get()) != 0) {
+            if (ConnectController(&tr.trid, new_info.get()) != 0 ||
+                !new_info->ctrlr) {
                 return nullptr;
             }
+            new_info->key = tr.ctrlr_key;
             bool detach_duplicate = false;
             {
                 std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
@@ -381,6 +491,8 @@ class SpdkInitiator::Impl {
             }
             if (detach_duplicate) {
                 std::lock_guard<std::mutex> nvme_lock(NvmeCtrlrStateMutex());
+                UnsubscribeNamespaceNotices(new_info->ctrlr,
+                                            &new_info->namespace_changed);
                 spdk_nvme_detach(new_info->ctrlr);
             }
         }
@@ -389,29 +501,83 @@ class SpdkInitiator::Impl {
         {
             auto& ns_seg = info->ns_seg;
             std::lock_guard<std::mutex> lock(info->ns_mutex);
+            if (info->failed) return nullptr;
             auto ns_it = ns_seg.find(tr.ns);
             if (ns_it != ns_seg.end()) {
-                return ns_it->second.get();
+                auto* handle = ns_it->second.get();
+                if (!handle->failed) {
+                    std::lock_guard<std::mutex> admin_lock(info->admin_mutex);
+                    if (handle->ns &&
+                        spdk_nvme_ns_get_sector_size(handle->ns) != 0 &&
+                        spdk_nvme_ns_get_size(handle->ns) != 0) {
+                        return handle;
+                    }
+                    LOG(WARNING)
+                        << "cached nof namespace has invalid geometry"
+                        << ", ctrlr_key=" << tr.ctrlr_key << ", nsid=" << tr.ns
+                        << ", action=reconnect_controller";
+                    *should_retry = true;
+                    MarkFailedNamespacesLocked(*info);
+                    return nullptr;
+                }
+                info->retired_segments.push_back(std::move(ns_it->second));
+                ns_seg.erase(ns_it);
+            }
+            int32_t namespace_refresh_error = 0;
+            if (!WaitForActiveNamespace(*info, tr.ns,
+                                        &namespace_refresh_error)) {
+                LOG(ERROR) << "spdk_nvme_ctrlr_is_active_ns failed"
+                           << ", ctrlr_key=" << tr.ctrlr_key
+                           << ", nsid=" << tr.ns
+                           << ", admin_error=" << namespace_refresh_error;
+                *should_retry =
+                    IsControllerConnectionError(namespace_refresh_error);
+                if (*should_retry) MarkFailedNamespacesLocked(*info);
+                return nullptr;
+            }
+            std::lock_guard<std::mutex> admin_lock(info->admin_mutex);
+            if (info->failed) return nullptr;
+            struct spdk_nvme_ns* ns =
+                spdk_nvme_ctrlr_get_ns(info->ctrlr, tr.ns);
+            if (!ns) {
+                LOG(ERROR) << "spdk_nvme_ctrlr_get_ns failed"
+                           << ", ctrlr_key=" << tr.ctrlr_key
+                           << ", nsid=" << tr.ns;
+                return nullptr;
             }
 
-            struct spdk_nvme_ns* ns = nullptr;
-            if (spdk_nvme_ctrlr_is_active_ns(info->ctrlr, tr.ns)) {
-                ns = spdk_nvme_ctrlr_get_ns(info->ctrlr, tr.ns);
-            } else {
-                LOG(ERROR) << "spdk_nvme_ctrlr_is_active_ns failed";
+            const auto block_size = spdk_nvme_ns_get_sector_size(ns);
+            const auto capacity = spdk_nvme_ns_get_size(ns);
+            if (block_size == 0 || capacity == 0) {
+                LOG(WARNING)
+                    << "nof namespace geometry is not ready"
+                    << ", ctrlr_key=" << tr.ctrlr_key << ", nsid=" << tr.ns
+                    << ", block_size=" << block_size
+                    << ", capacity=" << capacity
+                    << ", action=reconnect_controller";
+                *should_retry = true;
+                MarkFailedNamespacesLocked(*info);
                 return nullptr;
             }
 
             struct spdk_nvme_qpair* qpair =
                 spdk_nvme_ctrlr_alloc_io_qpair(info->ctrlr, nullptr, 0);
             if (!qpair) {
-                LOG(ERROR) << "alloc spdk_nvme_qpair failed";
+                LOG(ERROR) << "alloc spdk_nvme_qpair failed"
+                           << ", ctrlr_key=" << tr.ctrlr_key
+                           << ", nsid=" << tr.ns;
+                *should_retry = true;
+                MarkFailedNamespacesLocked(*info);
                 return nullptr;
             }
 
             auto new_seg = std::make_unique<NofSegmentHandle>();
+            new_seg->ctrlr_key = tr.ctrlr_key;
+            new_seg->nsid = tr.ns;
             new_seg->qpair = qpair;
             new_seg->ns = ns;
+            new_seg->block_size = block_size;
+            new_seg->capacity = capacity;
             seg_handle = new_seg.get();
             ns_seg[tr.ns] = std::move(new_seg);
         }
@@ -419,10 +585,10 @@ class SpdkInitiator::Impl {
     }
 
     uint32_t GetBlockSize(const NofSegmentHandle* handle) {
-        if (!handle || !handle->ns) {
+        if (!handle || handle->failed || !handle->ns) {
             return kInvalidBlockSize;
         }
-        return spdk_nvme_ns_get_sector_size(handle->ns);
+        return handle->block_size;
     }
 
     int SubmitIO(NofSegmentHandle* handle, void* buffer, uint64_t byte_offset,
@@ -431,7 +597,8 @@ class SpdkInitiator::Impl {
             !handle->ns || !adaptor || !adaptor->cb) {
             return -EINVAL;
         }
-        const uint32_t block_size = spdk_nvme_ns_get_sector_size(handle->ns);
+        if (handle->failed) return -ENXIO;
+        const uint32_t block_size = handle->block_size;
         // Interface precondition, enforced at submit time.
         if (block_size == 0 || byte_offset % block_size != 0 ||
             byte_length % block_size != 0) {
@@ -461,10 +628,184 @@ class SpdkInitiator::Impl {
         if (!handle || !handle->qpair) {
             return -EINVAL;
         }
+        if (handle->failed) return -ENXIO;
         // max_completions == 0 means "all pending" (SPDK dialect, kept as an
         // explicit interface contract).
         return spdk_nvme_qpair_process_completions(handle->qpair,
                                                    max_completions);
+    }
+
+    static void MarkFailed(ctrlr_info& info) {
+        info.failed = true;
+        std::lock_guard<std::mutex> lock(info.ns_mutex);
+        MarkFailedNamespacesLocked(info);
+    }
+
+    // Caller holds ns_mutex. Mark the exact controller generation so a late
+    // open failure cannot invalidate a newly connected controller by key.
+    static void MarkFailedNamespacesLocked(ctrlr_info& info) {
+        info.failed = true;
+        for (auto& [_, seg] : info.ns_seg) seg->failed = true;
+    }
+
+    static void DestroyController(ctrlr_info& info) {
+        for (auto& [_, seg] : info.ns_seg) {
+            if (seg->qpair) spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
+        }
+        for (auto& seg : info.retired_segments) {
+            if (seg->qpair) spdk_nvme_ctrlr_free_io_qpair(seg->qpair);
+        }
+        if (info.ctrlr) {
+            UnsubscribeNamespaceNotices(info.ctrlr, &info.namespace_changed);
+            spdk_nvme_detach(info.ctrlr);
+        }
+    }
+
+    std::string GetControllerKey(const std::string& endpoint) {
+        tr_info tr;
+        return ParseTransPortStr(endpoint, &tr) == 0 ? tr.ctrlr_key : "";
+    }
+
+    std::vector<uint32_t> GetActiveNamespaces(const std::string& endpoint) {
+        std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
+        auto it = connected_ctrlrs_.find(GetControllerKey(endpoint));
+        if (it == connected_ctrlrs_.end() || it->second->failed) return {};
+        auto& info = *it->second;
+        std::lock_guard<std::mutex> admin_lock(info.admin_mutex);
+        std::vector<uint32_t> result;
+        for (uint32_t nsid = spdk_nvme_ctrlr_get_first_active_ns(info.ctrlr);
+             nsid != 0;
+             nsid = spdk_nvme_ctrlr_get_next_active_ns(info.ctrlr, nsid)) {
+            result.push_back(nsid);
+        }
+        return result;
+    }
+
+    uint64_t GetNamespaceCapacityBytes(const NofSegmentHandle* handle) {
+        return handle && !handle->failed && handle->ns ? handle->capacity : 0;
+    }
+
+    std::vector<std::string> ConsumeNamespaceAttributeChangedControllers() {
+        std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
+        std::vector<std::string> result;
+        for (auto& [key, info] : connected_ctrlrs_) {
+            if (info->namespace_changed.exchange(false)) result.push_back(key);
+        }
+        return result;
+    }
+
+    void InvalidateController(const std::string& endpoint) {
+        InvalidateControllerKey(GetControllerKey(endpoint));
+    }
+
+    void InvalidateControllerKey(const std::string& key) {
+        std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
+        auto it = connected_ctrlrs_.find(key);
+        if (it != connected_ctrlrs_.end()) MarkFailed(*it->second);
+    }
+
+    void InvalidateController(NofSegmentHandle* handle) {
+        if (!handle) return;
+        std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
+        auto it = connected_ctrlrs_.find(handle->ctrlr_key);
+        if (it == connected_ctrlrs_.end()) return;
+        bool current = false;
+        {
+            std::lock_guard<std::mutex> ns_lock(it->second->ns_mutex);
+            auto ns = it->second->ns_seg.find(handle->nsid);
+            current =
+                ns != it->second->ns_seg.end() && ns->second.get() == handle;
+        }
+        // A late failure on a retired generation must not invalidate a new
+        // connection to the same endpoint.
+        if (current) MarkFailed(*it->second);
+    }
+
+    void CloseSegment(const std::string& endpoint) {
+        tr_info tr;
+        if (ParseTransPortStr(endpoint, &tr) != 0) return;
+        std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
+        auto close = [&](ctrlr_info& info) {
+            std::lock_guard<std::mutex> ns_lock(info.ns_mutex);
+            auto ns = info.ns_seg.find(tr.ns);
+            if (ns != info.ns_seg.end()) AbortSegment(ns->second.get());
+        };
+        auto it = connected_ctrlrs_.find(tr.ctrlr_key);
+        if (it != connected_ctrlrs_.end()) close(*it->second);
+        for (auto& info : retired_ctrlrs_) {
+            if (info->key == tr.ctrlr_key) close(*info);
+        }
+    }
+
+    int32_t PollAdminCompletions(NofSegmentHandle* handle) {
+        if (!handle || handle->failed) return -ENXIO;
+        std::lock_guard<std::mutex> lock(ctrlrs_mutex_);
+        auto it = connected_ctrlrs_.find(handle->ctrlr_key);
+        if (it == connected_ctrlrs_.end() || it->second->failed) return -ENXIO;
+        auto& info = *it->second;
+        return PollAdminCompletions(info, false);
+    }
+
+    int32_t PollAdminCompletions(ctrlr_info& info, bool force) {
+        std::lock_guard<std::mutex> admin_lock(info.admin_mutex);
+        const auto now = std::chrono::steady_clock::now();
+        static const auto interval = std::chrono::milliseconds(
+            std::min<uint64_t>(SpdkControllerConfig::FromEnvironment()
+                                   .nof_admin_poll_interval_ms,
+                               static_cast<uint64_t>(
+                                   std::chrono::milliseconds::max().count())));
+        if (info.failed || !info.ctrlr) return -ENXIO;
+        if (!force && now - info.last_admin_poll < interval) return 0;
+        info.last_admin_poll = now;
+        return spdk_nvme_ctrlr_process_admin_completions(info.ctrlr);
+    }
+
+    bool WaitForActiveNamespace(ctrlr_info& info, uint32_t nsid,
+                                int32_t* admin_error) {
+        static const auto config = SpdkControllerConfig::FromEnvironment();
+        const auto milliseconds = [](uint64_t value) {
+            return std::chrono::milliseconds(std::min<uint64_t>(
+                value, static_cast<uint64_t>(
+                           std::chrono::milliseconds::max().count())));
+        };
+        const auto result = RefreshNofNamespace(
+            [&] {
+                std::lock_guard<std::mutex> lock(info.admin_mutex);
+                return !info.failed && info.ctrlr &&
+                       spdk_nvme_ctrlr_is_active_ns(info.ctrlr, nsid);
+            },
+            [&] { return PollAdminCompletions(info, true); },
+            milliseconds(config.nof_namespace_refresh_timeout_ms),
+            milliseconds(config.nof_namespace_refresh_poll_interval_ms));
+        *admin_error = result.admin_error;
+        if (result.admin_error < 0) {
+            LOG(ERROR) << "refresh nof namespaces failed"
+                       << ", ctrlr_key=" << info.key << ", nsid=" << nsid
+                       << ", admin_ret=" << result.admin_error
+                       << ", poll_count=" << result.poll_count;
+        } else if (!result.active) {
+            LOG(WARNING) << "nof namespace remains inactive after admin refresh"
+                         << ", ctrlr_key=" << info.key << ", nsid=" << nsid
+                         << ", timeout_ms="
+                         << config.nof_namespace_refresh_timeout_ms
+                         << ", poll_count=" << result.poll_count;
+        } else if (result.poll_count > 0) {
+            LOG(INFO) << "nof namespace became active after admin refresh"
+                      << ", ctrlr_key=" << info.key << ", nsid=" << nsid
+                      << ", poll_count=" << result.poll_count;
+        }
+        return result.active;
+    }
+
+    bool AbortSegment(NofSegmentHandle* handle) {
+        if (!handle) return true;
+        handle->failed = true;
+        // Owner thread only, outside a completion callback: freeing the qpair
+        // disconnects it and synchronously aborts its outstanding requests.
+        auto* qpair = handle->qpair.load();
+        if (qpair && spdk_nvme_ctrlr_free_io_qpair(qpair) != 0) return false;
+        handle->qpair = nullptr;
+        return true;
     }
 
     ErrorCode RegisterMemory(void* ptr, size_t size) {
@@ -528,74 +869,84 @@ class SpdkInitiator::Impl {
             return false;
         }
 
-        ProbeBuffer* probe_buffer =
-            GetOrCreateProbeBuffer(tr_str, block_size, error_reason);
-        if (!probe_buffer || !probe_buffer->ptr) {
+        void* buffer =
+            spdk_zmalloc(block_size, 0x1000, nullptr, -1, SPDK_MALLOC_DMA);
+        if (!buffer) {
+            if (error_reason) *error_reason = "alloc_fail";
             return false;
         }
-
-        NofProbeContext* probe_ctx = probe_pool_.Acquire();
-        // The probe reuses the normal submit path with an embedded adaptor,
-        // exactly like the worker pool's pooled sub-tasks.
-        probe_ctx->adaptor = {&ProbeReadComplete, probe_ctx};
-        probe_ctx->seg = seg_handle;
-        int ret = SubmitIO(seg_handle, probe_buffer->ptr, 0, block_size,
-                           NofIOOp::kRead, &probe_ctx->adaptor);
-        if (ret != 0) {
-            // Nothing was submitted, so no completion can arrive.
-            probe_pool_.Recycle(probe_ctx);
-            if (error_reason) {
-                *error_reason = "submit_fail";
+        // Read existing data without changing namespace contents or capacity.
+        auto run_io = [&]() {
+            auto* ctx = probe_pool_.Acquire();
+            ctx->adaptor = {&ProbeReadComplete, ctx};
+            ctx->seg = seg_handle;
+            int ret = SubmitIO(seg_handle, buffer, 0, block_size,
+                               NofIOOp::kRead, &ctx->adaptor);
+            if (ret != 0) {
+                probe_pool_.Recycle(ctx);
+                if (error_reason) {
+                    *error_reason =
+                        IsControllerConnectionError(ret)
+                            ? "controller_error:" + std::to_string(ret)
+                            : "submit_fail";
+                }
+                if (IsControllerConnectionError(ret))
+                    InvalidateController(seg_handle);
+                AbortSegment(seg_handle);
+                return false;
             }
-            return false;
-        }
-
-        auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(timeout_ms);
-        while (!probe_ctx->done.load(std::memory_order_acquire) &&
-               std::chrono::steady_clock::now() < deadline) {
-            PollCompletion(seg_handle, 0);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-
-        const bool done = probe_ctx->done.load(std::memory_order_acquire);
-        const bool ok =
-            done && probe_ctx->success.load(std::memory_order_acquire);
-        if (!ok && error_reason) {
+            auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(timeout_ms);
+            while (!ctx->done.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                int admin_ret = PollAdminCompletions(seg_handle);
+                int64_t poll_ret = PollCompletion(seg_handle, 0);
+                if (IsControllerConnectionError(admin_ret) ||
+                    IsControllerConnectionError(poll_ret)) {
+                    if (error_reason)
+                        *error_reason =
+                            "controller_error:" +
+                            std::to_string(admin_ret < 0 ? admin_ret
+                                                         : poll_ret);
+                    InvalidateController(seg_handle);
+                    AbortSegment(seg_handle);
+                    if (ctx->done.load(std::memory_order_acquire))
+                        probe_pool_.Recycle(ctx);
+                    else
+                        probe_pool_.Quarantine(ctx);
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            bool done = ctx->done.load(std::memory_order_acquire);
+            bool ok = done && ctx->success.load(std::memory_order_acquire);
+            if (!ok && error_reason) {
+                std::lock_guard<std::mutex> lock(ctx->error_mutex);
+                *error_reason = done ? ctx->error_reason : "completion_timeout";
+            }
             if (!done) {
-                *error_reason = "completion_timeout";
-            } else {
-                std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
-                *error_reason = probe_ctx->error_reason.empty()
-                                    ? "completion_error"
-                                    : probe_ctx->error_reason;
+                InvalidateController(seg_handle);
+                AbortSegment(seg_handle);
             }
-        }
-
-        if (done) {
-            // Recycle only after the caller has read all results, never
-            // inside the callback.
-            probe_pool_.Recycle(probe_ctx);
-        } else {
-            // The timed-out command is still in flight and retains
-            // &probe_ctx->adaptor: quarantine until the stale callback runs.
-            probe_pool_.Quarantine(probe_ctx);
+            if (ctx->done.load(std::memory_order_acquire))
+                probe_pool_.Recycle(ctx);
+            else
+                probe_pool_.Quarantine(ctx);
+            return ok;
+        };
+        const bool ok = run_io();
+        // AbortSegment above completes callbacks before this DMA buffer is
+        // freed.
+        if (!seg_handle->qpair || ok)
+            spdk_free(buffer);
+        else {
+            AbortSegment(seg_handle);
+            if (!seg_handle->qpair) spdk_free(buffer);
         }
         return ok;
     }
 
    private:
-    struct ProbeBuffer {
-        void* ptr{nullptr};
-        uint32_t size{0};
-
-        ProbeBuffer() = default;
-        ProbeBuffer(const ProbeBuffer&) = delete;
-        ProbeBuffer& operator=(const ProbeBuffer&) = delete;
-        ProbeBuffer(ProbeBuffer&&) = delete;
-        ProbeBuffer& operator=(ProbeBuffer&&) = delete;
-    };
-
     bool EnsureEnv() {
         // Locked check-then-set: an unlocked read of a shared_ptr member is
         // a torn-read UB. Cold path, one mutex acquisition is negligible.
@@ -614,7 +965,14 @@ class SpdkInitiator::Impl {
             completion.success = false;
             completion.sc = cpl->status.sc;
             completion.sct = cpl->status.sct;
+            const bool namespace_failure =
+                cpl->status.sct == SPDK_NVME_SCT_MEDIA_ERROR ||
+                (cpl->status.sct == SPDK_NVME_SCT_GENERIC &&
+                 (cpl->status.sc == SPDK_NVME_SC_INTERNAL_DEVICE_ERROR ||
+                  cpl->status.sc == SPDK_NVME_SC_INVALID_NAMESPACE_OR_FORMAT));
             completion.error_string =
+                std::string(namespace_failure ? "namespace_io_error:"
+                                              : "completion_error:") +
                 spdk_nvme_cpl_get_status_string(&cpl->status);
         } else {
             completion.success = true;
@@ -627,8 +985,9 @@ class SpdkInitiator::Impl {
         if (!c.success) {
             {
                 std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
-                probe_ctx->error_reason =
-                    std::string("completion_error:") + c.error_string;
+                probe_ctx->error_reason = c.error_string.empty()
+                                              ? "completion_error"
+                                              : c.error_string;
             }
             probe_ctx->success.store(false, std::memory_order_release);
         } else {
@@ -704,6 +1063,7 @@ class SpdkInitiator::Impl {
             LOG(INFO) << "Attached to " << trid->traddr << " " << trid->subnqn;
             ctrlr_info* info = (ctrlr_info*)cb_ctx;
             info->ctrlr = ctrlr;
+            SubscribeNamespaceNotices(ctrlr, &info->namespace_changed);
         };
 
         // Serialize probes process-wide (see NvmeCtrlrStateMutex): the
@@ -711,37 +1071,6 @@ class SpdkInitiator::Impl {
         // re-enter a lock.
         std::lock_guard<std::mutex> nvme_lock(NvmeCtrlrStateMutex());
         return spdk_nvme_probe(trid, (void*)info, probe_cb, attach_cb, NULL);
-    }
-
-    ProbeBuffer* GetOrCreateProbeBuffer(const std::string& tr_str,
-                                        uint32_t block_size,
-                                        std::string* error_reason) {
-        std::lock_guard<std::mutex> lock(probe_buffers_mutex_);
-        auto& probe_buffer = probe_buffers_[tr_str];
-        if (!probe_buffer) {
-            probe_buffer = std::make_unique<ProbeBuffer>();
-        }
-
-        if (probe_buffer->ptr != nullptr && probe_buffer->size == block_size) {
-            return probe_buffer.get();
-        }
-
-        if (probe_buffer->ptr != nullptr) {
-            spdk_free(probe_buffer->ptr);
-            probe_buffer->ptr = nullptr;
-            probe_buffer->size = 0;
-        }
-
-        probe_buffer->ptr =
-            spdk_zmalloc(block_size, 0x1000, nullptr, -1, SPDK_MALLOC_DMA);
-        if (!probe_buffer->ptr) {
-            if (error_reason) {
-                *error_reason = "alloc_fail";
-            }
-            return nullptr;
-        }
-        probe_buffer->size = block_size;
-        return probe_buffer.get();
     }
 
     // Bounded grace period for timed-out probes at teardown: SPDK requires a
@@ -783,8 +1112,7 @@ class SpdkInitiator::Impl {
     std::mutex env_mutex_;
     std::map<std::string, std::unique_ptr<ctrlr_info>> connected_ctrlrs_;
     std::mutex ctrlrs_mutex_;
-    std::map<std::string, std::unique_ptr<ProbeBuffer>> probe_buffers_;
-    std::mutex probe_buffers_mutex_;
+    std::vector<std::unique_ptr<ctrlr_info>> retired_ctrlrs_;
     NofProbeContextPool probe_pool_;
 };
 
@@ -802,6 +1130,45 @@ NofSegmentHandle* SpdkInitiator::OpenSegment(const std::string& tr_str) {
 bool SpdkInitiator::ProbeSegment(const std::string& tr_str, uint32_t timeout_ms,
                                  std::string* error_reason) {
     return impl_->ProbeSegment(tr_str, timeout_ms, error_reason);
+}
+
+std::string SpdkInitiator::GetControllerKey(const std::string& endpoint) {
+    return impl_->GetControllerKey(endpoint);
+}
+
+std::vector<uint32_t> SpdkInitiator::GetActiveNamespaces(
+    const std::string& endpoint) {
+    return impl_->GetActiveNamespaces(endpoint);
+}
+
+uint64_t SpdkInitiator::GetNamespaceCapacityBytes(
+    const NofSegmentHandle* handle) {
+    return impl_->GetNamespaceCapacityBytes(handle);
+}
+
+std::vector<std::string>
+SpdkInitiator::ConsumeNamespaceAttributeChangedControllers() {
+    return impl_->ConsumeNamespaceAttributeChangedControllers();
+}
+
+void SpdkInitiator::InvalidateController(const std::string& endpoint) {
+    return impl_->InvalidateController(endpoint);
+}
+
+void SpdkInitiator::InvalidateController(NofSegmentHandle* handle) {
+    return impl_->InvalidateController(handle);
+}
+
+void SpdkInitiator::CloseSegment(const std::string& endpoint) {
+    return impl_->CloseSegment(endpoint);
+}
+
+int32_t SpdkInitiator::PollAdminCompletions(NofSegmentHandle* handle) {
+    return impl_->PollAdminCompletions(handle);
+}
+
+bool SpdkInitiator::AbortSegment(NofSegmentHandle* handle) {
+    return impl_->AbortSegment(handle);
 }
 
 uint32_t SpdkInitiator::GetBlockSize(const NofSegmentHandle* handle) {

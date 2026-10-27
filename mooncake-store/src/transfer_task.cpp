@@ -1,5 +1,7 @@
 #include "transfer_task.h"
 
+#include <set>
+
 #include <glog/logging.h>
 
 #include <algorithm>
@@ -65,6 +67,11 @@ static int GetNofInflightBytesLimit() {
     static const int value = GetPositiveEnvOrDefault(
         "MC_NOF_INFLIGHT_BYTES_LIMIT", mooncake::kDefaultNofInflightBytesLimit);
     return value;
+}
+
+static bool IsNofConnectionError(int64_t ret) {
+    return ret == -ENXIO || ret == -EIO || ret == -ECONNRESET ||
+           ret == -ENODEV || ret == -EPIPE || ret == -ETIMEDOUT;
 }
 
 static int CountNofQueuedTasks(const mooncake::NofTask* head) {
@@ -471,6 +478,27 @@ void NofWorkerPool::workerThread(int work_idx) {
     auto& queue_cv = queue_cv_[work_idx];
     auto& queue_mutex = queue_mutex_[work_idx];
     auto last_debug_snapshot = std::chrono::steady_clock::now();
+    std::set<NofSegmentHandle*> failed_segments;
+    auto fail_segment = [&](NofSegmentHandle* handle, NofQos& qos) {
+        initiator_->InvalidateController(handle);
+        // Abort on the owning worker so callbacks and QoS counters are still
+        // alive. Never report completion while DMA may still use a buffer.
+        if (!initiator_->AbortSegment(handle)) return false;
+        for (size_t i = 0; i < static_cast<size_t>(NofIOOp::kNum); ++i) {
+            while (auto* task = qos.head[i]) {
+                qos.PopTask(static_cast<NofIOOp>(i));
+                task->on_chain = false;
+                task->failed = true;
+                task->remaining_bytes = 0;
+                task->error_detail = "controller_error";
+                NofTaskCompletion(task);
+            }
+        }
+        failed_segments.insert(handle);
+        std::lock_guard<std::mutex> lock(seg_mutex_);
+        seg_to_worker_.erase(handle);
+        return true;
+    };
 
     // Best-effort preallocation: the submit loop retries on demand. The
     // worker must not exit here — a dead worker hangs teardown at join().
@@ -509,6 +537,13 @@ void NofWorkerPool::workerThread(int work_idx) {
                     continue;
                 }
 
+                if (failed_segments.contains(task->seg_handle)) {
+                    task->state->set_completed(ErrorCode::TRANSFER_FAIL,
+                                               "controller_error");
+                    delete task;
+                    task_queue.pop();
+                    continue;
+                }
                 NofQos* nof_qos = nullptr;
                 auto it = seg_to_qos.find(task->seg_handle);
                 if (it == seg_to_qos.end()) {
@@ -551,6 +586,11 @@ void NofWorkerPool::workerThread(int work_idx) {
         }
 
         for (auto& [seg_handle, nof_qos] : seg_to_qos) {
+            if (failed_segments.contains(seg_handle)) continue;
+            int admin_ret = initiator_->PollAdminCompletions(seg_handle);
+            if (IsNofConnectionError(admin_ret) &&
+                fail_segment(seg_handle, *nof_qos))
+                continue;
             // block_size comes from the QoS cache; the hot loop no longer
             // queries the initiator.
             const uint32_t block_size = nof_qos->block_size;
@@ -610,6 +650,9 @@ void NofWorkerPool::workerThread(int work_idx) {
                             sub_task->sub_task_pool->push(sub_task);
                             task->failed = true;
                             task->remaining_bytes = 0;
+                            if (IsNofConnectionError(ret) &&
+                                fail_segment(seg_handle, *nof_qos))
+                                break;
                         } else {
                             const int submit_blocks =
                                 static_cast<int>(submit_bytes / block_size);
@@ -622,6 +665,7 @@ void NofWorkerPool::workerThread(int work_idx) {
                                 1, std::memory_order_acq_rel);
                         }
                     }
+                    if (failed_segments.contains(seg_handle)) break;
                     if (task->remaining_bytes == 0) {
                         nof_qos->PopTask(static_cast<NofIOOp>(i));
                         task->on_chain = false;
@@ -633,9 +677,12 @@ void NofWorkerPool::workerThread(int work_idx) {
 
         if (total_outstanding_io->load(std::memory_order_acquire) > 0) {
             for (auto& it : seg_to_qos) {
+                if (failed_segments.contains(it.first)) continue;
                 int64_t ret = initiator_->PollCompletion(it.first, 0);
                 if (ret < 0) {
                     LOG(ERROR) << "poll completion error: ret " << ret;
+                    if (IsNofConnectionError(ret))
+                        fail_segment(it.first, *it.second);
                 }
             }
         }

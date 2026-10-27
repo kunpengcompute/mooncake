@@ -68,6 +68,35 @@ class NoFHeartbeatTest : public ::testing::Test {
     }
 };
 
+TEST_F(NoFHeartbeatTest, ReadOnlyHeartbeatPreservesFullSegmentRange) {
+    std::atomic<int> calls{0};
+    auto service = CreateService(1, 50, 3);
+    MasterServiceTestPeer(*service).SetNoFProbeFnForTesting(
+        [&calls](const std::string&, uint32_t, std::string*) {
+            ++calls;
+            return true;
+        });
+    // A one-block segment must remain usable in full; no probe block is
+    // subtracted, and mounting synthetic metadata requires no SPDK access.
+    const auto segment = MakeNoFSegment("full_range", "nof_read_only", 0, 4096);
+    const auto owner = generate_uuid();
+    ASSERT_TRUE(service->MountNoFSegment(segment, owner));
+    ASSERT_TRUE(WaitForCondition(std::chrono::milliseconds(2500),
+                                 std::chrono::milliseconds(20),
+                                 [&] { return calls.load() > 0; }));
+    const auto mounted =
+        MasterServiceTestPeer(*service).GetNoFSegmentForTesting(segment.id);
+    ASSERT_TRUE(mounted);
+    EXPECT_EQ(mounted->base, 0u);
+    EXPECT_EQ(mounted->size, 4096u);
+    ASSERT_TRUE(service->ReMountNoFSegment({segment}, owner));
+    const auto remounted =
+        MasterServiceTestPeer(*service).GetNoFSegmentForTesting(segment.id);
+    ASSERT_TRUE(remounted);
+    EXPECT_EQ(remounted->base, 0u);
+    EXPECT_EQ(remounted->size, 4096u);
+}
+
 TEST_F(NoFHeartbeatTest, HealthyNoFSegmentDoesNotUnmount) {
     auto service = CreateService(/*heartbeat_interval_sec=*/1,
                                  /*probe_timeout_ms=*/50,
@@ -265,6 +294,53 @@ TEST_F(NoFHeartbeatTest, ClientExpiryDoesNotUnmountNoFSegment) {
             segment.id);
     ASSERT_TRUE(failure_count.has_value());
     EXPECT_EQ(*failure_count, 0u);
+}
+
+TEST_F(NoFHeartbeatTest,
+       NamespaceIoFailureUnmountsWithoutWaitingForGracePeriod) {
+    auto service = CreateService(1, 50, 100);
+    MasterServiceTestPeer(*service).SetNoFProbeFnForTesting(
+        [](const std::string&, uint32_t, std::string* reason) {
+            *reason = "namespace_io_error:read_media_error";
+            return false;
+        });
+    const auto segment = MakeNoFSegment("damaged", "damaged");
+    ASSERT_TRUE(service->MountNoFSegment(segment, generate_uuid()));
+    EXPECT_TRUE(WaitForCondition(
+        std::chrono::milliseconds(2500), std::chrono::milliseconds(20), [&] {
+            return !MasterServiceTestPeer(*service)
+                        .IsNoFSegmentMountedForTesting(segment.id);
+        }));
+}
+
+TEST_F(NoFHeartbeatTest, ControllerFailureUnmountsOnlyRelatedNamespaces) {
+    auto service = CreateService(1, 50, 100);
+    const std::string failed =
+        "trtype:TCP traddr:127.0.0.1 trsvcid:4420 subnqn:nqn.test";
+    const std::string healthy =
+        "trtype:TCP traddr:127.0.0.2 trsvcid:4420 subnqn:nqn.test";
+    MasterServiceTestPeer(*service).SetNoFProbeFnForTesting(
+        [failed](const std::string& endpoint, uint32_t, std::string* reason) {
+            if (endpoint.rfind(failed, 0) != 0) return true;
+            *reason = "controller_error:-6";
+            return false;
+        });
+    const auto first = MakeNoFSegment("first", failed + " ns:1");
+    const auto second = MakeNoFSegment("second", failed + " ns:2");
+    const auto other = MakeNoFSegment("other", healthy + " ns:1");
+    const auto owner = generate_uuid();
+    ASSERT_TRUE(service->MountNoFSegment(first, owner));
+    ASSERT_TRUE(service->MountNoFSegment(second, owner));
+    ASSERT_TRUE(service->MountNoFSegment(other, owner));
+    EXPECT_TRUE(WaitForCondition(
+        std::chrono::milliseconds(2500), std::chrono::milliseconds(20), [&] {
+            return !MasterServiceTestPeer(*service)
+                        .IsNoFSegmentMountedForTesting(first.id) &&
+                   !MasterServiceTestPeer(*service)
+                        .IsNoFSegmentMountedForTesting(second.id);
+        }));
+    EXPECT_TRUE(MasterServiceTestPeer(*service).IsNoFSegmentMountedForTesting(
+        other.id));
 }
 
 }  // namespace mooncake::test

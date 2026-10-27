@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "types.h"  // ErrorCode
 
@@ -13,7 +14,8 @@ namespace mooncake {
 //
 // Identity contract: repeated OpenSegment() with the same transport string
 // returns handles bound to the same underlying queue pair, and the returned
-// pointer is stable for the lifetime of the initiator. The pointer value is
+// pointer is stable for the lifetime of the initiator. Invalidation retires
+// that generation; reopening creates a new handle. The pointer value is
 // used as the worker-affinity / QoS map key.
 class NofSegmentHandle;
 
@@ -66,11 +68,36 @@ class NVMeoFInitiator {
     // or nullptr on failure. Thread-safe; may be called from any thread.
     virtual NofSegmentHandle* OpenSegment(const std::string& transport_str) = 0;
 
-    // Synchronous probe: issues a 1-block read and polls until done or
-    // timeout. Used by the master heartbeat path only.
+    // Synchronous, read-only probe: reads one block and polls until done
+    // or timeout. Does not reserve storage or validate the returned payload.
+    // Used by the master heartbeat path only.
     virtual bool ProbeSegment(const std::string& transport_str,
                               uint32_t timeout_ms,
                               std::string* error_reason) = 0;
+
+    // Optional control-plane operations. Defaults preserve backends without
+    // dynamic namespaces. All returned handles remain valid after invalidation;
+    // reopening an invalidated endpoint returns a new generation.
+    virtual std::string GetControllerKey(const std::string&) { return {}; }
+    virtual std::vector<uint32_t> GetActiveNamespaces(const std::string&) {
+        return {};
+    }
+    virtual uint64_t GetNamespaceCapacityBytes(const NofSegmentHandle*) {
+        return 0;
+    }
+    virtual std::vector<std::string>
+    ConsumeNamespaceAttributeChangedControllers() {
+        return {};
+    }
+    virtual void InvalidateController(const std::string&) {}
+    virtual void InvalidateController(NofSegmentHandle*) {}
+    // CloseSegment, like AbortSegment, runs on the handle's polling thread.
+    virtual void CloseSegment(const std::string&) {}
+    virtual int32_t PollAdminCompletions(NofSegmentHandle*) { return 0; }
+    // Called only by the qpair's polling thread. A true result guarantees all
+    // DMA has stopped and every outstanding callback has run before returning.
+    // A backend that cannot guarantee this must return false.
+    virtual bool AbortSegment(NofSegmentHandle*) { return false; }
 
     // kInvalidBlockSize on invalid handle.
     virtual uint32_t GetBlockSize(const NofSegmentHandle* handle) = 0;
@@ -83,9 +110,9 @@ class NVMeoFInitiator {
     //      (qpair single-thread constraint).
     // @pre adaptor must remain valid until its callback runs.
     // Callback contract: invoked synchronously on the polling thread inside
-    // PollCompletion, never from a background thread. Any scratch DMA
-    // buffers the implementation needs are released before the callback
-    // returns.
+    // PollCompletion or AbortSegment, never from a background thread. Any
+    // scratch DMA buffers the implementation needs are released before the
+    // callback returns.
     virtual int SubmitIO(NofSegmentHandle* handle, void* buffer,
                          uint64_t byte_offset, uint64_t byte_length, NofIOOp op,
                          NofIOAdaptor* adaptor) = 0;

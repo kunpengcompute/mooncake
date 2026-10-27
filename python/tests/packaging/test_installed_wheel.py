@@ -172,9 +172,9 @@ if {project_file == "pyproject.toml"!r}:
 assert {{name: entry_points[name] for name in expected_entry_points}} == expected_entry_points
 
 for module in (
-    "mooncake.mooncake_ssd_register",
-    "mooncake.mooncake_ssd_unregister",
-    "mooncake.spdk_tgt_create",
+    "mooncake.mooncake_ssd_create_and_register",
+    "mooncake.mooncake_ssd_unregister_and_remove",
+    "mooncake.mooncake_ssd_tool_common",
 ):
     import_module(module)
 assert util.find_spec("paramiko") is None
@@ -190,9 +190,9 @@ for name, module in tuple(sys.modules.items()):
 installed_files = {{str(path) for path in metadata.files("mooncake-transfer-engine") or []}}
 assert {{
     "mooncake/_administration.py",
-    "mooncake/mooncake_ssd_register.py",
-    "mooncake/mooncake_ssd_unregister.py",
-    "mooncake/spdk_tgt_create.py",
+    "mooncake/mooncake_ssd_create_and_register.py",
+    "mooncake/mooncake_ssd_unregister_and_remove.py",
+    "mooncake/mooncake_ssd_tool_common.py",
 }} <= installed_files
 assert util.find_spec("numpy") is None
 assert util.find_spec("PIL") is None
@@ -339,9 +339,8 @@ for name, module in tuple(sys.modules.items()):
 
     def check_help():
         for module in (
-            "mooncake.mooncake_ssd_register",
-            "mooncake.mooncake_ssd_unregister",
-            "mooncake.spdk_tgt_create",
+            "mooncake.mooncake_ssd_create_and_register",
+            "mooncake.mooncake_ssd_unregister_and_remove",
         ):
             result = subprocess.run(
                 [str(python), "-I", "-m", module, "--help"],

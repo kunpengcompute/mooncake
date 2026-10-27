@@ -43,15 +43,60 @@ class SpdkControllerConfigTest : public ::testing::Test {
         FLAGS_logtostderr = original_logtostderr_;
     }
 
-    inline static constexpr std::array<const char*, 8> kVariables = {
-        "MC_NVME_NUM_IO_QUEUES",     "MC_NVME_IO_QUEUE_SIZE",
-        "MC_NVME_IO_QUEUE_REQUESTS", "MC_NVME_TRANSPORT_ACK_TIMEOUT",
-        "MC_NVME_ADMIN_QUEUE_SIZE",  "MC_NVME_FABRICS_CONNECT_TIMEOUT_US",
-        "MC_NVME_HEADER_DIGEST",     "MC_NVME_DATA_DIGEST",
+    inline static constexpr std::array<const char*, 11> kVariables = {
+        "MC_SPDK_NOF_ADMIN_POLL_INTERVAL_MS",
+        "MC_SPDK_NOF_NAMESPACE_REFRESH_TIMEOUT_MS",
+        "MC_SPDK_NOF_NAMESPACE_REFRESH_POLL_INTERVAL_MS",
+        "MC_NVME_NUM_IO_QUEUES",
+        "MC_NVME_IO_QUEUE_SIZE",
+        "MC_NVME_IO_QUEUE_REQUESTS",
+        "MC_NVME_TRANSPORT_ACK_TIMEOUT",
+        "MC_NVME_ADMIN_QUEUE_SIZE",
+        "MC_NVME_FABRICS_CONNECT_TIMEOUT_US",
+        "MC_NVME_HEADER_DIGEST",
+        "MC_NVME_DATA_DIGEST",
     };
     std::array<std::optional<std::string>, kVariables.size()> original_;
     bool original_logtostderr_ = false;
 };
+
+TEST_F(SpdkControllerConfigTest, AdminPollingIntervalDefaultsAndAcceptsZero) {
+    EXPECT_EQ(
+        SpdkControllerConfig::FromEnvironment().nof_admin_poll_interval_ms,
+        100u);
+    ASSERT_EQ(setenv("MC_SPDK_NOF_ADMIN_POLL_INTERVAL_MS", "0", 1), 0);
+    EXPECT_EQ(
+        SpdkControllerConfig::FromEnvironment().nof_admin_poll_interval_ms, 0u);
+    ASSERT_EQ(setenv("MC_SPDK_NOF_ADMIN_POLL_INTERVAL_MS", "250", 1), 0);
+    EXPECT_EQ(
+        SpdkControllerConfig::FromEnvironment().nof_admin_poll_interval_ms,
+        250u);
+}
+
+TEST_F(SpdkControllerConfigTest, NamespaceRefreshDefaultsAndOverrides) {
+    const auto defaults = SpdkControllerConfig::FromEnvironment();
+    EXPECT_EQ(defaults.nof_namespace_refresh_timeout_ms, 1000u);
+    EXPECT_EQ(defaults.nof_namespace_refresh_poll_interval_ms, 10u);
+    ASSERT_EQ(setenv("MC_SPDK_NOF_NAMESPACE_REFRESH_TIMEOUT_MS", "2500", 1), 0);
+    ASSERT_EQ(setenv("MC_SPDK_NOF_NAMESPACE_REFRESH_POLL_INTERVAL_MS", "5", 1),
+              0);
+    const auto configured = SpdkControllerConfig::FromEnvironment();
+    EXPECT_EQ(configured.nof_namespace_refresh_timeout_ms, 2500u);
+    EXPECT_EQ(configured.nof_namespace_refresh_poll_interval_ms, 5u);
+    ASSERT_EQ(setenv("MC_SPDK_NOF_NAMESPACE_REFRESH_TIMEOUT_MS", "0", 1), 0);
+    ASSERT_EQ(setenv("MC_SPDK_NOF_NAMESPACE_REFRESH_POLL_INTERVAL_MS", "0", 1),
+              0);
+    const auto zero = SpdkControllerConfig::FromEnvironment();
+    EXPECT_EQ(zero.nof_namespace_refresh_timeout_ms, 0u);
+    EXPECT_EQ(zero.nof_namespace_refresh_poll_interval_ms, 0u);
+    ASSERT_EQ(setenv("MC_SPDK_NOF_NAMESPACE_REFRESH_TIMEOUT_MS", "-1", 1), 0);
+    ASSERT_EQ(
+        setenv("MC_SPDK_NOF_NAMESPACE_REFRESH_POLL_INTERVAL_MS", "invalid", 1),
+        0);
+    const auto invalid = SpdkControllerConfig::FromEnvironment();
+    EXPECT_EQ(invalid.nof_namespace_refresh_timeout_ms, 1000u);
+    EXPECT_EQ(invalid.nof_namespace_refresh_poll_interval_ms, 10u);
+}
 
 TEST_F(SpdkControllerConfigTest, UnsetAndEmptyValuesLeaveOverridesAbsent) {
     ASSERT_EQ(setenv("MC_NVME_NUM_IO_QUEUES", "", 1), 0);

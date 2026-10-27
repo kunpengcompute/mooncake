@@ -104,116 +104,230 @@ If a timeout error occurs during startup, check whether a proxy is configured on
 python3 -m pip install "paramiko>=3.4.0"
 ```
 
-### 3.3 Deploy the SSD Pool
+### 3.3 Create and Register SSDs
 
-#### Deployment Command
+#### Workflow
+
+`mooncake_ssd_create_and_register` performs two steps in order:
+
+1. Connect to each target node over SSH, start or reuse the SPDK `nvmf_tgt`, and create the transport, subsystem, bdevs, namespaces, and listener.
+2. Discover active namespaces on the target and register them with the Mooncake master.
+
+#### Basic Usage
 
 ```bash
-python3 -m mooncake.spdk_tgt_create \
-    --spdk_target_info="ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0,0000:02:00.0" \
-    --spdk_target_info="ip:192.168.65.57 path:/home/spdk" \
-    --core-mask=0xff \
-    --transport-type=RDMA \
-    --max-queue-depth=128 \
-    --max-io-qpairs-per-ctrlr=127 \
-    --max-io-size=4096 \
-    --in-capsule-data-size=131072 \
-    --io-unit-size=131072 \
-    --max-aq-depth=128 \
-    --num-shared-buffers=4096 \
-    --buf-cache-size=32
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0,0000:02:00.0"
 ```
+
+#### Multiple Targets
+
+```bash
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0" \
+  --spdk_target_info "ip:192.168.65.57 path:/home/spdk pci:0000:02:00.0"
+```
+
+#### Create Target Resources Only
+
+This mode does not require a master server address.
+
+```bash
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0" \
+  --skip-register
+```
+
+#### Register Namespaces from an Existing Target
+
+```bash
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk" \
+  --skip-create
+```
+
+#### Add SSDs to a Running Target
+
+To add SSDs to a running SPDK target and register them with the Mooncake master, run the create/register tool again with the PCI addresses of the new drives:
+
+```bash
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk pci:0000:03:00.0"
+```
+
+The command reuses the running `nvmf_tgt`, transport, subsystem, and listener. It creates bdevs and adds namespaces for the new PCI devices, then registers the new namespaces with the master. Existing namespaces and listeners are detected and skipped to avoid duplicate creation.
 
 #### Parameters
 
-| Parameter | Description |
-|-----------|-------------|
-| `ip` | IP address of the target node. |
-| `path` | SPDK installation path on the target node. |
-| `pci` | PCI addresses of SSDs to register with the target. Use commas to separate multiple PCI addresses. If this field is omitted, SPDK-ready or unmounted NVMe devices on the target node are registered. |
-| `--port` | SSH port used to connect to target nodes. The default value is `22`. |
-| `--core-mask` | CPU core mask used to start `nvmf_tgt` with `-m`. The default value is `0xff`. |
+| Parameter | Required | Description |
+| --- | --- | --- |
+| `--master_server_address` | Conditional | Required unless `--skip-register` is set. For example, `192.168.65.81:50051`. |
+| `--spdk_target_info` | Yes | Target description. Repeat for multiple targets. Format: `ip:<target_ip> path:<spdk_path> [pci:<pci1>,<pci2>]`. |
+| `--skip-create` | No | Skip target creation and only register namespaces. |
+| `--skip-register` | No | Create target resources without registering them with the master. |
+| `--dry-run` | No | Print the workflow without executing remote operations. |
+| `--core-mask` | No | CPU core mask used to start `nvmf_tgt`. Default: `0xff`. |
+| `--transport-type` | No | NVMe-oF transport type. Default: `RDMA`. |
+| `--max-queue-depth` | No | Maximum transport queue depth. Default: `128`. |
+| `--max-io-qpairs-per-ctrlr` | No | Maximum number of I/O queue pairs per controller. Default: `127`. |
+| `--max-io-size` | No | Maximum I/O size in bytes. Default: `4096`. |
+| `--in-capsule-data-size` | No | Maximum in-capsule data size in bytes. Default: `131072`. |
+| `--io-unit-size` | No | I/O unit size in bytes. Default: `131072`. |
+| `--max-aq-depth` | No | Admin queue depth. Default: `128`. |
+| `--num-shared-buffers` | No | Number of shared transport buffers. Default: `4096`. |
+| `--buf-cache-size` | No | Buffer cache size per poll group. Default: `32`. |
+| `--username` | No | SSH username. Default: `root`. |
+| `--port` | No | SSH port. Default: `22`. |
+| `--password` | No | SSH password. |
+| `--key-file` | No | SSH private key file. |
+| `-D`, `--define` | No | Override registration configuration fields, for example `-Dtrsvcid=4420`. |
 
-**Tip**: Run `/path/scripts/setup.sh status` on a target node to list available PCI addresses.
+## 4. Unregister and Optionally Remove SSDs
 
-#### Transport Options
+### Workflow
 
-The transport options are passed to the SPDK `nvmf_create_transport` RPC. If an option is not specified, the tool uses the default value listed below.
+By default, `mooncake_ssd_unregister_and_remove` performs the following steps in order:
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--transport-type` | `RDMA` | NVMe-oF transport type. |
-| `--max-queue-depth` | `128` | Maximum number of outstanding I/O operations per queue. |
-| `--max-io-qpairs-per-ctrlr` | `127` | Maximum number of I/O queue pairs per controller. |
-| `--max-io-size` | `4096` | Maximum I/O size, in bytes. |
-| `--in-capsule-data-size` | `131072` | Maximum in-capsule data size, in bytes. |
-| `--io-unit-size` | `131072` | I/O unit size, in bytes. |
-| `--max-aq-depth` | `128` | Maximum number of admin commands per admin queue. |
-| `--num-shared-buffers` | `4096` | Number of pooled data buffers available to the transport. |
-| `--buf-cache-size` | `32` | Number of shared buffers reserved for each poll group. |
+1. Unregister the namespace from the Mooncake master so the corresponding NoF segment no longer participates in allocation.
+2. If `--remove-target-namespace` is specified, call the SPDK `nvmf_subsystem_remove_ns` RPC to remove the namespace from the target subsystem.
+3. If `--detach-bdev` is also specified, call `bdev_nvme_detach_controller` to release the corresponding SPDK NVMe bdev controller.
 
-## 4. Register the NVMe-oF SSD Pool
+Use `--target-only` to clean up target resources independently, without connecting to the master or unregistering namespaces from it. This mode removes namespaces automatically; `--remove-target-namespace` is not required.
 
-### 4.1 Register All SSDs
-
-```bash
-python3 -m mooncake.mooncake_ssd_register \
-    --master_server_address=192.168.65.81:50051 \
-    --spdk_target_info="ip:192.168.65.56 path:/home/spdk" \
-    --spdk_target_info="ip:192.168.65.57 path:/root/spdk"
-```
-
-#### Parameters
-
-| Parameter | Description |
-|-----------|-------------|
-| `--master_server_address` | IP address and port of the master service node. The default port is 50051. |
-| `--spdk_target_info` | Target node information, including `ip`, the node IP address, and `path`, the SPDK installation path. |
-| `--username` | SSH username used to connect to target nodes. The default value is `root`. |
-| `--port` | SSH port used to connect to target nodes. The default value is `22`. |
-| `--password` | SSH password used to connect to target nodes. |
-| `--key-file` | SSH private key file used to connect to target nodes. |
-
-## 5. Unregister the NVMe-oF SSD Pool
-
-### 5.1 Unregister a Specific SSD
+### Unregister a Specific Namespace from the Master Only
 
 ```bash
-python3 -m mooncake.mooncake_ssd_unregister \
-    --master_server_address=192.168.65.81:50051 \
-    --spdk_target_info="ip:192.168.65.56 ns:1 nqn:nqn.2016-06.io.spdk:cnode1"
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1"
 ```
 
-#### Parameters
-
-| Parameter | Description |
-|-----------|-------------|
-| `--master_server_address` | IP address and port of the master service node. The default port is 50051. |
-| `--spdk_target_info` | Disk information to unregister, including `ip`, the node IP address, `ns`, the namespace ID, and `nqn`, the subsystem NQN. |
-| `--username` | SSH username used to connect to target nodes. The default value is `root`. |
-| `--port` | SSH port used to connect to target nodes. The default value is `22`. |
-| `--password` | SSH password used to connect to target nodes. |
-| `--key-file` | SSH private key file used to connect to target nodes. |
-
-### 5.2 Get Target Disk Information
-
-Enter the SPDK directory on the target node and run the following commands.
-
-1. Show subsystem information, including NQN and namespace IDs:
+### Unregister All Namespaces on a Target
 
 ```bash
-./scripts/rpc.py nvmf_get_subsystems
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk"
 ```
 
-2. Show disk details, including block size and PCI address:
+### Unregister and Remove a Specific Namespace
 
 ```bash
-./scripts/rpc.py bdev_get_bdevs
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1" \
+  --remove-target-namespace
 ```
 
-## 6. Performance Tests
+### Unregister and Remove All Namespaces
 
-### 6.1 Use the Built-in Benchmark Tool
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk" \
+  --remove-target-namespace
+```
+
+### Unregister a Namespace, Remove It, and Detach Its Bdev Controller
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1" \
+  --remove-target-namespace \
+  --detach-bdev
+```
+
+### Unregister All Namespaces, Remove Them, and Detach Their Bdev Controllers
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk" \
+  --remove-target-namespace \
+  --detach-bdev
+```
+
+### Remove Failed Drives or Leftover Resources from the Target Independently
+
+Use this mode when the master has already unmounted a failed drive through heartbeat detection, but its namespace and bdev remain on the target and must be cleaned up before replacing the drive. Confirm that client I/O for the affected resources has stopped and that the target can complete resource removal. Remove the namespace and finish detaching the controller before switching drivers or physically replacing the drive, so leftover resources do not interfere with later creation and registration.
+
+**Risk of incorrect operation:** Running `setup.sh reset` before the target has finished removing the namespaces and detaching their controllers unbinds the devices and rebinds them to their original drivers, while the old target may still retain controllers, queues, and in-flight requests. A reset without a restricted device scope can affect multiple drives. Do not perform a global reset after cleaning up only some drives. A segment being unmounted from the master does not mean its target resources have been released.
+
+The following failures may occur:
+
+- `nvmf_get_subsystems` still lists the namespace, but the drive can no longer serve reads or writes. Master probes time out and the corresponding segment is unmounted.
+- The local NVMe controller repeatedly reports Identify timeouts, `controller reinitialization failed`, or `Resetting controller failed`.
+- Namespace removal waits for in-flight requests and the RPC times out. A retry returns `subsystem busy, retry later`. A successful detach command does not necessarily mean that all asynchronous resource cleanup has completed.
+- A subsequent create/register operation may remain at `Setting up SPDK with PCI devices` for a long time. The old target may report `COMMAND ID CONFLICT` or `cpl does not map to outstanding cmd`, or terminate unexpectedly. If the creation tool then finds that the process is absent, it starts a new target and configures only the drives specified in that invocation. Other namespaces from the previous target are not restored automatically.
+
+Recovery from these conditions is not guaranteed by `--target-only`.
+
+Remove a specific namespace and detach its NVMe controller. The `ns` field is the namespace ID on the current target, not a PCI address:
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --target-only \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk ns:1 nqn:nqn.2016-06.io.spdk:cnode1" \
+  --detach-bdev
+```
+
+Remove namespaces from all NVMe subsystems on the target and detach their NVMe controllers:
+
+```bash
+python3 -m mooncake.mooncake_ssd_unregister_and_remove \
+  --target-only \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk" \
+  --detach-bdev
+```
+
+### Parameters
+
+| Parameter | Required | Description |
+| --- | --- | --- |
+| `--master_server_address` | Conditional | Required for the default workflow; unused in `--target-only` mode. |
+| `--target-only` | No | Skip the master and remove target namespaces independently. Combine with `--detach-bdev` to clean up the underlying controllers. |
+| `--spdk_target_info` | Yes | Target/namespace description. Repeat for multiple targets. Format: `ip:<target_ip> path:<spdk_path> [ns:<nsid>] [nqn:<subsystem_nqn>]`. |
+| `--remove-target-namespace` | No | Remove matching namespaces from the SPDK target subsystem after successful unregistration from the master. |
+| `--detach-bdev` | No | Detach the corresponding SPDK NVMe bdev controller after namespace removal. Requires `--remove-target-namespace` or `--target-only`. |
+| `--dry-run` | No | Print the workflow without executing remote operations. |
+| `--username` | No | SSH username. Default: `root`. |
+| `--port` | No | SSH port. Default: `22`. |
+| `--password` | No | SSH password. |
+| `--key-file` | No | SSH private key file. |
+| `-D`, `--define` | No | Override unregistration configuration fields, for example `-Dtrsvcid=4420`. |
+
+### 4.8 Inspect Drive Information on the Target
+
+On an SSD pool node, change to the SPDK directory and run the following commands:
+
+1. List subsystems, including their NQNs and namespace IDs:
+
+   ```bash
+   ./scripts/rpc.py nvmf_get_subsystems
+   ```
+
+2. Show drive details, including block sizes and PCI addresses:
+
+   ```bash
+   ./scripts/rpc.py bdev_get_bdevs
+   ```
+
+### 4.9 Usage Recommendations
+
+- Use `mooncake_ssd_create_and_register` for routine expansion to create target resources and register them with the master in one command.
+- Use `--skip-create` when the target already exists and only needs to be registered with the master again.
+- For scale-down, the default workflow only unregisters namespaces from the master. Add `--remove-target-namespace` when the corresponding target resources should also be removed.
+- `--detach-bdev` releases the underlying SPDK bdev controller and has a broader impact. Use it only when intentionally taking the drive offline.
+- Use `--dry-run` to review the matching scope before performing high-risk operations.
+
+## 5. Performance Tests
+
+### 5.1 Use the Built-in Benchmark Tool
 
 ```bash
 ./build/mooncake-store/benchmarks/nof_worker_pool_bench \
@@ -236,7 +350,7 @@ Enter the SPDK directory on the target node and run the following commands.
 | `--warmup_sec` | Warmup duration in seconds. |
 | `--duration_sec` | Test duration in seconds. |
 
-### 6.2 Use NoF with vLLM + LMCache
+### 5.2 Use NoF with vLLM + LMCache
 
 For the general VLLM + LMCache + Mooncake deployment flow, see
 [vLLM V1 Disaggregated Serving with Mooncake Store and LMCache](../integrations/lmcache/vllmv1-lmcache-integration.md).

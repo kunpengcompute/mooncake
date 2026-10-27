@@ -20,6 +20,15 @@ SpdkControllerConfig SpdkControllerConfig::FromEnvironment() {
         Environ::Read(Variables::MC_NVME_FABRICS_CONNECT_TIMEOUT_US);
     config.header_digest = Environ::Read(Variables::MC_NVME_HEADER_DIGEST);
     config.data_digest = Environ::Read(Variables::MC_NVME_DATA_DIGEST);
+    config.nof_admin_poll_interval_ms =
+        Environ::Read(Variables::MC_SPDK_NOF_ADMIN_POLL_INTERVAL_MS)
+            .value_or(100);
+    config.nof_namespace_refresh_timeout_ms =
+        Environ::Read(Variables::MC_SPDK_NOF_NAMESPACE_REFRESH_TIMEOUT_MS)
+            .value_or(1000);
+    config.nof_namespace_refresh_poll_interval_ms =
+        Environ::Read(Variables::MC_SPDK_NOF_NAMESPACE_REFRESH_POLL_INTERVAL_MS)
+            .value_or(10);
     return config;
 }
 

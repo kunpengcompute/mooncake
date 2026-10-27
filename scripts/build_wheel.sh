@@ -208,9 +208,9 @@ MIGRATED_PYTHON_MODULES=(
     mooncake_ep_buffer.py
     mooncake_elastic_buffer.py
     _administration.py
-    mooncake_ssd_register.py
-    mooncake_ssd_unregister.py
-    spdk_tgt_create.py
+    mooncake_ssd_tool_common.py
+    mooncake_ssd_create_and_register.py
+    mooncake_ssd_unregister_and_remove.py
 )
 RESHARD_SOURCE_DIR="mooncake-reshard/python/mooncake/reshard"
 RESHARD_STAGING_DIR="$(pwd)/mooncake-wheel/mooncake/reshard"

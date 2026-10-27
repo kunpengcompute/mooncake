@@ -1658,6 +1658,17 @@ class MasterService {
     bool TryUnmountNoFSegmentByHeartbeat(
         const MountedNoFSegmentSnapshot& snapshot,
         const std::string& error_reason);
+    void HandleNoFNamespaceAttributeChanges(
+        const std::vector<MountedNoFSegmentSnapshot>& mounted_segments);
+    void TryMountAddedNoFNamespaces(
+        const std::string& ctrlr_key,
+        const std::vector<MountedNoFSegmentSnapshot>& ctrlr_segments);
+    void TryUnmountRemovedNoFNamespaces(
+        const std::string& ctrlr_key,
+        const std::vector<MountedNoFSegmentSnapshot>& ctrlr_segments);
+    bool TryUnmountNoFSegmentByNamespaceChange(
+        const MountedNoFSegmentSnapshot& snapshot,
+        const std::string& error_reason);
     bool ProbeNoFSegment(const std::string& te_endpoint,
                          std::string* error_reason);
 

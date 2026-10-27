@@ -266,9 +266,9 @@ if(NOT SKBUILD)
       install(
         FILES
           "${CMAKE_CURRENT_SOURCE_DIR}/../python/mooncake/_administration.py"
-          "${CMAKE_CURRENT_SOURCE_DIR}/../python/mooncake/mooncake_ssd_register.py"
-          "${CMAKE_CURRENT_SOURCE_DIR}/../python/mooncake/mooncake_ssd_unregister.py"
-          "${CMAKE_CURRENT_SOURCE_DIR}/../python/mooncake/spdk_tgt_create.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/../python/mooncake/mooncake_ssd_tool_common.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/../python/mooncake/mooncake_ssd_create_and_register.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/../python/mooncake/mooncake_ssd_unregister_and_remove.py"
         DESTINATION ${MOONCAKE_PYTHON_INSTALL_DIR})
     endif()
   endif()

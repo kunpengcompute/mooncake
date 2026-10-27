@@ -94,6 +94,15 @@ class MasterServiceTestPeer {
 
     void SetNoFProbeFnForTesting(MasterService::NoFProbeFn fn);
 
+    std::optional<NoFSegment> GetNoFSegmentForTesting(const UUID& segment_id) {
+        std::vector<MountedNoFSegmentSnapshot> snapshots;
+        service_.nof_segment_manager_.GetMountedSegmentsSnapshot(snapshots);
+        for (const auto& snapshot : snapshots) {
+            if (snapshot.segment_id == segment_id) return snapshot.segment;
+        }
+        return std::nullopt;
+    }
+
     size_t GetMountedNoFSegmentCountForTesting();
 
     bool IsNoFSegmentMountedForTesting(const UUID& segment_id);

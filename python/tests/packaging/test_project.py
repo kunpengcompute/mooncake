@@ -393,9 +393,9 @@ def test_ssd_administration_modules_have_one_authoritative_source() -> None:
     legacy_builder = (REPOSITORY_ROOT / "scripts" / "build_wheel.sh").read_text()
     modules = (
         "_administration.py",
-        "mooncake_ssd_register.py",
-        "mooncake_ssd_unregister.py",
-        "spdk_tgt_create.py",
+        "mooncake_ssd_create_and_register.py",
+        "mooncake_ssd_unregister_and_remove.py",
+        "mooncake_ssd_tool_common.py",
     )
 
     for module in modules:
@@ -406,8 +406,8 @@ def test_ssd_administration_modules_have_one_authoritative_source() -> None:
         assert module in legacy_builder
 
     assert (
-        REPOSITORY_ROOT / "python" / "tests" / "ssd" / "test_spdk_tgt_create.py"
+        REPOSITORY_ROOT / "python" / "tests" / "ssd" / "test_ssd_create_and_register.py"
     ).is_file()
     assert not (
-        REPOSITORY_ROOT / "mooncake-wheel" / "tests" / "test_spdk_tgt_create.py"
+        REPOSITORY_ROOT / "mooncake-wheel" / "tests" / "test_ssd_create_and_register.py"
     ).exists()

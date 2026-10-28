@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <thread>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -45,15 +49,15 @@ class MockInitiator : public NVMeoFInitiator {
 
     int SubmitIO(NofSegmentHandle*, void*, uint64_t, uint64_t, NofIOOp,
                  NofIOAdaptor* adaptor) override {
-        if (fail_submit_) {
-            return -1;
-        }
+        if (fail_submit_) return -1;
+        if (submit_connection_error_ && !pending_.empty()) return -ENXIO;
         pending_.push_back(adaptor);
         return 0;
     }
 
     int64_t PollCompletion(NofSegmentHandle*,
                            uint32_t max_completions) override {
+        if (poll_connection_error_) return -ENXIO;
         int64_t n = 0;
         while (!pending_.empty() &&
                (max_completions == 0 || n < max_completions)) {
@@ -72,12 +76,29 @@ class MockInitiator : public NVMeoFInitiator {
         return n;
     }
 
+    bool AbortSegment(NofSegmentHandle*) override {
+        // Model synchronous cancellation without calling PollCompletion, which
+        // deliberately keeps reporting a dead connection in these tests.
+        while (!pending_.empty()) {
+            auto* adaptor = pending_.front();
+            pending_.pop_front();
+            NofIOCompletion completion;
+            completion.error_string = "controller_error:aborted";
+            adaptor->cb(adaptor->ctx, completion);
+        }
+        aborts_.fetch_add(1, std::memory_order_release);
+        return true;
+    }
+
     ErrorCode RegisterMemory(void*, size_t) override { return ErrorCode::OK; }
     ErrorCode UnregisterMemory(void*) override { return ErrorCode::OK; }
     NofCapabilities GetCapabilities() const override { return {}; }
 
     uint32_t block_size_ = 4096;
     bool fail_submit_ = false;
+    bool submit_connection_error_ = false;
+    bool poll_connection_error_ = false;
+    std::atomic<int> aborts_{0};
     bool fail_io_ = false;
     bool probe_ok_ = true;
     std::deque<NofIOAdaptor*> pending_;
@@ -126,6 +147,56 @@ TEST(NofWorkerPoolTest, SubmitFailureFailsTask) {
     state->wait_for_completion();
     EXPECT_TRUE(state->is_completed());
     EXPECT_EQ(state->get_result(), ErrorCode::TRANSFER_FAIL);
+}
+
+// A dead target must fail both fully-submitted and still-queued operations,
+// drain their callbacks, and let the worker destructor join.
+TEST(NofWorkerPoolTest, ConnectionFailureDrainsCallbacksAndRejectsStaleHandle) {
+    auto mock = std::make_shared<MockInitiator>();
+    mock->poll_connection_error_ = true;
+    NofWorkerPool pool(mock, 0);
+    auto* seg = mock->OpenSegment("failed");
+    std::vector<uint8_t> buffer(8192);
+    auto first = std::make_shared<NofOperationState>();
+    pool.submitTask(
+        NofTask(seg, buffer.data(), 0, buffer.size(), NofIOOp::kWrite, first));
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((!first->is_completed() ||
+            mock->aborts_.load(std::memory_order_acquire) == 0) &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(first->is_completed());
+    EXPECT_EQ(first->get_result(), ErrorCode::TRANSFER_FAIL);
+    EXPECT_GT(mock->aborts_.load(std::memory_order_acquire), 0);
+    auto second = std::make_shared<NofOperationState>();
+    pool.submitTask(
+        NofTask(seg, buffer.data(), 0, buffer.size(), NofIOOp::kRead, second));
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!second->is_completed() &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(second->is_completed());
+    EXPECT_EQ(second->get_result(), ErrorCode::TRANSFER_FAIL);
+}
+
+TEST(NofWorkerPoolTest, ConnectionFailureDuringPartialSubmissionDrainsTask) {
+    auto mock = std::make_shared<MockInitiator>();
+    mock->submit_connection_error_ = true;
+    NofWorkerPool pool(mock, 0);
+    auto* seg = mock->OpenSegment("partial");
+    // Larger than a submit chunk: first submission succeeds, second fails.
+    std::vector<uint8_t> buffer(4 * kDefaultNofSubmitChunkBytes);
+    auto state = std::make_shared<NofOperationState>();
+    pool.submitTask(
+        NofTask(seg, buffer.data(), 0, buffer.size(), NofIOOp::kWrite, state));
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while ((!state->is_completed() ||
+            mock->aborts_.load(std::memory_order_acquire) == 0) &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_TRUE(state->is_completed());
+    EXPECT_EQ(state->get_result(), ErrorCode::TRANSFER_FAIL);
+    EXPECT_GT(mock->aborts_.load(std::memory_order_acquire), 0);
 }
 
 TEST(NofRuntimeTest, NonNofBuildReturnsNullInitiator) {

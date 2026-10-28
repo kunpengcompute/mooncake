@@ -189,7 +189,7 @@ class NofOperationState : public OperationState {
     void set_completed(ErrorCode error_code, std::string error_detail = "") {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            assert(!result_.has_value());
+            if (result_.has_value()) return;
             result_.emplace(error_code);
             error_detail_ = std::move(error_detail);
         }

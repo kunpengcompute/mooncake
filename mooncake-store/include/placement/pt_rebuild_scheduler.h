@@ -88,6 +88,12 @@ class PtRebuildScheduler final {
         PtBuildStats stats;
         auto view = PtViewBuilder::Build(segments, effective_config, &stats);
         if (!view) {
+            // The previous table may still reference namespaces removed from
+            // this topology. Publish no active view until placement is feasible
+            // again; existing readers can finish with their immutable snapshot.
+            const bool cleared_active_view =
+                static_cast<bool>(view_manager.GetActiveView());
+            view_manager.Publish(nullptr);
             LOG(WARNING) << "PtViewBuilder: no feasible view, total="
                          << stats.total_segments << ", topology_incomplete="
                          << stats.topology_incomplete
@@ -97,7 +103,8 @@ class PtRebuildScheduler final {
                          << balance.utilization_spread << ", weight_mode="
                          << PtSegmentWeightModeName(placement.weight_mode)
                          << ", full_target_fallback="
-                         << stats.used_full_target_fallback;
+                         << stats.used_full_target_fallback
+                         << ", cleared_active_view=" << cleared_active_view;
             return;
         }
         view_manager.Publish(std::make_shared<const PtView>(std::move(*view)));

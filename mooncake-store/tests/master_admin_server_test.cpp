@@ -1788,7 +1788,7 @@ TEST_F(MasterAdminServerTest, PtRebuildRejectsFastIntervalAboveNormal) {
                  std::invalid_argument);
 }
 
-TEST_F(MasterAdminServerTest, PtViewReturnsPublishedView) {
+TEST_F(MasterAdminServerTest, PtViewTracksNamespaceUnmountAndRemount) {
     WrappedMasterServiceConfig svc_config;
     svc_config.default_kv_lease_ttl = 5000;
     svc_config.enable_metric_reporting = false;
@@ -1817,21 +1817,25 @@ TEST_F(MasterAdminServerTest, PtViewReturnsPublishedView) {
     admin.SetServiceDelegate(service);
     admin.SetServiceAvailable(true);
 
-    // Rebuilds are asynchronous; poll for the first view.
+    // Rebuilds are asynchronous; poll for each expected publication state.
     HttpPtViewTestResponse parsed;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    bool has_view = false;
-    do {
-        auto resp = HttpGet(port, "/api/v1/pt_view");
-        ASSERT_EQ(resp.http_status, 200);
-        struct_json::from_json(parsed, resp.body);
-        if (parsed.has_active_view) {
-            has_view = true;
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    } while (std::chrono::steady_clock::now() < deadline);
-    ASSERT_TRUE(has_view);
+    auto wait_for_view = [&](bool expected) {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do {
+            auto resp = HttpGet(port, "/api/v1/pt_view");
+            EXPECT_EQ(resp.http_status, 200);
+            parsed = {};
+            struct_json::from_json(parsed, resp.body);
+            if (resp.http_status == 200 && parsed.success &&
+                parsed.has_active_view == expected) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+    };
+    ASSERT_TRUE(wait_for_view(true));
 
     EXPECT_TRUE(parsed.success);
     EXPECT_GT(parsed.epoch, 0u);
@@ -1846,6 +1850,28 @@ TEST_F(MasterAdminServerTest, PtViewReturnsPublishedView) {
     EXPECT_FALSE(first_replica.host_id.empty());
     EXPECT_FALSE(first_replica.rack_id.empty());
     EXPECT_FALSE(first_replica.failure_domain_id.empty());
+
+    const auto original_epoch = parsed.epoch;
+    // One remaining host cannot satisfy the two-replica placement policy.
+    ASSERT_TRUE(service->UnmountNoFSegment(seg_a.id, client_id).has_value());
+    ASSERT_TRUE(wait_for_view(false));
+    EXPECT_EQ(parsed.epoch, 0u);
+    EXPECT_EQ(parsed.pt_count, 0u);
+    EXPECT_EQ(parsed.configured_replica_num, 0u);
+    EXPECT_TRUE(parsed.entries.empty());
+
+    // Removing every namespace must not leave the last successful view active.
+    ASSERT_TRUE(service->UnmountNoFSegment(seg_b.id, client_id).has_value());
+    ASSERT_TRUE(wait_for_view(false));
+    EXPECT_TRUE(parsed.entries.empty());
+
+    ASSERT_TRUE(service->MountNoFSegment(seg_a, client_id).has_value());
+    ASSERT_TRUE(service->MountNoFSegment(seg_b, client_id).has_value());
+    ASSERT_TRUE(wait_for_view(true));
+    EXPECT_GT(parsed.epoch, original_epoch);
+    EXPECT_EQ(parsed.pt_count, 128u);
+    EXPECT_EQ(parsed.configured_replica_num, 2u);
+    ASSERT_FALSE(parsed.entries.empty());
 
     admin.Stop();
 }

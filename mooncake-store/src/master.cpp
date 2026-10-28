@@ -16,6 +16,7 @@
 #include <ylt/easylog/record.hpp>
 
 #include "allocator_status.h"
+#include "config/master_rpc_thread_config.h"
 #include "config/metrics_bootstrap_config_loader.h"
 #include "config/rpc_protocol_config.h"
 #include "default_config.h"
@@ -798,27 +799,19 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
     if (FLAGS_port != 50051) {  // 50051 is the default value
         LOG(WARNING) << "port is deprecated, use rpc_port instead";
     }
-    int server_thread_num =
-        std::min(FLAGS_max_threads,
-                 static_cast<int>(std::thread::hardware_concurrency()));
-
     // Handle backward compatibility for RPC configuration
     // Determine RPC server thread number with compatibility warnings
     // TODO: remove this in the future
-    size_t rpc_thread_num;
     if (FLAGS_rpc_thread_num > 0) {
-        rpc_thread_num = static_cast<size_t>(FLAGS_rpc_thread_num);
         if (FLAGS_max_threads != 16) {  // 16 is the default value
             LOG(WARNING) << "Both rpc_thread_num and max_threads are set. "
                          << "Using rpc_thread_num=" << FLAGS_rpc_thread_num
                          << ". Please migrate to use rpc_thread_num only.";
         }
-        master_config.rpc_thread_num = rpc_thread_num;
-    } else {
-        if (!conf_set) {
-            master_config.rpc_thread_num = server_thread_num;
-        }
     }
+    master_config.rpc_thread_num = mooncake::ResolveMasterRpcThreadCount(
+        conf_set ? master_config.rpc_thread_num : 0, FLAGS_rpc_thread_num,
+        FLAGS_max_threads, std::thread::hardware_concurrency());
 
     // Determine RPC server port with compatibility warnings
     int rpc_port;

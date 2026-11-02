@@ -31,7 +31,6 @@ TEST(AscendStorageConfig, PhysicalMappingAndInactivePlane) {
               0);
     EXPECT_EQ(device.physical_device_id, 7);
     EXPECT_EQ(device.rdma_device, "hns_data_7");
-    EXPECT_TRUE(device.eid.empty());
     EXPECT_NE(AscendStorageConfig::ParseDevice(
                   root, 0, AscendTransferMode::DataStaging, device),
               0);
@@ -42,13 +41,28 @@ TEST(AscendStorageConfig, DirectCompatibility) {
     root["parameter_plane"] = root["data_plane"];
     root.removeMember("data_plane");
     root["parameter_plane"]["memory_registration"] = "ub";
-    root["parameter_plane"]["devices"]["7"]["eid"] =
-        "0000:0000:0000:0000:0000:0000:0000:0007";
     AscendTransferMode mode;
     AscendStorageDevice device;
     ASSERT_EQ(AscendStorageConfig::ParseMode(root, mode), 0);
     EXPECT_EQ(mode, AscendTransferMode::ParameterDirect);
     EXPECT_EQ(AscendStorageConfig::ParseDevice(root, 7, mode, device), 0);
+}
+TEST(AscendStorageConfig, ExplicitDirectConfiguration) {
+    auto root = Config();
+    root["ascend_transfer"]["mode"] = "parameter_direct";
+    root["parameter_plane"] = root["data_plane"];
+    root.removeMember("data_plane");
+    root["parameter_plane"]["memory_registration"] = "ub";
+    AscendTransferMode mode;
+    AscendStorageDevice device;
+    ASSERT_EQ(AscendStorageConfig::ParseMode(root, mode), 0);
+    ASSERT_EQ(mode, AscendTransferMode::ParameterDirect);
+    ASSERT_EQ(AscendStorageConfig::ParseDevice(root, 7, mode, device), 0);
+    EXPECT_EQ(device.rdma_device, "hns_data_7");
+    EXPECT_EQ(device.rdma_ip, "192.0.2.17");
+
+    root["parameter_plane"]["devices"]["7"].removeMember("rdma_ip");
+    EXPECT_NE(AscendStorageConfig::ParseDevice(root, 7, mode, device), 0);
 }
 TEST(AscendStorageConfig, RejectAmbiguousOrInvalidModes) {
     auto root = Config();

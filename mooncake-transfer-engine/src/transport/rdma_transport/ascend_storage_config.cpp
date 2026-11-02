@@ -19,16 +19,6 @@
 #endif
 namespace mooncake {
 namespace {
-bool IsValidEid(const std::string &eid) {
-    size_t hex_digits = 0;
-    for (unsigned char ch : eid) {
-        if (ch == ':') continue;
-        if (!std::isxdigit(ch)) return false;
-        ++hex_digits;
-    }
-    return hex_digits == 32;
-}
-
 std::string ReadSysfsValue(const std::filesystem::path &path) {
     std::ifstream input(path);
     std::string value;
@@ -215,11 +205,6 @@ int AscendStorageConfig::ParseDevice(const Json::Value &root, int physical_id,
     if (inet_pton(AF_INET, selected.rdma_ip.c_str(), ip.data()) != 1 &&
         inet_pton(AF_INET6, selected.rdma_ip.c_str(), ip.data()) != 1)
         return -EINVAL;
-    if (mode == AscendTransferMode::ParameterDirect) {
-        if (!entry["eid"].isString() || !IsValidEid(entry["eid"].asString()))
-            return -EINVAL;
-        selected.eid = entry["eid"].asString();
-    }
     if (entry.isMember("rdma_port")) {
         if (!entry["rdma_port"].isUInt() || entry["rdma_port"].asUInt() == 0 ||
             entry["rdma_port"].asUInt() > 255)

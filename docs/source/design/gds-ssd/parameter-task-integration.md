@@ -64,7 +64,6 @@ P/D 传输仍使用自己的 Ascend 引擎。Store 使用独立 RDMA 引擎，�
     "strict_route": true,
     "devices": {
       "0": {
-        "eid": "0000:0000:0000:0000:0000:0000:0000:0001",
         "rdma_device": "hrn5_0",
         "rdma_ip": "192.0.2.10"
       }
@@ -74,7 +73,7 @@ P/D 传输仍使用自己的 Ascend 引擎。Store 使用独立 RDMA 引擎，�
 ```
 
 原来只有 `parameter_plane`、没有 `ascend_transfer` 的配置继续按直通模式解析。
-`eid` 是部署时提供的 UB 标识，代码校验其格式；实际 NPU、UB 与 RNIC 的物理连接仍需由机器配置保证。
+UB 内存注册使用当前 NPU 的逻辑设备号、内存地址和长度；实际 NPU、UB 与 RNIC 的物理连接仍需由机器配置保证。
 
 ### 数据面中转
 

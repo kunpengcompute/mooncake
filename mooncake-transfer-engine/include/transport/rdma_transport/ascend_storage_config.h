@@ -11,7 +11,6 @@ enum class AscendTransferMode { Legacy, ParameterDirect, DataStaging };
 struct AscendStorageDevice {
     int logical_device_id{-1};
     int physical_device_id{-1};
-    std::string eid;
     std::string rdma_device;
     std::string rdma_ip;
     uint8_t rdma_port{0};

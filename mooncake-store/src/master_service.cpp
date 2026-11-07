@@ -11248,6 +11248,11 @@ void MasterService::EvictSoftPinExpired(
         return;
     }
 
+    size_t evicted_count = 0;
+    size_t deferred_count = 0;
+    size_t failed_count = 0;
+    int64_t freed_bytes = 0;
+
     std::shared_lock<std::shared_mutex> shared_lock(master_state_mutex_);
 
     const auto is_evictable_nof_replica = [](const Replica& replica) {
@@ -11271,6 +11276,7 @@ void MasterService::EvictSoftPinExpired(
         // re-validated here.
         if (metadata.IsHardPinned() || !metadata.IsLeaseExpired()) {
             soft_pin_deferred_evals_[tenant_id.MakeScopedKey(key)] = candidate;
+            ++deferred_count;
             continue;
         }
         // A concurrent access re-activated the soft pin: it is indexed again
@@ -11297,6 +11303,7 @@ void MasterService::EvictSoftPinExpired(
                     << ", re-queuing for retry";
                 soft_pin_deferred_evals_[tenant_id.MakeScopedKey(key)] =
                     candidate;
+                ++failed_count;
                 continue;
             }
             std::vector<ReplicaID> removed_ids;
@@ -11305,6 +11312,7 @@ void MasterService::EvictSoftPinExpired(
                                        removed_ids.push_back(replica.id());
                                        replica.mark_removed();
                                    });
+            const size_t removed_count = removed_ids.size();
             tl::expected<OpLogEntry, ErrorCode> persist_result;
             if (remaining.empty()) {
                 persist_result = AppendReservedOpLogWithDurableFinalize(
@@ -11335,6 +11343,15 @@ void MasterService::EvictSoftPinExpired(
                     << ", re-queuing for retry";
                 soft_pin_deferred_evals_[tenant_id.MakeScopedKey(key)] =
                     candidate;
+                ++failed_count;
+            } else {
+                freed_bytes += static_cast<int64_t>(metadata.TotalLength() *
+                                                    removed_count);
+                ++evicted_count;
+                VLOG(1) << "action=nof_soft_pin_reclaim, tenant_id="
+                        << tenant_id.value() << ", key=" << key
+                        << ", removed_replicas=" << removed_count
+                        << ", mode=ha";
             }
             continue;
         }
@@ -11344,10 +11361,26 @@ void MasterService::EvictSoftPinExpired(
         if (erased == 0) {
             continue;
         }
+        freed_bytes += static_cast<int64_t>(metadata.TotalLength() * erased);
+        ++evicted_count;
         PublishKvRemovedAfterEvict(key, erased, "disk", metadata, tenant_id);
         if (!metadata.IsValid()) {
             accessor.Erase();
         }
+        VLOG(1) << "action=nof_soft_pin_reclaim, tenant_id="
+                << tenant_id.value() << ", key=" << key
+                << ", removed_replicas=" << erased << ", mode=sync";
+    }
+
+    if (evicted_count > 0 || failed_count > 0) {
+        LOG(INFO) << "action=soft_pin_ttl_reclaim_round, evicted_count="
+                  << evicted_count << ", freed_bytes=" << freed_bytes
+                  << ", deferred=" << deferred_count
+                  << ", failed=" << failed_count;
+    }
+    if (evicted_count > 0) {
+        MasterMetricManager::instance().inc_soft_pin_reclaimed(
+            static_cast<int64_t>(evicted_count), freed_bytes);
     }
 }
 

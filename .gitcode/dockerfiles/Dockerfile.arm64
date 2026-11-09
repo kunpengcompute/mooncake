@@ -1,0 +1,168 @@
+# Mooncake ARM64 (aarch64) 构建/测试环境镜像
+#
+# 本镜像仅预置编译与测试依赖，不包含 Mooncake 源码。
+# 使用时将源码目录挂载到 /workspace，再执行项目自带的 dependencies.sh 与 CMake 构建。
+#
+# 构建（需在代码仓根目录执行）：
+#   docker build --network=host -f .gitcode/dockerfiles/Dockerfile.arm64 -t mooncake-arm64 .
+#
+# 使用：
+#   docker run --rm -it -v /path/to/Mooncake:/workspace mooncake-arm64
+#   cd /workspace
+#   bash dependencies.sh -y
+#   mkdir -p build && cd build
+#   cmake -G Ninja .. -DUSE_CUDA=OFF -DUSE_HTTP=ON -DUSE_ETCD=ON -DSTORE_USE_ETCD=ON
+#   cmake --build .
+
+FROM swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler-24.03-lts-sp3:latest
+
+# ---- 0. 包管理器与 pip 镜像源 ----
+ENV PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN printf '[global]\nindex-url = https://repo.huaweicloud.com/repository/pypi/simple\ntimeout = 120\n' > /etc/pip.conf
+
+# ---- 1. 系统编译与测试依赖（对应 dependencies.sh 的 openEuler 分支）----
+RUN dnf install -y --setopt=install_weak_deps=False --nogpgcheck \
+        gcc \
+        gcc-c++ \
+        make \
+        cmake \
+        ninja-build \
+        git \
+        wget \
+        curl \
+        unzip \
+        tar \
+        gzip \
+        which \
+        findutils \
+        file \
+        ca-certificates \
+        pkgconf \
+        pkgconf-pkg-config \
+        patchelf \
+        python3 \
+        python3-devel \
+        python3-pip \
+        python3-setuptools \
+        glog-devel \
+        gflags-devel \
+        gtest \
+        gtest-devel \
+        jsoncpp-devel \
+        libunwind-devel \
+        numactl-devel \
+        numactl-libs \
+        boost-devel \
+        openssl-devel \
+        grpc-devel \
+        grpc-plugins \
+        protobuf-devel \
+        protobuf-compiler \
+        yaml-cpp-devel \
+        libcurl-devel \
+        hiredis-devel \
+        liburing-devel \
+        jemalloc-devel \
+        zstd-devel \
+        xxhash-devel \
+        rdma-core-devel \
+        libibverbs \
+        librdmacm \
+        elfutils-libelf-devel \
+        clang \
+        clang-devel \
+        dos2unix \
+        cpio \
+        bzip2 \
+        xz \
+    && dnf clean all \
+    && test "$(uname -m)" = "aarch64" \
+    && echo "arch check OK: $(uname -m)"
+
+RUN dnf install -y nodejs npm cargo rust openssl-devel pkgconf-pkg-config
+
+# ---- 1.5 SPDK RDMA 依赖（执行 SPDK scripts/pkgdep.sh --rdma）----
+# pkgdep.sh 会引用仓库内 scripts/common.sh 与 scripts/pkgdep/*.sh（openeuler.sh 为指向 rhel.sh 的符号链接），
+# 单文件无法独立运行，因此浅克隆 SPDK 仓库后执行，完成即删除源码。
+RUN set -eux; \
+    if ! git clone --depth 1 https://gitee.com/mirrors/spdk.git /tmp/spdk; then \
+        rm -rf /tmp/spdk; \
+        git clone --depth 1 https://github.com/spdk/spdk.git /tmp/spdk; \
+    fi; \
+    bash /tmp/spdk/scripts/pkgdep.sh --rdma; \
+    rm -rf /tmp/spdk
+
+# ---- 2. Python 构建工具（wheel 打包与 auditwheel repair）----
+RUN python3 -m pip install --upgrade pip setuptools wheel build auditwheel \
+    && python3 -c "import sys; assert sys.version_info[:2] >= (3, 10), f'Python {sys.version} < 3.10'; print('Python version OK')" \
+    && pip --version \
+    && auditwheel --version
+
+RUN python3 -m pip install pre-commit==3.7.1 ruff==0.6.9 cmake-format==0.6.13 \
+      clang-format==20.1.8
+
+RUN python3 -m pip install --disable-pip-version-check \
+  pytest==8.3.5 PyYAML==6.0.2 aiohttp==3.11.18 packaging==24.2 pybind11==2.13.6
+
+# 文档构建依赖（清单随 Dockerfile 一起提供，需与本文件同目录）
+COPY .gitcode/dockerfiles/requirements-docs.txt /tmp/requirements-docs.txt
+RUN python3 -m pip install --disable-pip-version-check \
+  -r /tmp/requirements-docs.txt \
+    && rm -f /tmp/requirements-docs.txt
+
+# ---- 3. Go 1.24.6（用于 etcd/Go 绑定；构建期不执行仓内脚本）----
+ENV GO_VERSION=1.24.6 \
+    GOPROXY=https://goproxy.cn,https://goproxy.io,direct \
+    PATH=/usr/local/go/bin:${PATH}
+
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    if [ "$arch" != "aarch64" ]; then echo "Unsupported architecture: ${arch}"; exit 1; fi; \
+    tarball="go${GO_VERSION}.linux-arm64.tar.gz"; \
+    wget -q -O "/tmp/${tarball}" "https://buildtools.obs.cn-north-4.myhuaweicloud.com/${tarball}"; \
+    rm -rf /usr/local/go; \
+    tar -C /usr/local -xzf "/tmp/${tarball}"; \
+    rm -f "/tmp/${tarball}"; \
+    go version
+
+# ---- 4. Rust（WITH_STORE_RUST 默认开启，bindgen 依赖 clang）----
+ENV RUSTUP_DIST_SERVER=https://mirrors.huaweicloud.com/rustup \
+    RUSTUP_UPDATE_ROOT=https://mirrors.huaweicloud.com/rustup/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:${PATH}
+
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        aarch64|arm64) target=aarch64-unknown-linux-gnu ;; \
+        x86_64|amd64) target=x86_64-unknown-linux-gnu ;; \
+        *) echo "Unsupported architecture: ${arch}"; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/rustup-init "${RUSTUP_DIST_SERVER}/rustup/dist/${target}/rustup-init"; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --default-toolchain stable --profile minimal; \
+    rm -f /tmp/rustup-init; \
+    rustc --version; \
+    cargo --version
+
+# cargo 依赖走国内稀疏索引，避免 CI 直连 crates.io 超时
+RUN mkdir -p "${CARGO_HOME}" \
+    && printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n\n[net]\ngit-fetch-with-cli = true\n' > "${CARGO_HOME}/config.toml"
+
+# ---- 5. 工具链自检 ----
+RUN make --version | head -n1 \
+    && cmake --version | head -n1 \
+    && ninja --version \
+    && gcc --version | head -n1 \
+    && python3 --version \
+    && go version \
+    && rustc --version \
+    && cargo --version \
+    && patchelf --version
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

@@ -1,0 +1,206 @@
+name: PR-Pipeline_mooncake
+
+on: # 自动触发工作流运行的触发条件
+  #workflow_dispatch:            # 界面手动运行
+  pull_request_target:
+    types: ["open", "reopen", "update"]
+    branches: [ "*" ]
+  pr_comment:                    # PR 评论触发
+    types: [ created ]
+    keyword: '^(?:\/)?compile*'
+  pull_request_comment:          # 标准 PR 评论触发事件
+    types: [created]
+    branches: [ '*' ]
+    comments: [ '^(?:\/)?compile*' , 'sca-pr-scan']
+
+concurrency: # 并发控制（GitCode 原生语法）
+  enable: true             # 启用并发控制
+  max: 3                   # 最大并发运行数（范围 1-5）
+  exceed-action: QUEUE     # 超出并发上限：排队等待
+  preemption:              # 抢占策略：新事件取消同组旧运行
+    enable: true
+    events: [mr_id]        # 按 MR 隔离
+
+permissions:
+  repository: read
+
+env:
+  pr_id: ${{ atomgit.event.pull_request.number }}
+  branch: ${{ atomgit.event.pull_request.base.ref }}
+  default_branch: ${{ atomgit.event.repository.default_branch }}
+
+stages:
+  stage0: # 流水线状态管理（非项目逻辑）
+    name: 初始化阶段
+    select: selected_by_default
+    jobs:
+      associate_pr_comment:
+        name: associate_pr_comment
+        runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=small ]
+        steps:
+          - name: associate PR comment
+            uses: associate-pr-comment
+      init_pipeline_status:
+        name: init_pipeline_status
+        runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=small ]
+        steps:
+          - name: Add pipeline running label
+            uses: openlibing/pr-label-action@v1.0.0
+            with:
+              add_labels: ci-pipeline-running
+              remove_labels: ci-pipeline-passed,ci-pipeline-failed
+              token: ${{secrets.PR_LABEL_TOKEN}}
+
+  stage1: # 校验阶段
+    name: 校验阶段
+    select: selected_by_default
+    jobs:
+      Detect_file_changes:
+        name: Detect_file_changes
+        runs-on: ["ubuntu-latest", "x64", "slim"]
+        outputs:
+          need_build: ${{ steps.set-skip.outputs.need_build }}
+        steps:
+          - name: checkout
+            uses: checkout
+            with:
+              allow-unsafe-pr-checkout: true
+              ref: refs/merge-requests/${{ env.pr_id }}/merge
+              fetch-depth: 0
+          - name: Only_doc_commit
+            id: filter
+            uses: paths-changes-filter
+            with:
+              event-name: 'pull_request'
+              base: ${{ env.branch }}
+              repo: ${{ atomgit.repository }}
+              number: ${{ env.pr_id }}
+              list-files: json
+              predicate-quantifier: every
+              filters: |
+                changed:
+                  - '**'
+                doc-only:
+                  - '**/*.md'
+                  - '**/*.rst'
+                  - '**/*.log'
+                  - '**/*.png'
+                  - '**/*.jpg'
+                  - '**/*.doc'
+                  - '**/*.eddx'
+                  - '**/*.svg'
+          - name: set build skip flag
+            id: set-skip
+            run: |
+              echo "changed: ${{ steps.filter.outputs.changed_files }}"
+              echo "doc-only: ${{ steps.filter.outputs.doc-only }}"
+              if [ "${{ steps.filter.outputs.doc-only }}" = "true" ]; then
+                echo "need_build=no" >> "$ATOMGIT_OUTPUT"
+              else
+                echo "need_build=yes" >> "$ATOMGIT_OUTPUT"
+              fi
+
+      sca-pr:
+        name: sca-pr
+        runs-on: ["ubuntu-latest", "x64", "slim"]
+        permissions:
+          id-token: write
+        steps:
+          - name: checkout
+            uses: checkout
+          - name: sca-pr scan
+            uses: openlibing/sca-action/sca-pr-action@v1.0.0
+            with:
+              project-name: "boostkit"
+
+      malicious-scan:
+        name: malicious-scan
+        runs-on: ["ubuntu-latest", "x64", "slim"]
+        permissions:
+          id-token: write
+        steps:
+          - name: checkout
+            uses: checkout
+          - name: malicious code scan
+            uses: openlibing/malicious-code-scan-action/malicious-code-pr-scan-action@v1.0.0
+            with:
+              project-name: "boostkit"
+
+      pre-commit:
+        name: pre-commit
+        runs-on: ["ubuntu-latest", "x64", "slim"]
+        steps:
+          - name: Checkout
+            uses: checkout
+            with:
+              # fork PR 预合并引用会被安全拦截，需显式放行
+              allow-unsafe-pr-checkout: true
+              ref: refs/merge-requests/${{ env.pr_id }}/merge
+          - name: Setup Python
+            uses: setup-python
+            with:
+              python-version: "3.14"
+          # 仅当 .pre-commit-config.yaml 声明 Go hook 时取消注释启用
+          # - name: Setup Go
+          #   uses: setup-go
+          #   with:
+          #     go-version: '1.21'
+          # pre-commit 安装 hook 需访问 GitHub，改走 osinfra 代理
+          - name: Configure GitHub proxy
+            run: git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"
+          - name: Run pre-commit
+            uses: openlibing/pre-commit-action@v1.0.0
+      static_check:
+        name: static_check
+        needs: [ sca-pr, malicious-scan, pre-commit ]
+        uses: .gitcode/workflows/static_check_job.yml
+        with:
+          runs_on_flavor: "flavor=small"
+          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03"
+          pr_id: "${{ env.pr_id }}"
+          branch: "${{ env.branch }}"
+          default_branch: "${{ env.default_branch }}"
+      python_check:
+        name: python_check
+        needs: [ sca-pr, malicious-scan, pre-commit ]
+        uses: .gitcode/workflows/python_check_job.yml
+        with:
+          runs_on_flavor: "flavor=small"
+          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03"
+          pr_id: "${{ env.pr_id }}"
+          branch: "${{ env.branch }}"
+          default_branch: "${{ env.default_branch }}"
+      docs_check:
+        name: docs_check
+        needs: [ sca-pr, malicious-scan, pre-commit ]
+        uses: .gitcode/workflows/docs_check_job.yml
+        with:
+          runs_on_flavor: "flavor=small"
+          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03"
+          pr_id: "${{ env.pr_id }}"
+          branch: "${{ env.branch }}"
+          default_branch: "${{ env.default_branch }}"
+      build_ut_check:
+        name: build_ut_check
+        if: ${{ jobs.Detect_file_changes.outputs.need_build == 'yes' }}
+        needs: [ Detect_file_changes, sca-pr, malicious-scan, pre-commit, static_check, python_check, docs_check]
+        uses: .gitcode/workflows/build_ut_check_job.yml
+        with:
+          runs_on_flavor: "flavor=xlarge"
+          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03"
+          pr_id: "${{ env.pr_id }}"
+          branch: "${{ env.branch }}"
+          default_branch: "${{ env.default_branch }}"
+
+post:
+  jobs:
+    update_pipeline_status:
+      name: update_pipeline_status
+      runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=small ]
+      steps:
+        - name: Set result label
+          uses: openlibing/pr-label-action@v1.0.0
+          with:
+            add_labels: ${{ pipeline.upstream_status == 'COMPLETED' && 'ci-pipeline-passed' || 'ci-pipeline-failed' }}
+            remove_labels: ci-pipeline-running,${{ pipeline.upstream_status == 'COMPLETED' && 'ci-pipeline-failed' || 'ci-pipeline-passed' }}
+            token: ${{secrets.PR_LABEL_TOKEN}}

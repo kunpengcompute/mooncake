@@ -1,0 +1,77 @@
+name: Python Check Job
+
+on:
+  workflow_call:
+    inputs:
+      runs_on_flavor:
+        required: true
+        type: string
+      docker_img:
+        required: true
+        type: string
+      pr_id:
+        required: true
+        type: string
+      branch:            # PR 目标分支，作为改动比对基线
+        required: true
+        type: string
+      default_branch:    # 默认分支（脚本回退 checkout 用）
+        required: true
+        type: string
+
+jobs:
+  JOB_Compile:
+    name: Compile
+    select: selected_by_default
+    runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, "${{ inputs.runs_on_flavor }}" ]
+    container:
+      image: ${{ inputs.docker_img }}
+    timeout-minutes: 20
+    steps:
+      - name: fast_checkout
+        identifier: fast_checkout
+        uses: checkout
+        with:
+          # fork PR 预合并引用会被安全拦截，需显式放行（pwn request 防护）
+          allow-unsafe-pr-checkout: true
+          ref: refs/merge-requests/${{ inputs.pr_id }}/merge
+          fetch-depth: 0
+      - name: fetch_base_branch   # 比对基线：合入目标分支
+        run: git fetch --no-tags origin "+refs/heads/${{ inputs.branch }}:refs/remotes/origin/${{ inputs.branch }}"
+      - name: checkout_default_scripts   # 脚本缺失回退：预合入代码缺脚本时改用基分支副本
+        uses: checkout
+        with:
+          ref: ${{ inputs.default_branch }}
+          path: base-scripts
+      - name: init_script
+        run: |-
+          for dir in .gitcode/scripts .gitcode/dockerfiles; do
+            mkdir -p "${dir}"
+            for src in "base-scripts/${dir}"/*; do
+              [ -f "${src}" ] || continue
+              dst="${dir}/$(basename "${src}")"
+              if [ -f "${dst}" ]; then
+                echo "使用预合入代码中的 ${dst}"
+              else
+                cp "${src}" "${dst}"
+                echo "预合入代码缺少 ${dst}，已复制基分支副本"
+              fi
+            done
+          done
+          for required in .gitcode/scripts/gitcode_ci.py .gitcode/scripts/gitcode_bootstrap.sh .gitcode/scripts/check_changed_python_format.py; do
+            if [ ! -f "${required}" ]; then
+              echo "ERROR: ${required} 在预合入代码和基分支中均不存在"
+              exit 1
+            fi
+          done
+      - id: plan
+        name: Select changed files
+        run: python3 .gitcode/scripts/gitcode_ci.py select python --base "origin/${{ inputs.branch }}"
+      - name: Install Python test dependencies
+        if: ${{ steps.plan.outputs.run == 'true' }}
+        run: bash .gitcode/scripts/gitcode_bootstrap.sh python
+      - name: Run Python checks
+        if: ${{ steps.plan.outputs.run == 'true' }}
+        run: |
+          source build/gitcode-ci/venv/bin/activate
+          python .gitcode/scripts/gitcode_ci.py run python

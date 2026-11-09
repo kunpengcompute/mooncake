@@ -21,6 +21,10 @@ concurrency: # 并发控制（GitCode 原生语法）
     enable: true
     events: [mr_id]        # 按 MR 隔离
 
+permissions:
+  repository: read
+  pr: read
+
 env:
   pr_id: ${{ atomgit.event.pull_request.number }}
   branch: ${{ atomgit.event.pull_request.base.ref }}
@@ -126,6 +130,8 @@ stages:
       pre-commit:
         name: pre-commit
         runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=small ]
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03
         steps:
           - name: Checkout
             uses: checkout
@@ -133,15 +139,6 @@ stages:
               # fork PR 预合并引用会被安全拦截，需显式放行
               allow-unsafe-pr-checkout: true
               ref: refs/merge-requests/${{ env.pr_id }}/merge
-          - name: Setup Python
-            uses: setup-python
-            with:
-              python-version: "3.14"
-          # 仅当 .pre-commit-config.yaml 声明 Go hook 时取消注释启用
-          # - name: Setup Go
-          #   uses: setup-go
-          #   with:
-          #     go-version: '1.21'
           # pre-commit 安装 hook 需访问 GitHub，改走 osinfra 代理
           - name: Configure GitHub proxy
             run: git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"

@@ -106,6 +106,8 @@ struct MasterConfig {
     uint64_t default_kv_soft_pin_ttl;
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     bool allow_evict_soft_pinned_objects;
+    bool enable_soft_pin_ttl_reclaim = false;
+    bool enable_nof_soft_pin_access_renewal = false;
     double eviction_ratio;
     double eviction_high_watermark_ratio;
     double tenant_eviction_high_watermark_ratio;
@@ -250,6 +252,8 @@ class MasterServiceSupervisorConfig {
     double tenant_eviction_high_watermark_ratio =
         DEFAULT_TENANT_EVICTION_HIGH_WATERMARK_RATIO;
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
+    bool enable_soft_pin_ttl_reclaim = false;
+    bool enable_nof_soft_pin_access_renewal = false;
     std::string rpc_address = "0.0.0.0";
     std::chrono::steady_clock::duration rpc_conn_timeout = std::chrono::seconds(
         0);  // Client connection timeout. 0 = no timeout (infinite)
@@ -342,6 +346,9 @@ class MasterServiceSupervisorConfig {
         default_kv_lease_ttl = config.default_kv_lease_ttl;
         default_kv_soft_pin_ttl = config.default_kv_soft_pin_ttl;
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
+        enable_soft_pin_ttl_reclaim = config.enable_soft_pin_ttl_reclaim;
+        enable_nof_soft_pin_access_renewal =
+            config.enable_nof_soft_pin_access_renewal;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         eviction_ratio = config.eviction_ratio;
@@ -535,6 +542,8 @@ class WrappedMasterServiceConfig {
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     bool allow_evict_soft_pinned_objects =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
+    bool enable_soft_pin_ttl_reclaim = false;
+    bool enable_nof_soft_pin_access_renewal = false;
     bool enable_metric_reporting = true;
     uint16_t http_port = 9003;
     double eviction_ratio = DEFAULT_EVICTION_RATIO;
@@ -627,6 +636,9 @@ class WrappedMasterServiceConfig {
         // Set optional parameters (these have default values)
         default_kv_soft_pin_ttl = config.default_kv_soft_pin_ttl;
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
+        enable_soft_pin_ttl_reclaim = config.enable_soft_pin_ttl_reclaim;
+        enable_nof_soft_pin_access_renewal =
+            config.enable_nof_soft_pin_access_renewal;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         enable_metric_reporting = config.metrics.enabled;
@@ -751,6 +763,9 @@ class WrappedMasterServiceConfig {
         // Set optional parameters (these have default values)
         default_kv_soft_pin_ttl = config.default_kv_soft_pin_ttl;
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
+        enable_soft_pin_ttl_reclaim = config.enable_soft_pin_ttl_reclaim;
+        enable_nof_soft_pin_access_renewal =
+            config.enable_nof_soft_pin_access_renewal;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         enable_metric_reporting = metrics.enabled;
@@ -849,6 +864,8 @@ class MasterServiceConfigBuilder {
     uint64_t max_kv_soft_pin_ttl_ = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     bool allow_evict_soft_pinned_objects_ =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
+    bool enable_soft_pin_ttl_reclaim_ = false;
+    bool enable_nof_soft_pin_access_renewal_ = false;
     double eviction_ratio_ = DEFAULT_EVICTION_RATIO;
     double eviction_high_watermark_ratio_ =
         DEFAULT_EVICTION_HIGH_WATERMARK_RATIO;
@@ -920,6 +937,17 @@ class MasterServiceConfigBuilder {
 
     MasterServiceConfigBuilder& set_max_kv_soft_pin_ttl(uint64_t ttl) {
         max_kv_soft_pin_ttl_ = ttl;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_enable_soft_pin_ttl_reclaim(bool enable) {
+        enable_soft_pin_ttl_reclaim_ = enable;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_enable_nof_soft_pin_access_renewal(
+        bool enable) {
+        enable_nof_soft_pin_access_renewal_ = enable;
         return *this;
     }
 
@@ -1194,6 +1222,8 @@ class MasterServiceConfig {
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     bool allow_evict_soft_pinned_objects =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
+    bool enable_soft_pin_ttl_reclaim = false;
+    bool enable_nof_soft_pin_access_renewal = false;
     double eviction_ratio = DEFAULT_EVICTION_RATIO;
     double eviction_high_watermark_ratio =
         DEFAULT_EVICTION_HIGH_WATERMARK_RATIO;
@@ -1286,6 +1316,9 @@ class MasterServiceConfig {
         default_kv_lease_ttl = config.default_kv_lease_ttl;
         default_kv_soft_pin_ttl = config.default_kv_soft_pin_ttl;
         max_kv_soft_pin_ttl = config.max_kv_soft_pin_ttl;
+        enable_soft_pin_ttl_reclaim = config.enable_soft_pin_ttl_reclaim;
+        enable_nof_soft_pin_access_renewal =
+            config.enable_nof_soft_pin_access_renewal;
         allow_evict_soft_pinned_objects =
             config.allow_evict_soft_pinned_objects;
         eviction_ratio = config.eviction_ratio;
@@ -1390,6 +1423,9 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.default_kv_lease_ttl = default_kv_lease_ttl_;
     config.default_kv_soft_pin_ttl = default_kv_soft_pin_ttl_;
     config.max_kv_soft_pin_ttl = max_kv_soft_pin_ttl_;
+    config.enable_soft_pin_ttl_reclaim = enable_soft_pin_ttl_reclaim_;
+    config.enable_nof_soft_pin_access_renewal =
+        enable_nof_soft_pin_access_renewal_;
     config.allow_evict_soft_pinned_objects = allow_evict_soft_pinned_objects_;
     config.eviction_ratio = eviction_ratio_;
     config.eviction_high_watermark_ratio = eviction_high_watermark_ratio_;

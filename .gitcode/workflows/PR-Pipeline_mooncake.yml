@@ -21,9 +21,6 @@ concurrency: # 并发控制（GitCode 原生语法）
     enable: true
     events: [mr_id]        # 按 MR 隔离
 
-permissions:
-  repository: read
-
 env:
   pr_id: ${{ atomgit.event.pull_request.number }}
   branch: ${{ atomgit.event.pull_request.base.ref }}
@@ -57,7 +54,7 @@ stages:
     jobs:
       Detect_file_changes:
         name: Detect_file_changes
-        runs-on: ["ubuntu-latest", "x64", "slim"]
+        runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=small ]
         outputs:
           need_build: ${{ steps.set-skip.outputs.need_build }}
         steps:
@@ -128,7 +125,7 @@ stages:
 
       pre-commit:
         name: pre-commit
-        runs-on: ["ubuntu-latest", "x64", "slim"]
+        runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=small ]
         steps:
           - name: Checkout
             uses: checkout

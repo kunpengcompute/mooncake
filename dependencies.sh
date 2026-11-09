@@ -229,7 +229,7 @@ elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS
                      libunwind-devel \
                      numactl-devel \
                      python3-devel \
-                     boost1.78-devel \
+                     boost-devel \
                      openssl-devel \
                      protobuf-devel \
                      yaml-cpp-devel \
@@ -237,7 +237,6 @@ elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS
                      hiredis-devel \
                      liburing-devel \
                      jemalloc-devel \
-                     msgpack-devel \
                      zeromq-devel \
                      libzstd-devel \
                      pkgconf-pkg-config \
@@ -506,6 +505,22 @@ if [ "$INSTALL_SPDK" = true ]; then
     echo "Configuring SPDK with RDMA support..."
     ./configure --with-rdma
     check_success "Failed to configure SPDK"
+
+    # Build ISA-L explicitly even when SPDK's configure disables it. Mooncake
+    # links the archive from isa-l/.libs into its shared libraries.
+    echo "Building ISA-L..."
+    cd "${REPO_ROOT}/extern/spdk/isa-l"
+    check_success "Failed to change to ISA-L directory"
+    ./autogen.sh
+    check_success "Failed to generate ISA-L configure script"
+    CFLAGS="${CFLAGS:+${CFLAGS} }-fPIC" ./configure --prefix=/usr --libdir=/usr/lib64 --disable-shared
+    check_success "Failed to configure ISA-L"
+    make -j$(nproc)
+    check_success "Failed to build ISA-L"
+    test -f .libs/libisal.a
+    check_success "ISA-L static library was not generated"
+    cd "${REPO_ROOT}/extern/spdk"
+    check_success "Failed to return to SPDK directory"
 
     # Build SPDK
     echo "Building SPDK (using $(nproc) cores)..."

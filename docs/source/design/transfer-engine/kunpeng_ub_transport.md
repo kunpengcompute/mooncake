@@ -122,7 +122,7 @@ pip install -e ../mooncake-wheel --no-build-isolation
 from mooncake.engine import TransferEngine
 
 te = TransferEngine()
-result = te.initialize('127.0.0.1', 'P2PHANDSHAKE', 'ub', '')
+result = te.initialize('127.0.0.1', 'P2PHANDSHAKE', 'ub', '')//'P2PHANDSHAKE'为免中心元数据服务的握手模式，第4个空字符串表示自动选择默认设备。
 print(f'Initialize result: {result}')  # Should be 0
 
 # You should see logs like:
@@ -196,21 +196,21 @@ export MC_LOCAL_SERVER_NAME=127.0.0.1:12345  # default
 
 ### UB Transport Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │                   UbTransport                       │
 ├─────────────────────────────────────────────────────┤
-│  UrmaContext (per device)                          │
-│  ├── urma_device   (URMA device handle)            │
-│  ├── urma_context  (URMA context)                 │
-│  ├── urma_jfce     (URMA jetty factory create)     │
-│  ├── urma_jfc      (URMA jetty factory send)       │
-│  └── urma_jfr      (URMA jetty factory receive)    │
+│  UrmaContext (per device)                           │
+│  ├── urma_device   (URMA device handle)             │
+│  ├── urma_context  (URMA context)                   │
+│  ├── urma_jfce     (URMA jetty factory create)      │
+│  ├── urma_jfc      (URMA jetty factory send)        │
+│  └── urma_jfr      (URMA jetty factory receive)     │
 ├─────────────────────────────────────────────────────┤
-│  UrmaEndpoint (per connection)                     │
-│  ├── urma_jetty    (URMA jetty for communication)  │
-│  ├── local_jetty   (local jetty ID)                │
-│  └── remote_jetty  (remote jetty ID)               │
+│  UrmaEndpoint (per connection)                      │
+│  ├── urma_jetty    (URMA jetty for communication)   │
+│  ├── local_jetty   (local jetty ID)                 │
+│  └── remote_jetty  (remote jetty ID)                │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -232,11 +232,12 @@ export MC_LOCAL_SERVER_NAME=127.0.0.1:12345  # default
 
 ### No URMA devices found
 
-```
+```output
 UbTransport: No URMA devices found
 ```
 
 Solution: Verify URMA is properly installed and devices are available:
+
 ```bash
 # Check URMA installation
 ls /usr/lib64/liburma.so
@@ -248,11 +249,12 @@ urma_admin -l
 
 ### URMA initialization failed
 
-```
+```output
 URMA module init failed
 ```
 
 Solution: Ensure the URMA kernel module is loaded and the device is properly configured:
+
 ```bash
 # Load URMA module
 sudo modprobe urma
@@ -266,11 +268,12 @@ urma_admin -l
 
 ### Device port inactive
 
-```
+```output
 Device urma0 port not active
 ```
 
 Solution: Ensure the UB port is properly configured and active:
+
 ```bash
 # Check port status
 urma_admin -p urma0
@@ -278,11 +281,12 @@ urma_admin -p urma0
 
 ### Missing liburma.so
 
-```
+```output
 cannot find -lurma
 ```
 
 Solution: Verify URMA library is installed and in the library path:
+
 ```bash
 export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
 ```

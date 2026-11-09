@@ -442,15 +442,6 @@ struct ObjectMetadata {
         return ttl > remaining ? max_time : now + ttl;
     }
 
-    // The current effective soft-pin deadline (saturated), a thin wrapper over
-    // ComputeSoftPinDeadline reading the sliding window. Pure accessor that
-    // acquires the object spin lock; locked call sites reuse the static
-    // ComputeSoftPinDeadline directly to avoid re-entrant locking.
-    std::chrono::system_clock::time_point EffectiveSoftPinDeadline() const {
-        SpinLocker locker(&lock);
-        return ComputeSoftPinDeadline(last_access_time, soft_pin_ttl);
-    }
-
     // Snapshot of the committed soft-pin sliding window (last_access_time +
     // soft_pin_ttl) for metadata rebuild. Returns nullopt when the object is
     // not soft-pinned.
@@ -464,8 +455,8 @@ struct ObjectMetadata {
 
     // Assign the sliding window so its effective deadline equals `deadline`
     // exactly. The window is anchored one millisecond before `deadline` with a
-    // one-millisecond TTL, so soft_pin_ttl stays non-zero (active) while
-    // EffectiveSoftPinDeadline() reproduces `deadline`. Used by tests and the
+    // one-millisecond TTL, so soft_pin_ttl stays non-zero (active) while the
+    // effective deadline reproduces `deadline`. Used by tests and the
     // scenario DSL that specify soft-pin state as an absolute expiry.
     void SetSoftPinDeadline(std::chrono::system_clock::time_point deadline) {
         SpinLocker locker(&lock);

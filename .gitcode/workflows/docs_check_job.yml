@@ -69,7 +69,10 @@ jobs:
         run: python3 .gitcode/scripts/gitcode_ci.py select docs --base "origin/${{ inputs.branch }}"
       - name: Install documentation dependencies
         if: ${{ steps.plan.outputs.run == 'true' }}
-        run: bash .gitcode/scripts/gitcode_bootstrap.sh docs
+        run: |
+          # requirements-docs.txt 含 GitHub 直链依赖，runner 无法直连，走 osinfra 代理
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"
+          bash .gitcode/scripts/gitcode_bootstrap.sh docs
       - name: Build documentation with warnings as errors
         if: ${{ steps.plan.outputs.run == 'true' }}
         run: |

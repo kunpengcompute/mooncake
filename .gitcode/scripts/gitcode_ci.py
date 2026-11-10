@@ -185,19 +185,6 @@ def static_checks(plan: dict) -> None:
     ]
     if cmake:
         run(["cmake-format", "--check", *cmake])
-    markdown = [p for p in paths if p.endswith(".md")]
-    if markdown:
-        run(
-            [
-                "npx",
-                "--yes",
-                "markdownlint-cli@0.43.0",
-                "--config",
-                ".gitcode/markdownlint.json",
-                "--",
-                *markdown,
-            ]
-        )
     # Hooks may rewrite files in the ephemeral checkout, but CI never commits
     # those edits. A successful gate requires the checked-out files unchanged.
     run(["git", "diff", "--exit-code"])

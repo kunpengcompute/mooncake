@@ -114,8 +114,8 @@ stages:
             with:
               project-name: "boostkit"
 
-      malicious-scan:
-        name: malicious-scan
+      antipoison-scan:
+        name: antipoison-scan
         runs-on: ["ubuntu-latest", "x64", "slim"]
         permissions:
           id-token: write
@@ -131,7 +131,7 @@ stages:
         name: pre-commit
         runs-on: [ self-hosted, os=euler, arch=arm64, type=pr, flavor=small ]
         container:
-          image: swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03
+          image: swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.04
         steps:
           - name: Checkout
             uses: checkout
@@ -146,42 +146,42 @@ stages:
             uses: openlibing/pre-commit-action@v1.0.0
       static_check:
         name: static_check
-        needs: [ sca-pr, malicious-scan, pre-commit ]
+        needs: [ sca-pr, antipoison-scan, pre-commit ]
         uses: .gitcode/workflows/static_check_job.yml
         with:
           runs_on_flavor: "flavor=small"
-          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03"
+          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.04"
           pr_id: "${{ env.pr_id }}"
           branch: "${{ env.branch }}"
           default_branch: "${{ env.default_branch }}"
       python_check:
         name: python_check
-        needs: [ sca-pr, malicious-scan, pre-commit ]
+        needs: [ sca-pr, antipoison-scan, pre-commit ]
         uses: .gitcode/workflows/python_check_job.yml
         with:
           runs_on_flavor: "flavor=small"
-          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03"
+          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.04"
           pr_id: "${{ env.pr_id }}"
           branch: "${{ env.branch }}"
           default_branch: "${{ env.default_branch }}"
       docs_check:
         name: docs_check
-        needs: [ sca-pr, malicious-scan, pre-commit ]
+        needs: [ sca-pr, antipoison-scan, pre-commit ]
         uses: .gitcode/workflows/docs_check_job.yml
         with:
           runs_on_flavor: "flavor=small"
-          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03"
+          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.04"
           pr_id: "${{ env.pr_id }}"
           branch: "${{ env.branch }}"
           default_branch: "${{ env.default_branch }}"
       build_ut_check:
         name: build_ut_check
         if: ${{ jobs.Detect_file_changes.outputs.need_build == 'yes' }}
-        needs: [ Detect_file_changes, sca-pr, malicious-scan, pre-commit, static_check, python_check, docs_check]
+        needs: [ Detect_file_changes, sca-pr, antipoison-scan, pre-commit, static_check, python_check, docs_check]
         uses: .gitcode/workflows/build_ut_check_job.yml
         with:
           runs_on_flavor: "flavor=xlarge"
-          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.03"
+          docker_img: "swr.cn-north-4.myhuaweicloud.com/cloud_boostkit/openeuler24.03_lts_sp3:mooncake_26.3.0.04"
           pr_id: "${{ env.pr_id }}"
           branch: "${{ env.branch }}"
           default_branch: "${{ env.default_branch }}"

@@ -24,6 +24,7 @@
 #include "config/spdk_controller_config.h"
 #include "nof/page_registry.h"
 #include "nof/probe_context_pool.h"
+#include "nof/padding_buffer_pool.h"
 
 namespace mooncake {
 namespace {
@@ -194,7 +195,7 @@ class SpdkEnvGuard {
         // Deliberately leaked (like RegistryMutex): a probe-only initiator
         // never registers memory, so the NofRegistryBundle below is first
         // constructed by its ~Impl backstop during static destruction —
-        // after function-local statics like this one have already been
+        // after function-local static variables like this one have already been
         // destroyed. The bundle's constructor calls Acquire(), which must
         // not touch a destroyed static. Leaking also means the pin below
         // never releases, so spdk_env_fini never runs at all; the OS
@@ -457,6 +458,36 @@ class SpdkInitiator::Impl {
         return -EINVAL;
     }
 
+    int SubmitIOV(NofSegmentHandle* handle, uint64_t byte_offset,
+                  uint64_t byte_length, NofIOOp op, NofSglIOAdaptor* adaptor) {
+        if (!handle || !handle->qpair || !handle->ns || !adaptor ||
+            !adaptor->cb || !adaptor->reset || !adaptor->next || !byte_length)
+            return -EINVAL;
+        const uint32_t block_size = GetBlockSize(handle);
+        if (!block_size || block_size == kInvalidBlockSize ||
+            byte_offset % block_size || byte_length % block_size ||
+            byte_length / block_size > UINT32_MAX)
+            return -EINVAL;
+        const uint64_t lba = byte_offset / block_size;
+        const auto blocks = static_cast<uint32_t>(byte_length / block_size);
+        if (op == NofIOOp::kRead) {
+            return spdk_nvme_ns_cmd_readv(handle->ns, handle->qpair, lba,
+                                          blocks, SglCompleteTrampoline,
+                                          adaptor, 0, ResetSgl, NextSge);
+        }
+        if (op == NofIOOp::kWrite) {
+            return spdk_nvme_ns_cmd_writev(handle->ns, handle->qpair, lba,
+                                           blocks, SglCompleteTrampoline,
+                                           adaptor, 0, ResetSgl, NextSge);
+        }
+        return -EINVAL;
+    }
+
+    int AcquirePadding(size_t size, bool for_write, void** ptr,
+                       std::shared_ptr<void>* owner) {
+        return padding_pool_->Acquire(size, for_write, ptr, owner);
+    }
+
     int64_t PollCompletion(NofSegmentHandle* handle, uint32_t max_completions) {
         if (!handle || !handle->qpair) {
             return -EINVAL;
@@ -604,6 +635,19 @@ class SpdkInitiator::Impl {
             env_guard_ = SpdkEnvGuard::Acquire();
         }
         return env_guard_ != nullptr;
+    }
+
+    static void ResetSgl(void* ctx, uint32_t offset) {
+        auto* adaptor = static_cast<NofSglIOAdaptor*>(ctx);
+        adaptor->reset(adaptor->ctx, offset);
+    }
+    static int NextSge(void* ctx, void** address, uint32_t* length) {
+        auto* adaptor = static_cast<NofSglIOAdaptor*>(ctx);
+        return adaptor->next(adaptor->ctx, address, length);
+    }
+    static void SglCompleteTrampoline(void* ctx, const spdk_nvme_cpl* cpl) {
+        auto* adaptor = static_cast<NofSglIOAdaptor*>(ctx);
+        IOCompleteTrampoline(static_cast<NofIOAdaptor*>(adaptor), cpl);
     }
 
     static void IOCompleteTrampoline(void* cb_arg,
@@ -786,6 +830,8 @@ class SpdkInitiator::Impl {
     std::map<std::string, std::unique_ptr<ProbeBuffer>> probe_buffers_;
     std::mutex probe_buffers_mutex_;
     NofProbeContextPool probe_pool_;
+    std::shared_ptr<NofPaddingPool> padding_pool_ =
+        std::make_shared<NofPaddingPool>(std::make_shared<SpdkDmaAllocator>());
 };
 
 // ---------------------------------------------------------------------------
@@ -815,6 +861,17 @@ int SpdkInitiator::SubmitIO(NofSegmentHandle* handle, void* buffer,
                            adaptor);
 }
 
+int SpdkInitiator::SubmitIOV(NofSegmentHandle* handle, uint64_t byte_offset,
+                             uint64_t byte_length, NofIOOp op,
+                             NofSglIOAdaptor* adaptor) {
+    return impl_->SubmitIOV(handle, byte_offset, byte_length, op, adaptor);
+}
+
+int SpdkInitiator::AcquirePadding(size_t size, bool for_write, void** ptr,
+                                  std::shared_ptr<void>* owner) {
+    return impl_->AcquirePadding(size, for_write, ptr, owner);
+}
+
 int64_t SpdkInitiator::PollCompletion(NofSegmentHandle* handle,
                                       uint32_t max_completions) {
     return impl_->PollCompletion(handle, max_completions);
@@ -830,7 +887,7 @@ ErrorCode SpdkInitiator::UnregisterMemory(void* ptr) {
 
 NofCapabilities SpdkInitiator::GetCapabilities() const {
     NofCapabilities caps;
-    caps.supports_sgl = false;  // flips when PR #3251's SGL path lands here
+    caps.supports_sgl = true;
     caps.dma_alignment = 4;
     // Upper bound: registration capability exists in this build;
     // not transport-specific. RegisterMemory on TCP NVMe-oF is harmless,

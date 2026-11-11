@@ -26,6 +26,11 @@ class SpdkInitiator : public NVMeoFInitiator {
     int SubmitIO(NofSegmentHandle* handle, void* buffer, uint64_t byte_offset,
                  uint64_t byte_length, NofIOOp op,
                  NofIOAdaptor* adaptor) override;
+    int SubmitIOV(NofSegmentHandle* handle, uint64_t byte_offset,
+                  uint64_t byte_length, NofIOOp op,
+                  NofSglIOAdaptor* adaptor) override;
+    int AcquirePadding(size_t size, bool for_write, void** ptr,
+                       std::shared_ptr<void>* owner) override;
     int64_t PollCompletion(NofSegmentHandle* handle,
                            uint32_t max_completions) override;
     ErrorCode RegisterMemory(void* ptr, size_t size) override;
@@ -45,6 +50,7 @@ class SpdkDmaAllocator : public DmaBufferAllocator {
    public:
     SpdkDmaAllocator();
     ~SpdkDmaAllocator() override;
+    bool IsSpdkHostDma() const override { return true; }
 
     void* Alloc(size_t size, size_t align, int socket_id = -1) override;
     void Free(void* ptr) override;

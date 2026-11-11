@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cerrno>
+#include <memory>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -43,6 +45,13 @@ using NofIOCallback = void (*)(void* ctx, const NofIOCompletion& completion);
 struct NofIOAdaptor {
     NofIOCallback cb;
     void* ctx;
+};
+
+// SGL callbacks are backend-neutral. The adaptor and all payload ranges must
+// remain alive until completion; reset/next execute on the owning poll thread.
+struct NofSglIOAdaptor : NofIOAdaptor {
+    void (*reset)(void* ctx, uint32_t offset);
+    int (*next)(void* ctx, void** address, uint32_t* length);
 };
 
 struct NofCapabilities {
@@ -89,6 +98,21 @@ class NVMeoFInitiator {
     virtual int SubmitIO(NofSegmentHandle* handle, void* buffer,
                          uint64_t byte_offset, uint64_t byte_length, NofIOOp op,
                          NofIOAdaptor* adaptor) = 0;
+
+    // Optional Host scatter/gather I/O. Offset and length are block-aligned;
+    // the SGL covers exactly byte_length bytes, including separate tail
+    // padding.
+    virtual int SubmitIOV(NofSegmentHandle*, uint64_t, uint64_t, NofIOOp,
+                          NofSglIOAdaptor*) {
+        return -ENOTSUP;
+    }
+
+    // Borrow a DMA-compatible padding block. Writes use immutable zero bytes;
+    // reads need an exclusive discard block. owner retains it through
+    // completion.
+    virtual int AcquirePadding(size_t, bool, void**, std::shared_ptr<void>*) {
+        return -ENOTSUP;
+    }
 
     // Poll completions on the calling thread. max_completions == 0 means
     // "all pending" (SPDK dialect, now an explicit contract).

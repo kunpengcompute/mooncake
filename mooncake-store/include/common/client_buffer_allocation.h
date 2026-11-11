@@ -43,7 +43,8 @@ class DmaBufferAllocator;
 void* allocate_buffer_allocator_memory(
     size_t total_size, const std::string& protocol = "",
     size_t alignment = facebook::cachelib::Slab::kSize,
-    DmaBufferAllocator* dma_allocator = nullptr);
+    DmaBufferAllocator* dma_allocator = nullptr,
+    bool* is_spdk_host_dma = nullptr);
 
 void free_memory(const std::string& protocol, void* ptr,
                  DmaBufferAllocator* dma_allocator = nullptr);

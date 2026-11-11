@@ -57,6 +57,7 @@ inline std::ostream& operator<<(
        << ", segment.name=" << snapshot.segment.name
        << ", segment.base=" << snapshot.segment.base
        << ", segment.size=" << snapshot.segment.size
+       << ", segment.block_size=" << snapshot.segment.block_size
        << ", segment.te_endpoint=" << snapshot.segment.te_endpoint
        << ", status=" << snapshot.status << "}";
     return os;
@@ -335,6 +336,37 @@ class ScopedAllocatorAccess {
     std::shared_lock<std::shared_mutex> lock_;
 };
 
+/**
+ * @brief Read-only NoF allocator state held under one shared lock.
+ */
+class ScopedNoFAllocatorAccess {
+   public:
+    ScopedNoFAllocatorAccess(
+        const AllocatorManager& allocator_manager,
+        const std::unordered_map<UUID, MountedNoFSegment, boost::hash<UUID>>&
+            mounted_segments,
+        const uint32_t& block_size, std::shared_mutex& mutex)
+        : allocator_manager_(allocator_manager),
+          mounted_segments_(mounted_segments),
+          block_size_(block_size),
+          lock_(mutex) {}
+
+    const AllocatorManager& getAllocatorManager() const {
+        return allocator_manager_;
+    }
+
+    size_t getMountedSegmentCount() const { return mounted_segments_.size(); }
+
+    uint32_t getBlockSize() const { return block_size_; }
+
+   private:
+    const AllocatorManager& allocator_manager_;
+    const std::unordered_map<UUID, MountedNoFSegment, boost::hash<UUID>>&
+        mounted_segments_;
+    const uint32_t& block_size_;
+    std::shared_lock<std::shared_mutex> lock_;
+};
+
 class SegmentManager {
    public:
     /**
@@ -454,17 +486,9 @@ class NoFSegmentManager {
      * @brief Get RAII-style access to use allocators
      * @return ScopedAllocatorAccess object that holds the lock
      */
-    ScopedAllocatorAccess getAllocatorAccess() {
-        return ScopedAllocatorAccess(allocator_manager_, segment_mutex_);
-    }
-
-    /**
-     * @brief Get the number of mounted NoF segments
-     * @return the mounted NoF segment count
-     */
-    int getMountedSegmentCount() const {
-        std::shared_lock<std::shared_mutex> lock(segment_mutex_);
-        return mounted_segments_.size();
+    ScopedNoFAllocatorAccess getAllocatorAccess() {
+        return ScopedNoFAllocatorAccess(allocator_manager_, mounted_segments_,
+                                        block_size_, segment_mutex_);
     }
 
     void GetMountedSegmentsSnapshot(
@@ -518,6 +542,7 @@ class NoFSegmentManager {
 
     std::unordered_map<std::string, UUID>
         client_by_name_;  // segment name -> client_id
+    uint32_t block_size_{0};
 
     friend class ScopedNoFSegmentAccess;
     friend class SegmentTest;

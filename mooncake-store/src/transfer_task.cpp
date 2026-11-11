@@ -27,6 +27,53 @@
 
 namespace mooncake {
 
+bool BuildNofLogicalSlices(const std::vector<Slice>& input,
+                           uint64_t logical_size, std::vector<Slice>* output) {
+    if (logical_size == 0 || output == nullptr) {
+        return false;
+    }
+
+    output->clear();
+    output->reserve(input.size());
+    uint64_t remaining = logical_size;
+    for (const auto& slice : input) {
+        if (slice.ptr == nullptr || slice.size == 0) {
+            return false;
+        }
+        const size_t used =
+            static_cast<size_t>(std::min<uint64_t>(slice.size, remaining));
+        if (used != 0) {
+            output->push_back(Slice{slice.ptr, used});
+            remaining -= used;
+        }
+        if (remaining == 0) {
+            return true;
+        }
+    }
+    output->clear();
+    return false;
+}
+
+bool LocateNofSglOffset(const std::vector<Slice>& slices,
+                        uint64_t absolute_offset, size_t* slice_index,
+                        size_t* slice_offset) {
+    if (slice_index == nullptr || slice_offset == nullptr) {
+        return false;
+    }
+
+    for (size_t i = 0; i < slices.size(); ++i) {
+        if (absolute_offset < slices[i].size) {
+            *slice_index = i;
+            *slice_offset = static_cast<size_t>(absolute_offset);
+            return true;
+        }
+        absolute_offset -= slices[i].size;
+    }
+    *slice_index = slices.size();
+    *slice_offset = 0;
+    return absolute_offset == 0;
+}
+
 static int GetPositiveEnvOrDefault(const char* name, int default_value) {
     const char* raw_value = std::getenv(name);
     if (!raw_value || raw_value[0] == '\0') {
@@ -79,6 +126,7 @@ static int CountNofQueuedTasks(const mooncake::NofTask* head) {
 
 static inline void NofTaskCompletion(mooncake::NofTask* task) {
     if (task->remaining_bytes == 0 && task->outstanding_sub_io == 0) {
+        task->padding_owner.reset();
         task->state->set_completed(task->failed
                                        ? mooncake::ErrorCode::TRANSFER_FAIL
                                        : mooncake::ErrorCode::OK,
@@ -87,6 +135,56 @@ static inline void NofTaskCompletion(mooncake::NofTask* task) {
             delete task;
         }
     }
+}
+
+static void nvmf_reset_sgl(void* ctx, uint32_t offset) {
+    auto* sub_task = static_cast<mooncake::NofSubTask*>(ctx);
+    sub_task->sgl_index = 0;
+    sub_task->sgl_offset = 0;
+    sub_task->sgl_remaining = offset <= sub_task->payload_byte_length
+                                  ? sub_task->payload_byte_length - offset
+                                  : 0;
+
+    const uint64_t absolute_offset = sub_task->payload_byte_offset + offset;
+    (void)mooncake::LocateNofSglOffset(sub_task->task->slices, absolute_offset,
+                                       &sub_task->sgl_index,
+                                       &sub_task->sgl_offset);
+}
+
+static int nvmf_next_sge(void* ctx, void** address, uint32_t* length) {
+    auto* sub_task = static_cast<mooncake::NofSubTask*>(ctx);
+    if (address == nullptr || length == nullptr ||
+        sub_task->sgl_remaining == 0) {
+        return -EINVAL;
+    }
+
+    const auto& slices = sub_task->task->slices;
+    while (sub_task->sgl_index < slices.size()) {
+        const auto& slice = slices[sub_task->sgl_index];
+        if (sub_task->sgl_offset >= slice.size) {
+            sub_task->sgl_offset = 0;
+            ++sub_task->sgl_index;
+            continue;
+        }
+
+        size_t available = slice.size - sub_task->sgl_offset;
+        size_t segment_length =
+            std::min<size_t>(available, sub_task->sgl_remaining);
+        segment_length = std::min<size_t>(segment_length,
+                                          std::numeric_limits<uint32_t>::max());
+        *address = static_cast<char*>(slice.ptr) + sub_task->sgl_offset;
+        *length = static_cast<uint32_t>(segment_length);
+
+        sub_task->sgl_offset += segment_length;
+        sub_task->sgl_remaining -= *length;
+        if (sub_task->sgl_offset == slice.size) {
+            sub_task->sgl_offset = 0;
+            ++sub_task->sgl_index;
+        }
+        return 0;
+    }
+
+    return -EINVAL;
 }
 
 static void nof_io_complete(void* ctx, const mooncake::NofIOCompletion& c) {
@@ -574,7 +672,9 @@ void NofWorkerPool::workerThread(int work_idx) {
                         const uint64_t submit_off =
                             task->byte_offset + sent_bytes;
                         void* submit_ptr =
-                            reinterpret_cast<char*>(task->ptr) + sent_bytes;
+                            task->ptr ? reinterpret_cast<char*>(task->ptr) +
+                                            sent_bytes
+                                      : nullptr;
 
                         if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks,
                                               work_idx)) {
@@ -586,11 +686,21 @@ void NofWorkerPool::workerThread(int work_idx) {
                         sub_task_pool.pop();
                         sub_task->task = task;
                         sub_task->submit_bytes = submit_bytes;
-                        sub_task->adaptor = {&nof_io_complete, sub_task};
+                        sub_task->adaptor = {{&nof_io_complete, sub_task},
+                                             &nvmf_reset_sgl,
+                                             &nvmf_next_sge};
+                        sub_task->payload_byte_offset = sent_bytes;
+                        sub_task->payload_byte_length = submit_bytes;
 
-                        int ret = initiator_->SubmitIO(
-                            task->seg_handle, submit_ptr, submit_off,
-                            submit_bytes, task->op, &sub_task->adaptor);
+                        int ret = task->slices.empty()
+                                      ? initiator_->SubmitIO(
+                                            task->seg_handle, submit_ptr,
+                                            submit_off, submit_bytes, task->op,
+                                            &sub_task->adaptor)
+                                      : initiator_->SubmitIOV(
+                                            task->seg_handle, submit_off,
+                                            submit_bytes, task->op,
+                                            &sub_task->adaptor);
                         if (ret != 0) {
 #ifdef USE_NOF
                             if (task->metric) {
@@ -1051,7 +1161,43 @@ TransferFuture::TransferFuture(std::shared_ptr<OperationState> state)
     }
 }
 
+TransferFuture::~TransferFuture() noexcept { drainNofOperation(); }
+
+TransferFuture& TransferFuture::operator=(TransferFuture&& other) noexcept {
+    if (this != &other) {
+        drainNofOperation();
+        state_ = std::move(other.state_);
+    }
+    return *this;
+}
+
+void TransferFuture::drainNofOperation() noexcept {
+    if (!state_) return;
+    try {
+        if (state_->get_strategy() == TransferStrategy::SPDK_NVMF) {
+            // Unwinding after a later submission/allocation failure must not
+            // release the caller's staging owners while NoF still uses them.
+            // Completion includes all outstanding sub-I/O, even on failure.
+            state_->wait_for_completion();
+        }
+    } catch (...) {
+        // Releasing borrowed DMA memory after a failed drain is unsafe. A
+        // synchronization failure cannot be recovered by destroying its owner.
+        LOG(FATAL) << "Cannot drain outstanding NoF transfer";
+    }
+}
+
 bool TransferFuture::isReady() const { return state_->is_completed(); }
+
+void TransferFuture::notifyNofCompletion(
+    std::shared_ptr<NofReadCompletionQueue> queue, size_t index) {
+    auto state = std::dynamic_pointer_cast<NofOperationState>(state_);
+    if (!state || !queue) {
+        throw std::invalid_argument(
+            "NoF completion requires a NoF state and queue");
+    }
+    state->SetCompletionQueue(std::move(queue), index);
+}
 
 ErrorCode TransferFuture::wait() {
     if (!isReady()) {
@@ -1141,14 +1287,11 @@ std::optional<TransferFuture> TransferSubmitter::submit(
             }
         }
     } else if (replica.is_nof_replica()) {
-        auto& ssd_desc = replica.get_nof_descriptor();
-        auto& handle = ssd_desc.buffer_descriptor;
-
-        if (!ptr || (size == 0)) {
-            return std::nullopt;
-        }
-
-        future = submitNofOperation(handle, ptr, size, op_code);
+        future = ptr && size
+                     ? submitNofOperation(
+                           replica.get_nof_descriptor().buffer_descriptor, ptr,
+                           size, op_code)
+                     : submitNofOperation(replica, slices, op_code);
     } else {
         future = submitFileReadOperation(replica, slices, op_code);
     }
@@ -2005,6 +2148,105 @@ std::optional<TransferFuture> TransferSubmitter::submitRangeWrite(
     return future;
 }
 
+tl::expected<NofIoRequirements, ErrorCode>
+TransferSubmitter::GetNofIoRequirements(const Replica::Descriptor& replica,
+                                        size_t logical_size) {
+    if (!nof_initiator_ || !replica.is_nof_replica() || logical_size == 0) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    const auto& descriptor = replica.get_nof_descriptor();
+    const auto& buffer = descriptor.buffer_descriptor;
+    if (buffer.transport_endpoint_.empty() ||
+        descriptor.logical_size() != logical_size ||
+        buffer.size_ < logical_size ||
+        logical_size >
+            std::numeric_limits<uint64_t>::max() - buffer.buffer_address_) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
+    auto* segment = nof_initiator_->OpenSegment(buffer.transport_endpoint_);
+    if (!segment) {
+        return tl::unexpected(ErrorCode::TRANSFER_FAIL);
+    }
+    const uint32_t block_size = nof_initiator_->GetBlockSize(segment);
+    if (block_size == 0 || block_size == kInvalidBlockSize ||
+        (descriptor.block_size != 0 && descriptor.block_size != block_size) ||
+        buffer.buffer_address_ % block_size != 0 ||
+        logical_size >
+            std::numeric_limits<uint64_t>::max() - (block_size - 1)) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    // The submit path supplies tail padding in a separate scratch slice; the
+    // staging buffer and caller's data retain their original logical size.
+    const uint64_t physical_size =
+        ((logical_size + block_size - 1) / block_size) * block_size;
+    if (buffer.size_ < physical_size ||
+        physical_size >
+            std::numeric_limits<uint64_t>::max() - buffer.buffer_address_ ||
+        physical_size / block_size >
+            static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    return NofIoRequirements{block_size, block_size, segment};
+}
+
+std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
+    const Replica::Descriptor& replica, const std::vector<Slice>& slices,
+    TransferRequest::OpCode op_code) {
+    const auto& descriptor = replica.get_nof_descriptor();
+    const auto& handle = descriptor.buffer_descriptor;
+    const size_t logical_size = descriptor.logical_size();
+    auto requirements = GetNofIoRequirements(replica, logical_size);
+    if (!nof_pool_ || !requirements) return std::nullopt;
+    std::vector<Slice> io_slices;
+    if (!BuildNofLogicalSlices(slices, logical_size, &io_slices))
+        return std::nullopt;
+    const auto caps = nof_initiator_->GetCapabilities();
+    // Preserve the contiguous path for backends without SGL support.
+    if (!caps.supports_sgl) {
+        char* next = static_cast<char*>(io_slices.front().ptr);
+        for (const auto& slice : io_slices) {
+            if (slice.ptr != next) return std::nullopt;
+            next += slice.size;
+        }
+        return submitNofOperation(handle, io_slices.front().ptr, logical_size,
+                                  op_code);
+    }
+    auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
+    for (const auto& slice : io_slices) {
+        if (!caps.dma_alignment ||
+            reinterpret_cast<uintptr_t>(slice.ptr) % caps.dma_alignment != 0 ||
+            runtime.FindDeviceForPointer(slice.ptr)) {
+            LOG(ERROR) << "NoF SGL requires DMA-compatible Host slices";
+            return std::nullopt;
+        }
+    }
+    const size_t block_size = requirements->block_size;
+    const size_t padding_size =
+        (block_size - logical_size % block_size) % block_size;
+    std::shared_ptr<void> padding_owner;
+    if (padding_size) {
+        void* padding = nullptr;
+        if (nof_initiator_->AcquirePadding(padding_size,
+                                           op_code == TransferRequest::WRITE,
+                                           &padding, &padding_owner) != 0)
+            return std::nullopt;
+        io_slices.push_back({padding, padding_size});
+    }
+    auto* segment = requirements->segment;
+    auto state = std::make_shared<NofOperationState>();
+    const auto op =
+        op_code == TransferRequest::READ ? NofIOOp::kRead : NofIOOp::kWrite;
+    NofTask task(segment, nullptr, handle.buffer_address_,
+                 logical_size + padding_size, op, state);
+    task.slices = std::move(io_slices);
+    task.padding_owner = std::move(padding_owner);
+    task.metric = nof_metric_;
+    // Nothing that can allocate follows acceptance of the borrowed DMA ranges.
+    nof_pool_->submitTask(std::move(task));
+    return TransferFuture(std::move(state));
+}
+
 std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
     const AllocatedBuffer::Descriptor& handle, void* ptr, size_t size,
     const TransferRequest::OpCode op_code) {
@@ -2037,8 +2279,9 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
     const auto caps = nof_initiator_->GetCapabilities();
     const uint64_t ptr_alignment =
         caps.supports_sgl ? caps.dma_alignment : block_size;
-    if (block_size == kInvalidBlockSize ||
-        handle.buffer_address_ % block_size != 0 || size % block_size != 0 ||
+    if (block_size == 0 || block_size == kInvalidBlockSize ||
+        ptr_alignment == 0 || handle.buffer_address_ % block_size != 0 ||
+        size % block_size != 0 ||
         reinterpret_cast<std::uintptr_t>(ptr) % ptr_alignment != 0) {
         LOG(ERROR) << "NoF request offset=" << handle.buffer_address_
                    << ", ptr=" << ptr << ", size=" << size

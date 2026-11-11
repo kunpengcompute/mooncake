@@ -52,6 +52,9 @@ class ClientBufferAllocator
 
     [[nodiscard]] size_t size() const { return buffer_size_; }
 
+    // Reports the actual allocation source, not the requested allocation mode.
+    [[nodiscard]] bool isSpdkHostDma() const { return is_spdk_host_dma_; }
+
     [[nodiscard]] std::optional<BufferHandle> allocate(size_t size);
 
    protected:
@@ -72,6 +75,7 @@ class ClientBufferAllocator
     std::string protocol;
     bool is_external_memory_ = false;
     std::shared_ptr<DmaBufferAllocator> dma_allocator_;  // was use_spdk_dma_
+    bool is_spdk_host_dma_ = false;
 };
 
 /**

@@ -1611,6 +1611,16 @@ TEST_F(RealClientTest, TestBatchPutAndGetMultiBuffers) {
     }
     EXPECT_EQ(dst_data, upsert_data)
         << "Retrieved data should match upserted data";
+    // Shape validation is independent of the NoF staging switch.
+    const std::vector<int> invalid{toInt(ErrorCode::INVALID_PARAMS)};
+    EXPECT_EQ(py_client_->batch_put_from_multi_buffers({"bad_outer_shape"}, {},
+                                                       {}, config),
+              invalid);
+    EXPECT_EQ(py_client_->batch_put_from_multi_buffers(
+                  {"bad_inner_shape"}, {{test_data.data()}}, {{}}, config),
+              invalid);
+    EXPECT_EQ(py_client_->isExist("bad_outer_shape"), 0);
+    EXPECT_EQ(py_client_->isExist("bad_inner_shape"), 0);
 
     // Unregister buffers
     int unreg_result_test = py_client_->unregister_buffer(test_data.data());

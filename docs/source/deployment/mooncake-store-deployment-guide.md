@@ -722,6 +722,8 @@ mooncake_master \
 | `--default_kv_soft_pin_ttl` | `1800000` ms | Soft pin TTL (30 min) |
 | `--max_kv_soft_pin_ttl` | `604800000` ms | Maximum request-level soft pin TTL (7 days) |
 | `--allow_evict_soft_pinned_objects` | `true` | Allow evicting soft-pinned objects |
+| `--enable_soft_pin_ttl_reclaim` | `false` | Reclaim NoF-only objects once their soft-pin TTL expires, without waiting for allocation pressure |
+| `--enable_nof_soft_pin_access_renewal` | `false` | Renew the soft pin of NoF-only objects on each read hit, sliding their retention window forward |
 | `--eviction_ratio` | `0.05` | Fraction evicted at high watermark |
 | `--eviction_high_watermark_ratio` | `0.90` | Usage ratio triggering eviction |
 | `--client_ttl` | `10` s | Seconds before a silent client is considered disconnected |

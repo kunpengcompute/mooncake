@@ -96,7 +96,9 @@ size_t get_hugepage_size_from_env(unsigned int *out_flags, bool use_memfd) {
 void *allocate_buffer_allocator_memory(size_t total_size,
                                        const std::string &protocol,
                                        size_t alignment,
-                                       DmaBufferAllocator *dma_allocator) {
+                                       DmaBufferAllocator *dma_allocator,
+                                       bool *is_spdk_host_dma) {
+    if (is_spdk_host_dma) *is_spdk_host_dma = false;
     const size_t default_alignment = facebook::cachelib::Slab::kSize;
     // Ensure total_size is a multiple of alignment
     if (alignment == default_alignment && total_size < alignment) {
@@ -127,7 +129,10 @@ void *allocate_buffer_allocator_memory(size_t total_size,
     // A DMA-specialized allocator (SPDK hugepage pool) takes precedence over
     // the generic fallback; nullptr keeps the historical path below.
     if (dma_allocator && total_size > 0) {
-        return dma_allocator->Alloc(total_size, alignment, -1);
+        void *ptr = dma_allocator->Alloc(total_size, alignment, -1);
+        if (is_spdk_host_dma)
+            *is_spdk_host_dma = ptr && dma_allocator->IsSpdkHostDma();
+        return ptr;
     }
 #ifdef USE_VRAM_SEGMENT
     auto ret = allocate_vram_memory(total_size, protocol);

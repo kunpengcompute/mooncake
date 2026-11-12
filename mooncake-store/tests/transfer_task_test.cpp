@@ -14,6 +14,8 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <cstring>
+#include <future>
 #include <vector>
 
 #include "types.h"
@@ -148,6 +150,62 @@ TEST_F(TransferTaskTest, MemcpyWorkerPoolBasic) {
     for (size_t i = 0; i < data_size; ++i) {
         EXPECT_EQ(dest_data[i], 'X');
     }
+}
+
+TEST_F(TransferTaskTest, NofFutureDrainsDuringExceptionUnwinding) {
+    static_assert(std::is_nothrow_move_constructible_v<TransferFuture>);
+    static_assert(std::is_nothrow_move_assignable_v<TransferFuture>);
+    for (auto result : {ErrorCode::OK, ErrorCode::TRANSFER_FAIL}) {
+        auto state = std::make_shared<NofOperationState>();
+        std::promise<void> started;
+        auto start = started.get_future();
+        auto unwound = std::async(std::launch::async, [&] {
+            try {
+                TransferFuture future(state);
+                started.set_value();
+                throw std::runtime_error("later batch allocation failed");
+            } catch (const std::runtime_error&) {
+                return state->is_completed();
+            }
+        });
+        start.wait();
+        EXPECT_EQ(unwound.wait_for(std::chrono::milliseconds(20)),
+                  std::future_status::timeout);
+        state->set_completed(result);
+        EXPECT_TRUE(unwound.get());
+    }
+}
+
+TEST_F(TransferTaskTest, NofFutureMoveAssignmentDrainsReplacedOperation) {
+    auto replaced = std::make_shared<NofOperationState>();
+    auto incoming = std::make_shared<NofOperationState>();
+    std::promise<void> started;
+    auto start = started.get_future();
+    auto assigned = std::async(std::launch::async, [&] {
+        TransferFuture destination(replaced);
+        TransferFuture source(incoming);
+        started.set_value();
+        destination = std::move(source);
+        const bool drained = replaced->is_completed();
+        incoming->set_completed(ErrorCode::OK);
+        return drained;
+    });
+    start.wait();
+    EXPECT_EQ(assigned.wait_for(std::chrono::milliseconds(20)),
+              std::future_status::timeout);
+    replaced->set_completed(ErrorCode::TRANSFER_FAIL);
+    EXPECT_TRUE(assigned.get());
+}
+
+TEST_F(TransferTaskTest,
+       MemoryFutureDestructionKeepsExistingNonblockingBehavior) {
+    auto state = std::make_shared<MemcpyOperationState>();
+    auto destroyed =
+        std::async(std::launch::async, [&] { TransferFuture future(state); });
+    EXPECT_EQ(destroyed.wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
+    state->set_completed(ErrorCode::OK);
+    destroyed.get();
 }
 
 // Test multiple memcpy operations in one task

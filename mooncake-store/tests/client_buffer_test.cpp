@@ -1,7 +1,6 @@
 // client_buffer_test.cpp
 #include "client_buffer.h"
 #include "nof/nof_runtime.h"
-#include "nof_staging_buffer.h"
 
 #include <glog/logging.h>
 #include <gtest/gtest.h>
@@ -10,7 +9,6 @@
 #include <cstddef>
 #include <cstring>
 #include <new>
-#include <limits>
 #include <thread>
 #include <vector>
 
@@ -96,88 +94,6 @@ TEST_F(ClientBufferTest, SpdkDmaAllocatorDestroysWithSpdkFree) {
     allocator.reset();
 }
 #endif
-
-TEST_F(ClientBufferTest, OrdinaryAndExternalBuffersAreNotSpdkHostDma) {
-    auto allocator = ClientBufferAllocator::create(4096);
-    EXPECT_FALSE(allocator->isSpdkHostDma());
-    auto external = ClientBufferAllocator::create(allocator->getBase(), 4096);
-    EXPECT_FALSE(external->isSpdkHostDma());
-    auto empty = ClientBufferAllocator::create(
-        0, "", false, CreateNofRuntime().dma_allocator);
-    EXPECT_FALSE(empty->isSpdkHostDma());
-    auto mapped = ClientBufferAllocator::create(
-        4096, "", true, CreateNofRuntime().dma_allocator);
-    EXPECT_FALSE(mapped->isSpdkHostDma());
-#ifndef USE_NOF
-    auto fallback = ClientBufferAllocator::create(
-        4096, "", false, CreateNofRuntime().dma_allocator);
-    EXPECT_FALSE(fallback->isSpdkHostDma());
-    EXPECT_FALSE(AcquireNofStaging(fallback, 512, 512));
-#endif
-
-    auto result = AcquireNofStaging(allocator, 512, 512);
-    ASSERT_FALSE(result);
-    EXPECT_EQ(result.error(), ErrorCode::INVALID_PARAMS);
-    EXPECT_FALSE(AcquireNofStaging(nullptr, 512, 512));
-    // Rejecting the backing must not reserve any of the ordinary pool.
-    EXPECT_TRUE(allocator->allocate(4096));
-}
-
-TEST_F(ClientBufferTest, NofStagingAllocationSizeChecksIntegerBoundaries) {
-    using nof_staging_detail::AllocationSize;
-    const auto max_size = std::numeric_limits<size_t>::max();
-    EXPECT_FALSE(AllocationSize(0, 512));
-    EXPECT_FALSE(AllocationSize(512, 0));
-    EXPECT_FALSE(AllocationSize(max_size, 2));
-    EXPECT_FALSE(AllocationSize(max_size - 4094, 4096));
-    ASSERT_TRUE(AllocationSize(max_size - 4095, 4096));
-    EXPECT_EQ(*AllocationSize(max_size - 4095, 4096), max_size);
-    EXPECT_EQ(*AllocationSize(8192, 4096), 12287u);
-}
-
-TEST_F(ClientBufferTest, NofStagingAlignmentRejectsInvalidAddressRanges) {
-    const auto align = [](uintptr_t base, size_t capacity, size_t length,
-                          size_t alignment) {
-        return nof_staging_detail::AlignAllocation(
-            BufferHandle(reinterpret_cast<void*>(base), capacity, {}), length,
-            alignment);
-    };
-    const auto max_address = std::numeric_limits<uintptr_t>::max();
-    EXPECT_FALSE(align(0, 4096, 512, 512));
-    EXPECT_FALSE(align(0x1000, 512, 0, 512));
-    EXPECT_FALSE(align(0x1000, 512, 512, 0));
-    EXPECT_FALSE(align(0x1000, 511, 512, 512));
-    EXPECT_FALSE(align(0x1040, 8192, 8192, 4096));
-    EXPECT_FALSE(align(max_address - 8, 32, 1, 16));
-    EXPECT_FALSE(align(max_address - 127, 128, 128, 1));
-    EXPECT_TRUE(align(max_address - 127, 127, 127, 1));
-}
-
-TEST_F(ClientBufferTest, NofStagingReturnsOriginalAllocationOnSuccessAndError) {
-    auto allocator = ClientBufferAllocator::create(65536);
-    {
-        auto owner = allocator->allocate(12287);
-        ASSERT_TRUE(owner);
-        void* base = owner->ptr();
-        auto staged =
-            nof_staging_detail::AlignAllocation(std::move(*owner), 8192, 4096);
-        ASSERT_TRUE(staged);
-        EXPECT_EQ(staged->owner.ptr(), base);
-        EXPECT_EQ(staged->owner.size(), 12287u);
-        EXPECT_EQ(staged->logical_size, 8192u);
-        EXPECT_EQ(reinterpret_cast<uintptr_t>(staged->data) % 4096, 0u);
-        std::memset(staged->data, 0xA5, staged->logical_size);
-    }
-    // The original allocation, including alignment slack, is returned.
-    EXPECT_TRUE(allocator->allocate(65536));
-    {
-        auto owner = allocator->allocate(512);
-        ASSERT_TRUE(owner);
-        EXPECT_FALSE(
-            nof_staging_detail::AlignAllocation(std::move(*owner), 1024, 512));
-    }
-    EXPECT_TRUE(allocator->allocate(65536));
-}
 
 // Test multiple allocations
 TEST_F(ClientBufferTest, MultipleAllocations) {

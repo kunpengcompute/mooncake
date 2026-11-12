@@ -21,8 +21,6 @@
 #include "client_buffer.h"
 #include "client_service.h"
 #include "device/cuda_ipc_buffer_handle.h"
-#include "nof_staging_device.h"
-#include "nof_staging_buffer.h"
 #include "mutex.h"
 #include "common/network.h"
 #include "pyclient.h"
@@ -87,7 +85,6 @@ class RealClient : public PyClient {
    public:
     RealClient();
     ~RealClient();
-    bool is_nof_host_staging() const override { return nof_host_staging_; }
 
     // Factory to create shared instances and auto-register to ResourceTracker
     static std::shared_ptr<RealClient> create();
@@ -1377,52 +1374,6 @@ class RealClient : public PyClient {
 
     bool can_use_direct_memory_read(const Replica::Descriptor &replica,
                                     void *buffer, size_t size) const;
-    friend struct NofStagingTestPeer;
-
-    std::atomic<bool> nof_host_staging_{false};
-    bool nof_staging_ready_{false};
-    // The caller keeps registration unchanged throughout concurrent I/O.
-    nof_staging::RegionRegistry nof_staging_regions_;
-    std::mutex nof_staging_pool_mutex_;
-    std::shared_ptr<ClientBufferAllocator> nof_staging_pool_;
-
-    struct NofStagedTransfer {
-        NofStagingBuffer buffer;
-        std::vector<std::optional<nof_staging::Device>> devices;
-        // One entry per caller slice; unused/empty entries have size zero.
-        // Alignment gaps belong to Host storage, never to the logical object.
-        std::vector<Slice> host_slices;
-
-        std::vector<Slice> io_slices() const {
-            std::vector<Slice> result;
-            result.reserve(host_slices.size());
-            // Keep the ACL slice mapping, but submit contiguous Host bytes as
-            // one range. Only real alignment gaps require separate SGL entries.
-            for (const auto &slice : host_slices) {
-                if (slice.size == 0) continue;
-                if (!result.empty()) {
-                    auto &previous = result.back();
-                    if (static_cast<char *>(previous.ptr) + previous.size ==
-                        slice.ptr) {
-                        previous.size += slice.size;
-                        continue;
-                    }
-                }
-                result.push_back(slice);
-            }
-            return result;
-        }
-    };
-
-    tl::expected<std::shared_ptr<ClientBufferAllocator>, ErrorCode>
-    get_nof_staging_pool();
-    tl::expected<std::optional<NofStagedTransfer>, ErrorCode>
-    prepare_nof_staging(const std::vector<Slice> &slices,
-                        const Replica::Descriptor &replica, bool for_write,
-                        nof_staging::CopySession *copy_session = nullptr);
-    tl::expected<void, ErrorCode> restore_nof_staging(
-        const NofStagedTransfer &staging, const std::vector<Slice> &slices,
-        nof_staging::CopySession *copy_session = nullptr);
 
     std::unordered_map<std::string, MountedSegmentRecord>
         mounted_segment_records_;

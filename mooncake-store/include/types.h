@@ -518,12 +518,11 @@ struct NoFSegment {
     std::string name{};  // Logical segment name used for preferred allocation
     uintptr_t base{0};
     size_t size{0};
-    uint32_t block_size{512};
     // TE p2p endpoint (ip:port) for transport-only addressing
     std::string te_endpoint{};
     NoFSegment() = default;
 };
-YLT_REFL(NoFSegment, id, name, base, size, te_endpoint, block_size);
+YLT_REFL(NoFSegment, id, name, base, size, te_endpoint);
 
 /**
  * @brief Client status from the master's perspective

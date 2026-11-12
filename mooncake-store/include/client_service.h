@@ -111,21 +111,6 @@ class Client {
     using WriteBufferStager =
         std::function<tl::expected<std::vector<Slice>, ErrorCode>(
             const std::vector<Slice>&)>;
-    // Prepares one NoF replica from original slices. Other replica types use
-    // the original slices. The caller owns staged storage until BatchPut
-    // returns, after all submitted transfers have completed.
-    using NofWriteBufferStager =
-        std::function<tl::expected<std::vector<Slice>, ErrorCode>(
-            const std::vector<Slice>&, const Replica::Descriptor&)>;
-
-    // Runs on the BatchGet caller thread after one NoF object has been read
-    // successfully and its lease checked. The index refers to object_keys.
-    // Return only after the restored buffers are ready for the caller to use.
-    using NofReadBufferRestorer =
-        std::function<tl::expected<void, ErrorCode>(size_t)>;
-
-    tl::expected<NofIoRequirements, ErrorCode> GetNofIoRequirements(
-        const Replica::Descriptor& replica, size_t logical_size);
 
     const UUID& getClientId() const { return client_id_; }
     const std::string& tenant_id() const { return master_client_.tenant_id(); }
@@ -279,15 +264,6 @@ class Client {
         std::unordered_map<std::string, std::vector<Slice>>& slices,
         bool prefer_same_node = false);
 
-    // NoF reads are restored in completion order, without waiting for other
-    // objects. Callback storage and all transfer buffers must remain alive
-    // until this synchronous call returns. Not supported with prefer_same_node.
-    std::vector<tl::expected<void, ErrorCode>> BatchGet(
-        const std::vector<std::string>& object_keys,
-        const std::vector<QueryResult>& query_results,
-        std::unordered_map<std::string, std::vector<Slice>>& slices,
-        bool prefer_same_node, const NofReadBufferRestorer& nof_restorer);
-
     /**
      * @brief Stores data with replication
      * @param key Object key
@@ -365,24 +341,6 @@ class Client {
         const std::vector<std::vector<Slice>>& slices,
         const std::vector<std::vector<uint64_t>>& dst_offsets,
         TransferIntent intent = TransferIntent::kUnspecified);
-
-    /**
-     * @brief Batch put with optional NoF-specific staging.
-     *
-     * @param keys Object keys matching batched_slices.
-     * @param batched_slices Source slices for each key.
-     * @param config Replication configuration, preserved by this overload.
-     * @param nof_stager Optional per-NoF-replica staging from original slices.
-     * @return Per-key results using the existing replica success policy.
-     *
-     * NoF staging failures affect only that replica. Callback storage must
-     * remain alive until this synchronous operation returns.
-     */
-    std::vector<tl::expected<void, ErrorCode>> BatchPut(
-        const std::vector<ObjectKey>& keys,
-        std::vector<std::vector<Slice>>& batched_slices,
-        const ReplicateConfig& config, const WriteBufferStager& stager,
-        const NofWriteBufferStager& nof_stager);
 
     /**
      * @brief Upserts data: inserts if key doesn't exist, updates if it does
@@ -1071,8 +1029,7 @@ class Client {
     void ComputeBatchObjectChecksums(std::vector<PutOperation>& ops);
     void StageWriteBuffersForRemoteReplicas(std::vector<PutOperation>& ops,
                                             const WriteBufferStager& stager);
-    void SubmitTransfers(std::vector<PutOperation>& ops,
-                         const NofWriteBufferStager& nof_stager = {});
+    void SubmitTransfers(std::vector<PutOperation>& ops);
     void WaitForTransfers(std::vector<PutOperation>& ops);
     void SubmitDfsWrites(std::vector<PutOperation>& ops);
     void FinalizeBatchPut(std::vector<PutOperation>& ops);

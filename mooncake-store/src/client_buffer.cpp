@@ -53,8 +53,7 @@ ClientBufferAllocator::ClientBufferAllocator(
 #endif
         {
             buffer_ = allocate_buffer_allocator_memory(
-                size, protocol, alignment, dma_allocator_.get(),
-                &is_spdk_host_dma_);
+                size, protocol, alignment, dma_allocator_.get());
         }
     }
     if (!buffer_) {
@@ -152,7 +151,7 @@ uint64_t calculate_total_size(const Replica::Descriptor& replica) {
     } else if (replica.is_dfs_replica()) {
         total_length = replica.get_dfs_descriptor().object_size;
     } else if (replica.is_nof_replica()) {
-        total_length = replica.get_nof_descriptor().logical_size();
+        total_length = replica.get_nof_descriptor().buffer_descriptor.size_;
     } else {
         total_length = replica.get_memory_descriptor().buffer_descriptor.size_;
     }
@@ -178,9 +177,9 @@ int allocateSlices(std::vector<Slice>& slices,
         slices.emplace_back(
             Slice{buffer_ptr, replica.get_dfs_descriptor().object_size});
     } else if (replica.is_nof_replica()) {
-        const auto& descriptor = replica.get_nof_descriptor();
+        auto& handle = replica.get_nof_descriptor().buffer_descriptor;
         void* chunk_ptr = buffer_ptr;
-        slices.emplace_back(Slice{chunk_ptr, descriptor.logical_size()});
+        slices.emplace_back(Slice{chunk_ptr, handle.size_});
     } else {
         // For memory-based replica, split into slices based on buffer
         // descriptors

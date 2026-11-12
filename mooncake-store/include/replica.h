@@ -287,8 +287,6 @@ struct MemoryReplicaData {
 
 struct NoFReplicaData {
     std::unique_ptr<AllocatedBuffer> buffer;
-    uint64_t object_size{0};
-    uint32_t block_size{0};
 };
 
 struct DiskReplicaData {
@@ -330,15 +328,7 @@ struct MemoryDescriptor {
 
 struct NoFDescriptor {
     AllocatedBuffer::Descriptor buffer_descriptor;
-    uint64_t object_size{0};
-    uint32_t block_size{0};
-    YLT_REFL(NoFDescriptor, buffer_descriptor, object_size, block_size);
-
-    [[nodiscard]] uint64_t logical_size() const noexcept {
-        // Descriptors created before logical-size metadata was introduced use
-        // the physical allocation size as their object size.
-        return object_size == 0 ? buffer_descriptor.size_ : object_size;
-    }
+    YLT_REFL(NoFDescriptor, buffer_descriptor);
 };
 
 struct DiskDescriptor {
@@ -547,17 +537,6 @@ class Replica {
 
     [[nodiscard]] DistributedFSDescriptor& get_dfs_descriptor() {
         return std::get<DfsReplicaData>(data_).descriptor;
-    }
-
-    void set_nof_metadata(uint64_t object_size, uint32_t block_size) {
-        if (!is_nof_replica()) {
-            LOG(ERROR) << "Cannot set NoF metadata on non-NoF replica";
-            return;
-        }
-
-        auto& nof_data = std::get<NoFReplicaData>(data_);
-        nof_data.object_size = object_size;
-        nof_data.block_size = block_size;
     }
 
     [[nodiscard]] bool has_invalid_mem_handle() const {
@@ -954,14 +933,10 @@ inline Replica::Descriptor Replica::get_descriptor() const {
         NoFDescriptor nof_desc;
         if (nof_data.buffer) {
             nof_desc.buffer_descriptor = nof_data.buffer->get_descriptor();
-            nof_desc.object_size = nof_data.object_size;
-            nof_desc.block_size = nof_data.block_size;
         } else {
             nof_desc.buffer_descriptor.size_ = 0;
             nof_desc.buffer_descriptor.buffer_address_ = 0;
             nof_desc.buffer_descriptor.transport_endpoint_ = "";
-            nof_desc.object_size = 0;
-            nof_desc.block_size = 0;
             LOG(ERROR) << "Trying to get invalid nof replica descriptor";
         }
         desc.descriptor_variant = std::move(nof_desc);

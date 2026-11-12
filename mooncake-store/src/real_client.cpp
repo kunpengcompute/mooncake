@@ -18,10 +18,6 @@
 #include <limits>
 #include <mutex>
 #include <new>
-#include <cctype>
-#include <climits>
-#include <cstring>
-#include <numeric>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -61,7 +57,6 @@
 #include "device/cuda_ipc_buffer.h"
 #include "shm_helper.h"
 #include "memory_location.h"
-#include "nof_staging_buffer.h"
 #include "nof/nof_runtime.h"
 #include "version.h"
 #include "transport/nvlink_transport/nvlink_host_numa_allocation.h"
@@ -1067,14 +1062,6 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     // Reset the teardown latch so this instance can be torn down again.
     closed_.store(false, std::memory_order_release);
 
-    const auto staging_mode =
-        nof_staging::ParseEnableFlag(std::getenv("MC_STORE_NOF_HOST_STAGING"));
-    if (!staging_mode) {
-        LOG(ERROR) << "MC_STORE_NOF_HOST_STAGING must be 0 or 1";
-        return tl::unexpected(ErrorCode::INVALID_PARAMS);
-    }
-    // Only NoF device-buffer multi-buffer I/O changes; legacy setup is intact.
-    nof_host_staging_ = *staging_mode;
     this->protocol = protocol;
     this->ipc_socket_path_ = ipc_socket_path;
     if (!enable_embedded_master &&
@@ -1627,7 +1614,6 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
             });
     }
     client_requester_ = std::make_shared<ClientRequester>();
-    nof_staging_ready_ = nof_host_staging_;
     const bool should_start_http_server =
         enable_client_http_server || FLAGS_enable_http_server;
     const int selected_http_port =
@@ -1886,12 +1872,6 @@ tl::expected<void, ErrorCode> RealClient::tearDownAll_internal() {
     stop_ipc_server();
     stop_dummy_client_monitor();
     stop_http_server();
-
-    // The caller has stopped new calls and joined every public request,
-    // including registration and post-I/O metrics, before teardown.
-    nof_staging_regions_.Clear();
-    nof_staging_ready_ = false;
-    nof_staging_pool_.reset();
 
     ErrorCode cleanup_error = ErrorCode::OK;
     if (client_) {
@@ -4652,13 +4632,7 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
     // #3131: SPDK's RDMA transport keeps its own translation table, which TE
     // registration does not cover. Register the same (possibly widened) range
     // as TE; failure is non-fatal (same policy as the shm paths).
-    // Device buffers are registered with TE and copied through Host staging;
-    // they must not enter SPDK's Host-page registration table.
-    const bool staged_device =
-        nof_host_staging_ && device::GetAcceleratorRegistry()
-                                 .RuntimeAccelerators()
-                                 .FindDeviceForPointer(buffer);
-    if (nof_runtime_.initiator && !staged_device) {
+    if (nof_runtime_.initiator) {
         auto rc =
             nof_runtime_.initiator->RegisterMemory(buffer, registration_size);
         if (rc == ErrorCode::NOF_REGISTRATION_STUCK) {
@@ -4684,12 +4658,6 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
         // The record keeps the logical size: writable-region resolution must
         // not expose the physical segment beyond what the caller registered.
         registered_buffer_sizes_[buffer] = {size};
-    }
-    if (nof_host_staging_) {
-        if (const auto device = nof_staging::DetectDeviceRange(buffer, size)) {
-            // Cache only; a failed insertion must not change TE registration.
-            nof_staging_regions_.Insert(buffer, size, *device);
-        }
     }
     return result;
 }
@@ -4745,7 +4713,6 @@ tl::expected<void, ErrorCode> RealClient::unregister_buffer_internal(
     }
     if (rec_it != registered_buffer_sizes_.end()) {
         registered_buffer_sizes_.erase(rec_it);
-        if (nof_host_staging_) nof_staging_regions_.Erase(buffer);
     }
     return {};
 }
@@ -8178,54 +8145,9 @@ RealClient::batch_put_from_multi_buffers_internal(
     const std::vector<std::vector<void *>> &all_buffers,
     const std::vector<std::vector<size_t>> &all_sizes,
     const ReplicateConfig &config, bool stage_nonlocal) {
-    if (!client_) {
-        return std::vector<tl::expected<void, ErrorCode>>(
-            keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
-    }
-    auto batched_slices =
-        BuildNestedSlicesFromBuffers(keys, all_buffers, all_sizes);
-    if (!batched_slices) {
-        return std::vector<tl::expected<void, ErrorCode>>(
-            keys.size(), tl::unexpected(batched_slices.error()));
-    }
-
-    // Owners outlive BatchPut, including all NoF futures and PutEnd/Revoke.
-    std::vector<NofStagedTransfer> staging_owners;
-    // Created lazily by device copies, reused across this batch, and closed
-    // before staging owners are released, including exception unwinding.
-    nof_staging::CopySession copy_session;
-    Client::NofWriteBufferStager nof_stager;
-    if (nof_host_staging_) {
-        nof_stager = [&](const std::vector<Slice> &slices,
-                         const Replica::Descriptor &replica)
-            -> tl::expected<std::vector<Slice>, ErrorCode> {
-            auto prepared =
-                prepare_nof_staging(slices, replica, true, &copy_session);
-            if (!prepared) return tl::unexpected(prepared.error());
-            if (!prepared->has_value()) return slices;
-            auto &staged = prepared->value();
-            auto host_slices = staged.io_slices();
-            staging_owners.emplace_back(std::move(staged));
-            return host_slices;
-        };
-    }
-    std::vector<BufferHandle> remote_staging_handles;
-    Client::WriteBufferStager stager;
-    if (stage_nonlocal) {
-        stager = [&](const std::vector<Slice> &slices) {
-            return StageWriteSlices(client_buffer_allocator_, slices,
-                                    remote_staging_handles);
-        };
-    }
-    auto results =
-        client_->BatchPut(keys, *batched_slices, config, stager, nof_stager);
-    if (!copy_session.Finish()) {
-        // Each D2H already completed before submission, and BatchPut has
-        // finalized these writes. Report idle-stream cleanup separately;
-        // retrying committed writes as transfer failures would be misleading.
-        LOG(ERROR) << "Failed to close NoF batch write copy streams";
-    }
-    return results;
+    return BatchWriteFromMultiBuffers(client_, keys, all_buffers, all_sizes,
+                                      config, client_buffer_allocator_,
+                                      stage_nonlocal, &Client::BatchPut);
 }
 
 std::vector<int> RealClient::batch_get_into_multi_buffers(
@@ -8296,13 +8218,7 @@ RealClient::batch_get_into_multi_buffers_internal(
         QueryResult query_result;
         std::vector<Slice> slices;
         uint64_t total_size;
-        std::optional<NofStagedTransfer> staging;
     };
-
-    // Built lazily only for staged NoF reads. The lower BatchGet slice map is
-    // keyed by object name and cannot represent two different scratch buffers
-    // for duplicate keys; unrelated legacy reads keep their existing behavior.
-    std::unordered_map<std::string, size_t> staged_key_counts;
 
     struct DiskKeyInfo {
         std::string key;
@@ -8330,10 +8246,6 @@ RealClient::batch_get_into_multi_buffers_internal(
     std::unordered_map<std::string, DiskKeyInfo> valid_local_disk_ops;
     std::vector<DuplicateDiskOp> duplicate_disk_ops;
     valid_operations.reserve(num_keys);
-    if (query_results.size() != num_keys) {
-        return std::vector<tl::expected<int64_t, ErrorCode>>(
-            num_keys, tl::unexpected(ErrorCode::INTERNAL_ERROR));
-    }
     auto local_endpoints = client_->GetLocalEndpoints();
     for (size_t i = 0; i < num_keys; ++i) {
         const auto &key = keys[i];
@@ -8367,10 +8279,6 @@ RealClient::batch_get_into_multi_buffers_internal(
         const auto replica = *best_replica;
         uint64_t total_size = calculate_total_size(replica);
         const auto &sizes = all_sizes[i];
-        if (all_buffers[i].size() != sizes.size()) {
-            results.emplace_back(tl::unexpected(ErrorCode::INVALID_PARAMS));
-            continue;
-        }
         uint64_t dst_total_size = 0;
         for (auto &size : sizes) {
             dst_total_size += size;
@@ -8426,64 +8334,14 @@ RealClient::batch_get_into_multi_buffers_internal(
             continue;
         }
 
-        std::optional<NofStagedTransfer> staging;
-        if (nof_host_staging_ && replica.is_nof_replica()) {
-            tl::expected<std::optional<NofStagedTransfer>, ErrorCode> prepared =
-                tl::unexpected(ErrorCode::INTERNAL_ERROR);
-            try {
-                prepared = prepare_nof_staging(key_slices, replica, false);
-            } catch (const std::bad_alloc &) {
-                prepared = tl::unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
-            } catch (const std::exception &error) {
-                LOG(ERROR) << "NoF read staging failed for key " << key << ": "
-                           << error.what();
-            }
-            if (!prepared) {
-                results.emplace_back(tl::unexpected(prepared.error()));
-                continue;
-            }
-            staging = std::move(*prepared);
-            if (staging) {
-                if (staged_key_counts.empty()) {
-                    for (const auto &input_key : keys) {
-                        ++staged_key_counts[input_key];
-                    }
-                }
-                if (staged_key_counts.at(key) != 1) {
-                    results.emplace_back(
-                        tl::unexpected(ErrorCode::INVALID_PARAMS));
-                    continue;
-                }
-            }
-        }
         valid_operations.push_back(
             {.key = key,
              .original_index = i,
              .query_result = FilterQueryResult(query_result_values, replica),
              .slices = std::move(key_slices),
-             .total_size = total_size,
-             .staging = std::move(staging)});
+             .total_size = total_size});
         // Set success result (actual bytes transferred)
         results.emplace_back(static_cast<int64_t>(total_size));
-    }
-    // NoF namespace discovery and pool allocation can take time. Do not submit
-    // a staged read using an already expired descriptor.
-    const auto expired_staged_read = [](const ValidKeyInfo &op) {
-        return op.staging && op.query_result.IsLeaseExpired();
-    };
-    if (std::any_of(valid_operations.begin(), valid_operations.end(),
-                    expired_staged_read)) {
-        std::vector<ValidKeyInfo> live_operations;
-        live_operations.reserve(valid_operations.size());
-        for (auto &op : valid_operations) {
-            if (expired_staged_read(op)) {
-                results[op.original_index] =
-                    tl::unexpected(ErrorCode::LEASE_EXPIRED);
-            } else {
-                live_operations.emplace_back(std::move(op));
-            }
-        }
-        valid_operations.swap(live_operations);
     }
     // Early return if no valid operations
     if (valid_operations.empty() && valid_local_disk_ops.empty()) {
@@ -8505,47 +8363,13 @@ RealClient::batch_get_into_multi_buffers_internal(
             const auto &op = valid_operations[op_idx];
             batch_keys.push_back(op.key);
             batch_query_results.push_back(op.query_result);
-            batch_slices[op.key] =
-                op.staging ? op.staging->io_slices() : op.slices;
+            batch_slices[op.key] = op.slices;
         }
 
-        nof_staging::CopySession copy_session;
-        Client::NofReadBufferRestorer nof_restorer;
-        if (std::any_of(valid_operations.begin(), valid_operations.end(),
-                        [](const ValidKeyInfo &op) {
-                            return op.staging.has_value();
-                        })) {
-            // BatchGet invokes this on the caller thread as each NoF object
-            // finishes, after checking its lease. Owners remain alive until
-            // all I/O and H2D copies finish, including exception unwinding.
-            nof_restorer = [&](size_t index) -> tl::expected<void, ErrorCode> {
-                const auto &op = valid_operations.at(dedup.primaries.at(index));
-                if (!op.staging) return {};
-                return restore_nof_staging(*op.staging, op.slices,
-                                           &copy_session);
-            };
-        }
         auto batch_get_results =
             client_->BatchGet(batch_keys, batch_query_results, batch_slices,
-                              prefer_alloc_in_same_node, nof_restorer);
+                              prefer_alloc_in_same_node);
 
-        if (!copy_session.Finish()) {
-            LOG(ERROR) << "Failed to close NoF batch read copy streams";
-            for (size_t i = 0;
-                 i < batch_get_results.size() && i < dedup.primaries.size();
-                 ++i) {
-                if (valid_operations[dedup.primaries[i]].staging &&
-                    batch_get_results[i]) {
-                    batch_get_results[i] =
-                        tl::unexpected(ErrorCode::TRANSFER_FAIL);
-                }
-            }
-        }
-
-        if (batch_get_results.size() != dedup.primaries.size()) {
-            batch_get_results.assign(dedup.primaries.size(),
-                                     tl::unexpected(ErrorCode::INTERNAL_ERROR));
-        }
         for (size_t j = 0; j < batch_get_results.size(); ++j) {
             const auto &op = valid_operations[dedup.primaries[j]];
             if (!batch_get_results[j]) {

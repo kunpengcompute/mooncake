@@ -14,7 +14,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include <ylt/util/tl/expected.hpp>
 
 #include "transfer_engine.h"
 #include "types.h"
@@ -22,23 +21,8 @@
 #include "storage_backend.h"
 #include "client_metric.h"
 #include "nof/nvmeof_initiator.h"
-#include "nof_read_completion.h"
 
 namespace mooncake {
-
-// Requirements for a host staging transfer to a live NoF namespace.
-// Logical sizes may be unaligned; the submit path supplies tail padding.
-bool BuildNofLogicalSlices(const std::vector<Slice>& input,
-                           uint64_t logical_size, std::vector<Slice>* output);
-bool LocateNofSglOffset(const std::vector<Slice>& slices,
-                        uint64_t absolute_offset, size_t* slice_index,
-                        size_t* slice_offset);
-
-struct NofIoRequirements {
-    size_t block_size;
-    size_t buffer_alignment;
-    NofSegmentHandle* segment;  // Borrowed from the client-owned initiator.
-};
 
 /**
  * @brief Transfer strategy enumeration
@@ -197,17 +181,6 @@ class MemcpyOperationState : public OperationState {
  */
 class NofOperationState : public OperationState {
    public:
-    void SetCompletionQueue(std::shared_ptr<NofReadCompletionQueue> queue,
-                            size_t index) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        assert(!completion_queue_);
-        completion_queue_ = std::move(queue);
-        completion_index_ = index;
-        // I/O may finish before BatchGet registers the notification. Serialize
-        // registration with set_completed so exactly one side publishes it.
-        if (result_) completion_queue_->Push(completion_index_, completed_at_);
-    }
-
     bool is_completed() override {
         std::lock_guard<std::mutex> lock(mutex_);
         return result_.has_value();
@@ -219,10 +192,6 @@ class NofOperationState : public OperationState {
             assert(!result_.has_value());
             result_.emplace(error_code);
             error_detail_ = std::move(error_detail);
-            completed_at_ = std::chrono::steady_clock::now();
-            if (completion_queue_) {
-                completion_queue_->Push(completion_index_, completed_at_);
-            }
         }
         cv_.notify_all();
     }
@@ -245,9 +214,6 @@ class NofOperationState : public OperationState {
 
    private:
     std::string error_detail_;
-    std::shared_ptr<NofReadCompletionQueue> completion_queue_;
-    size_t completion_index_ = 0;
-    std::chrono::steady_clock::time_point completed_at_;
 };
 
 class FilereadOperationState : public OperationState {
@@ -326,24 +292,18 @@ class TransferEngineOperationState : public OperationState {
 class TransferFuture {
    public:
     explicit TransferFuture(std::shared_ptr<OperationState> state);
-    ~TransferFuture() noexcept;
 
     // Non-copyable but movable
     TransferFuture(const TransferFuture&) = delete;
     TransferFuture& operator=(const TransferFuture&) = delete;
-    TransferFuture(TransferFuture&&) noexcept = default;
-    TransferFuture& operator=(TransferFuture&& other) noexcept;
+    TransferFuture(TransferFuture&&) = default;
+    TransferFuture& operator=(TransferFuture&&) = default;
 
     /**
      * @brief Check if the operation has completed (non-blocking)
      * @return true if the operation is finished, false otherwise
      */
     bool isReady() const;
-
-    // Register one completion notification for a NoF operation. The queue is
-    // kept alive by the operation state, including during exception unwinding.
-    void notifyNofCompletion(std::shared_ptr<NofReadCompletionQueue> queue,
-                             size_t index);
 
     /**
      * @brief Wait for the operation to complete (blocking)
@@ -364,7 +324,6 @@ class TransferFuture {
     TransferStrategy strategy() const;
 
    private:
-    void drainNofOperation() noexcept;
     std::shared_ptr<OperationState> state_;
 };
 
@@ -462,8 +421,6 @@ struct NofMetric;
 struct NofTask {
     NofSegmentHandle* seg_handle;
     void* ptr;
-    std::vector<Slice> slices;
-    std::shared_ptr<void> padding_owner;
     uint64_t byte_offset;
     uint64_t byte_length;
     uint64_t remaining_bytes;
@@ -507,12 +464,7 @@ struct NofTask {
 struct NofSubTask {
     // Embedded adaptor keeps the steady-state submit/completion path free of
     // per-sub-IO heap allocation.
-    NofSglIOAdaptor adaptor;
-    uint64_t payload_byte_offset = 0;
-    uint32_t payload_byte_length = 0;
-    size_t sgl_index = 0;
-    size_t sgl_offset = 0;
-    uint32_t sgl_remaining = 0;
+    NofIOAdaptor adaptor;
     NofTask* task;
     uint32_t submit_bytes;
     std::stack<NofSubTask*>* sub_task_pool;
@@ -674,9 +626,6 @@ class TransferSubmitter {
         TransferRequest::OpCode op_code, void* ptr = nullptr, size_t size = 0,
         TransferIntent intent = TransferIntent::kUnspecified);
 
-    tl::expected<NofIoRequirements, ErrorCode> GetNofIoRequirements(
-        const Replica::Descriptor& replica, size_t logical_size);
-
     /**
      * @brief Submit a range read: read [src_offset, src_offset+size) from
      * object into slice.ptr. Slices must total exactly `size` bytes.
@@ -774,10 +723,6 @@ class TransferSubmitter {
     /**
      * @brief Submit NoF (NVMe-oF) operation asynchronously
      */
-    std::optional<TransferFuture> submitNofOperation(
-        const Replica::Descriptor& replica, const std::vector<Slice>& slices,
-        TransferRequest::OpCode op_code);
-
     std::optional<TransferFuture> submitNofOperation(
         const AllocatedBuffer::Descriptor& handle, void* ptr, size_t size,
         const TransferRequest::OpCode op_code);

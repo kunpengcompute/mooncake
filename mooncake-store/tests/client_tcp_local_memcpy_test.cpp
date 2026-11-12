@@ -1,45 +1,23 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 
-#include <algorithm>
-#include <cerrno>
 #include <chrono>
-#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
-#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
-#include <acl/acl.h>
-#endif
-
 #include "allocator.h"
 #include "client_service.h"
-#include "master_client.h"
-#include "real_client.h"
 #include "test_server_helpers.h"
 #include "types.h"
 #include "common/client_buffer_allocation.h"
 #include "common/network.h"
 
 namespace mooncake {
-
-struct NofStagingTestPeer {
-    static void ExpectZeroPools(RealClient& client, const char* stage) {
-        SCOPED_TRACE(stage);
-        std::lock_guard<std::mutex> lock(client.nof_staging_pool_mutex_);
-        ASSERT_NE(client.client_buffer_allocator_, nullptr);
-        EXPECT_EQ(client.client_buffer_allocator_->size(), 0u);
-        EXPECT_EQ(client.client_buffer_allocator_->getBase(), nullptr);
-        EXPECT_EQ(client.nof_staging_pool_, nullptr);
-    }
-};
-
 namespace testing {
 
 enum class HandshakeMode { P2P, Metadata };
@@ -181,63 +159,11 @@ class TcpLocalMemcpyAutoEnableTest : public ::testing::Test {
     static void SetUpTestSuite() {
         google::InitGoogleLogging("TcpLocalMemcpyAutoEnableTest");
         FLAGS_logtostderr = 1;
-#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
-        const char* value = std::getenv("MC_TEST_ASCEND_DEVICE");
-        ASSERT_NE(value, nullptr)
-            << "Set MC_TEST_ASCEND_DEVICE to the NPU logical device ID for "
-               "this Ascend-enabled test binary";
-        const std::string device(value);
-        ASSERT_FALSE(device.empty());
-        ASSERT_EQ(device.find_first_not_of("0123456789"), std::string::npos)
-            << "MC_TEST_ASCEND_DEVICE must be a nonnegative integer";
-        errno = 0;
-        const long device_id = std::strtol(value, nullptr, 10);
-        ASSERT_EQ(errno, 0);
-        ASSERT_LE(device_id, INT_MAX);
-
-        const auto init_result = aclInit(nullptr);
-        ASSERT_TRUE(init_result == ACL_SUCCESS ||
-                    init_result == ACL_ERROR_REPEAT_INITIALIZE)
-            << "aclInit failed: " << init_result;
-        owns_acl_ = init_result == ACL_SUCCESS;
-        aclrtContext previous_context = nullptr;
-        const auto context_result = aclrtGetCurrentContext(&previous_context);
-        ASSERT_TRUE(context_result == ACL_SUCCESS ||
-                    context_result == ACL_ERROR_RT_CONTEXT_NULL)
-            << "aclrtGetCurrentContext failed: " << context_result;
-        if (context_result == ACL_SUCCESS) {
-            previous_context_ = previous_context;
-        }
-        ASSERT_EQ(
-            aclrtCreateContext(&test_context_, static_cast<int32_t>(device_id)),
-            ACL_SUCCESS);
-        ASSERT_NE(test_context_, nullptr);
-#endif
     }
 
-    static void TearDownTestSuite() {
-#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
-        if (test_context_) {
-            EXPECT_EQ(aclrtDestroyContext(test_context_), ACL_SUCCESS);
-            test_context_ = nullptr;
-        }
-        if (previous_context_) {
-            EXPECT_EQ(aclrtSetCurrentContext(previous_context_), ACL_SUCCESS);
-            previous_context_ = nullptr;
-        }
-        if (owns_acl_) {
-            EXPECT_EQ(aclFinalize(), ACL_SUCCESS);
-            owns_acl_ = false;
-        }
-#endif
-        google::ShutdownGoogleLogging();
-    }
+    static void TearDownTestSuite() { google::ShutdownGoogleLogging(); }
 
     void SetUp() override {
-#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
-        ASSERT_NE(test_context_, nullptr);
-        ASSERT_EQ(aclrtSetCurrentContext(test_context_), ACL_SUCCESS);
-#endif
         memcpy_guard_ = std::make_unique<EnvGuard>("MC_STORE_MEMCPY");
         vlog_guard_ = std::make_unique<VLogGuard>(1);
         unsetenv("MC_STORE_MEMCPY");
@@ -367,204 +293,10 @@ class TcpLocalMemcpyAutoEnableTest : public ::testing::Test {
     ClientRuntime remote_runtime_;
     std::unique_ptr<EnvGuard> memcpy_guard_;
     std::unique_ptr<VLogGuard> vlog_guard_;
-#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
-    inline static bool owns_acl_ = false;
-    inline static aclrtContext previous_context_ = nullptr;
-    inline static aclrtContext test_context_ = nullptr;
-#endif
 };
 
-TEST(NofHostStagingSetupTest, RejectsNonBinaryModeBeforeConnecting) {
-    EnvGuard staging_guard("MC_STORE_NOF_HOST_STAGING");
-    setenv("MC_STORE_NOF_HOST_STAGING", "true", 1);
-    RealClient client;
-    EXPECT_EQ(
-        client.setup_real("127.0.0.1:19093", "P2PHANDSHAKE", 0, 4096, "tcp"),
-        toInt(ErrorCode::INVALID_PARAMS));
-}
-
-TEST_F(TcpLocalMemcpyAutoEnableTest,
-       ZeroPoolMemoryDoesNotCreateNofStagingPool) {
-    EnvGuard staging_guard("MC_STORE_NOF_HOST_STAGING");
-    EnvGuard replicas_guard("MC_STORE_REPLICA_NUM");
-    EnvGuard nof_replicas_guard("MC_STORE_NOF_REPLICA_NUM");
-    unsetenv("MC_STORE_REPLICA_NUM");
-    unsetenv("MC_STORE_NOF_REPLICA_NUM");
-    setenv("MC_STORE_MEMCPY", "0", 1);
-
-    for (const char* staging : {"0", "1"}) {
-        SCOPED_TRACE(staging);
-        setenv("MC_STORE_NOF_HOST_STAGING", staging, 1);
-        std::vector<char> source(128), target(128, 0);
-        for (size_t i = 0; i < source.size(); ++i)
-            source[i] = static_cast<char>(i);
-        RealClient client;
-        ASSERT_EQ(
-            client.setup_real("127.0.0.1:" + std::to_string(getFreeTcpPort()),
-                              "P2PHANDSHAKE", 16 * 1024 * 1024, 0, "tcp", "",
-                              master_address_),
-            0);
-        ASSERT_EQ(client.is_nof_host_staging(), std::string(staging) == "1");
-        ASSERT_NO_FATAL_FAILURE(
-            NofStagingTestPeer::ExpectZeroPools(client, "setup"));
-        ASSERT_EQ(client.register_buffer(source.data(), source.size()), 0);
-        ASSERT_EQ(client.register_buffer(target.data(), target.size()), 0);
-        ReplicateConfig config;
-        config.prefer_alloc_in_same_node = false;
-        const std::string key = std::string("zero-pool-memory-") + staging;
-        ASSERT_EQ(client.batch_put_from_multi_buffers(
-                      {key}, {{source.data(), source.data() + 64}}, {{64, 64}},
-                      config),
-                  std::vector<int>{0});
-        const auto replicas = client.get_replica_desc(key);
-        ASSERT_EQ(replicas.size(), 1u);
-        ASSERT_TRUE(replicas.front().is_memory_replica());
-        ASSERT_EQ(client.batch_get_into_multi_buffers(
-                      {key}, {{target.data(), target.data() + 32}}, {{32, 96}},
-                      false),
-                  std::vector<int>{128});
-        EXPECT_EQ(target, source);
-        ASSERT_NO_FATAL_FAILURE(
-            NofStagingTestPeer::ExpectZeroPools(client, "round trip"));
-        ASSERT_EQ(client.remove(key, true), 0);
-        ASSERT_EQ(client.unregister_buffer(target.data()), 0);
-        ASSERT_EQ(client.unregister_buffer(source.data()), 0);
-        ASSERT_EQ(client.tearDownAll(), 0);
-    }
-}
-
-TEST_F(TcpLocalMemcpyAutoEnableTest, MemoryOnlyBatchPutDoesNotInvokeNofStager) {
-    EnvGuard memory_replicas("MC_STORE_REPLICA_NUM");
-    EnvGuard nof_replicas("MC_STORE_NOF_REPLICA_NUM");
-    unsetenv("MC_STORE_REPLICA_NUM");
-    unsetenv("MC_STORE_NOF_REPLICA_NUM");
-    // A remote memory replica must also bypass the NoF-specific callback.
-    // Testing only local memcpy could hide an incorrectly placed generic hook.
-    runtime_ = CreateRuntime("127.0.0.1:18000", "P2PHANDSHAKE");
-    remote_runtime_ = CreateRuntime("127.0.0.1:18001", "P2PHANDSHAKE");
-    ASSERT_NE(runtime_.client, nullptr);
-    ASSERT_NE(remote_runtime_.client, nullptr);
-    const std::string payload = "original-memory-payload";
-    void* source = runtime_.io_allocator->allocate(payload.size());
-    ASSERT_NE(source, nullptr);
-    std::memcpy(source, payload.data(), payload.size());
-    std::vector<std::vector<Slice>> slices{{{source, payload.size()}}};
-    ReplicateConfig config;
-    config.replica_num = 1;
-    config.nof_replica_num = 0;
-    config.preferred_segment = remote_runtime_.host_name;
-    bool called = false;
-    Client::NofWriteBufferStager nof_stager = [&](const std::vector<Slice>&,
-                                                  const Replica::Descriptor&)
-        -> tl::expected<std::vector<Slice>, ErrorCode> {
-        called = true;
-        throw std::runtime_error("memory must not need NoF staging");
-    };
-    const std::string key = "memory_bypasses_nof_stager";
-    auto results =
-        runtime_.client->BatchPut({key}, slices, config, {}, nof_stager);
-    ASSERT_EQ(results.size(), 1);
-    ASSERT_TRUE(results[0]);
-    EXPECT_FALSE(called);
-    EXPECT_EQ(slices.front().front().ptr, source);
-    auto query = runtime_.client->Query(key);
-    ASSERT_TRUE(query);
-    ASSERT_EQ(query->replicas.size(), 1);
-    ASSERT_TRUE(query->replicas.front().is_memory_replica());
-    EXPECT_EQ(query->replicas.front().status, ReplicaStatus::COMPLETE);
-    EXPECT_EQ(query->replicas.front()
-                  .get_memory_descriptor()
-                  .buffer_descriptor.transport_endpoint_,
-              remote_runtime_.client->GetTransportEndpoint());
-    void* output = runtime_.io_allocator->allocate(payload.size());
-    ASSERT_NE(output, nullptr);
-    std::vector<Slice> read_slices{{output, payload.size()}};
-    ASSERT_TRUE(runtime_.client->Get(key, *query, read_slices));
-    EXPECT_EQ(std::memcmp(output, payload.data(), payload.size()), 0);
-    runtime_.io_allocator->deallocate(output, payload.size());
-    runtime_.io_allocator->deallocate(source, payload.size());
-}
-
-#ifdef USE_NOF
-TEST_F(TcpLocalMemcpyAutoEnableTest,
-       NoFStagingFailuresPreserveMemoryAndRevokeOnlyFailedReplicas) {
-    EnvGuard memory_replicas("MC_STORE_REPLICA_NUM");
-    EnvGuard nof_replicas("MC_STORE_NOF_REPLICA_NUM");
-    unsetenv("MC_STORE_REPLICA_NUM");
-    unsetenv("MC_STORE_NOF_REPLICA_NUM");
-    runtime_ = CreateRuntime("127.0.0.1", "P2PHANDSHAKE");
-    ASSERT_NE(runtime_.client, nullptr);
-    MasterClient registrar(runtime_.client->getClientId());
-    ASSERT_EQ(registrar.Connect(master_address_), ErrorCode::OK);
-    NoFSegment segment;
-    segment.id = generate_uuid();
-    segment.name = "nof_stager_failure_segment";
-    segment.base = 0;
-    segment.size = 16 * 1024 * 1024;
-    segment.block_size = 512;
-    // Metadata allocation is real; callbacks fail before SPDK submission, so
-    // this regression needs no NVMe target or device memory.
-    segment.te_endpoint = "nof_stager_failure_endpoint";
-    ASSERT_TRUE(registrar.MountNoFSegment(segment));
-    std::string payload(512, 'm');
-    ReplicateConfig config;
-    config.replica_num = 1;
-    config.nof_replica_num = 1;
-    const std::vector<ObjectKey> keys = {"nof_error", "nof_exception"};
-    std::vector<std::vector<Slice>> slices(keys.size(),
-                                           {{payload.data(), payload.size()}});
-    size_t calls = 0;
-    Client::NofWriteBufferStager nof_stager =
-        [&](const std::vector<Slice>& source,
-            const Replica::Descriptor& replica)
-        -> tl::expected<std::vector<Slice>, ErrorCode> {
-        EXPECT_TRUE(replica.is_nof_replica());
-        EXPECT_EQ(source.front().ptr, payload.data());
-        if (calls++ == 1) throw std::runtime_error("NoF staging failure");
-        return tl::unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
-    };
-    std::string generic_staging(payload);
-    Client::WriteBufferStager remote_stager = [&](const std::vector<Slice>&) {
-        return tl::expected<std::vector<Slice>, ErrorCode>(std::vector<Slice>{
-            {generic_staging.data(), generic_staging.size()}});
-    };
-    auto results = runtime_.client->BatchPut(keys, slices, config,
-                                             remote_stager, nof_stager);
-    ASSERT_EQ(results.size(), keys.size());
-    EXPECT_EQ(calls, keys.size());
-    for (size_t i = 0; i < keys.size(); ++i) {
-        ASSERT_TRUE(results[i]);
-        auto query = runtime_.client->Query(keys[i]);
-        ASSERT_TRUE(query);
-        ASSERT_EQ(query->replicas.size(), 1);
-        EXPECT_TRUE(query->replicas.front().is_memory_replica());
-        EXPECT_EQ(query->replicas.front().status, ReplicaStatus::COMPLETE);
-        EXPECT_EQ(slices[i].front().ptr, payload.data());
-        std::vector<char> output(payload.size());
-        std::vector<Slice> read_slices{{output.data(), output.size()}};
-        ASSERT_TRUE(runtime_.client->Get(keys[i], *query, read_slices));
-        EXPECT_EQ(std::string(output.begin(), output.end()), payload);
-    }
-
-    config.replica_num = 0;
-    std::vector<std::vector<Slice>> nof_only_slices{
-        {{payload.data(), payload.size()}}};
-    auto failed = runtime_.client->BatchPut(
-        {"nof_only_failure"}, nof_only_slices, config, {}, nof_stager);
-    ASSERT_EQ(failed.size(), 1);
-    ASSERT_FALSE(failed[0]);
-    EXPECT_EQ(failed[0].error(), ErrorCode::NO_AVAILABLE_HANDLE);
-    auto query = runtime_.client->Query("nof_only_failure");
-    ASSERT_FALSE(query);
-    EXPECT_EQ(query.error(), ErrorCode::OBJECT_NOT_FOUND);
-    EXPECT_TRUE(registrar.UnmountNoFSegment(segment.id));
-}
-
-#endif
-
 TEST_F(TcpLocalMemcpyAutoEnableTest, P2PLocalReplicaUsesLocalMemcpy) {
-    setenv("MC_STORE_MEMCPY", "1", 1);
-    runtime_ = CreateRuntime("127.0.0.1", "P2PHANDSHAKE");
+    runtime_ = CreateRuntime("localhost", "P2PHANDSHAKE");
     ASSERT_TRUE(runtime_.client != nullptr);
 
     auto prepared =
@@ -594,8 +326,7 @@ TEST_F(TcpLocalMemcpyAutoEnableTest, P2PLocalReplicaUsesLocalMemcpy) {
 }
 
 TEST_F(TcpLocalMemcpyAutoEnableTest, MetadataLocalReplicaUsesLocalMemcpy) {
-    setenv("MC_STORE_MEMCPY", "1", 1);
-    runtime_ = CreateRuntime("127.0.0.1", metadata_url_);
+    runtime_ = CreateRuntime("localhost", metadata_url_);
     ASSERT_TRUE(runtime_.client != nullptr);
 
     auto prepared =

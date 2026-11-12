@@ -310,6 +310,8 @@ class PyClient {
     };
 
     virtual ~PyClient() = 0;
+
+    virtual bool is_nof_host_staging() const { return false; }
     virtual int setup_real(
         const std::string &local_hostname, const std::string &metadata_server,
         size_t global_segment_size, size_t local_buffer_size,

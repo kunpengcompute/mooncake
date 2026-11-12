@@ -5,15 +5,20 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <cstring>
-#include <thread>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
+#ifdef USE_NOF
+#include "client_service.h"
+#include "embedded_master.h"
+#endif
 #include "nof/nof_runtime.h"
 #include "transfer_task.h"
 
@@ -114,24 +119,27 @@ class VectorMockInitiator : public MockInitiator {
                   const std::vector<NofBuffer>& buffers, uint64_t byte_offset,
                   uint64_t byte_length, NofIOOp op, NofIOAdaptor* adaptor,
                   size_t buffer_offset) override {
-        ++vector_calls;
-        if (fail_submit_) return -ENOMEM;
         NofSglCursor cursor;
         cursor.buffers = buffers;
         cursor.start = buffer_offset;
         cursor.length = byte_length;
         cursor.Reset(0);
-        size_t copied = 0;
-        while (copied < byte_length) {
-            void* address = nullptr;
-            uint32_t length = 0;
-            if (cursor.Next(&address, &length) != 0) return -EINVAL;
-            std::memcpy(received.data() + byte_offset + copied, address,
-                        length);
-            copied += length;
-        }
-        return SubmitIO(handle, nullptr, byte_offset, byte_length, op, adaptor);
+        return SubmitVector(handle, byte_offset, byte_length, op, adaptor,
+                            [&](void** addr, uint32_t* len) {
+                                return cursor.Next(addr, len);
+                            });
     }
+
+    int SubmitIOV(NofSegmentHandle* handle, uint64_t byte_offset,
+                  uint64_t byte_length, NofIOOp op,
+                  NofSglIOAdaptor* adaptor) override {
+        adaptor->reset(adaptor->ctx, 0);
+        return SubmitVector(handle, byte_offset, byte_length, op, adaptor,
+                            [&](void** addr, uint32_t* len) {
+                                return adaptor->next(adaptor->ctx, addr, len);
+                            });
+    }
+
     NofCapabilities GetCapabilities() const override {
         NofCapabilities caps;
         caps.supports_sgl = true;
@@ -139,7 +147,91 @@ class VectorMockInitiator : public MockInitiator {
     }
     std::vector<uint8_t> received;
     size_t vector_calls{0};
+
+   private:
+    template <typename Next>
+    int SubmitVector(NofSegmentHandle* handle, uint64_t byte_offset,
+                     uint64_t byte_length, NofIOOp op, NofIOAdaptor* adaptor,
+                     Next next) {
+        ++vector_calls;
+        if (fail_submit_) return -ENOMEM;
+        if (byte_offset > received.size() ||
+            byte_length > received.size() - byte_offset) {
+            return -EINVAL;
+        }
+        size_t copied = 0;
+        while (copied < byte_length) {
+            void* address = nullptr;
+            uint32_t length = 0;
+            if (next(&address, &length) != 0 || length == 0 ||
+                length > byte_length - copied) {
+                return -EINVAL;
+            }
+            auto* stored = received.data() + byte_offset + copied;
+            if (op == NofIOOp::kRead) {
+                std::memcpy(address, stored, length);
+            } else {
+                std::memcpy(stored, address, length);
+            }
+            copied += length;
+        }
+        return SubmitIO(handle, nullptr, byte_offset, byte_length, op, adaptor);
+    }
 };
+
+#ifdef USE_NOF
+TEST(NofClientTest, BatchPutAndGetWithDiscontiguousSlices) {
+    EmbeddedMaster master;
+    ASSERT_TRUE(master.Start(InProcMasterConfigBuilder().build()));
+
+    NoFSegment segment;
+    segment.id = generate_uuid();
+    segment.name = "mock-ssd";
+    segment.base = 0;
+    segment.size = 16 * 1024 * 1024;
+    segment.te_endpoint = "mock-nof-endpoint";
+    ASSERT_TRUE(
+        master.service()->MountNoFSegment(segment, generate_uuid()).has_value());
+
+    auto initiator = std::make_shared<VectorMockInitiator>();
+    initiator->received.resize(segment.size);
+    auto client = Client::Create("127.0.0.1", "P2PHANDSHAKE", "tcp",
+                                 std::nullopt, master.master_address(),
+                                 nullptr, {}, "default", initiator);
+    ASSERT_TRUE(client.has_value());
+
+    // An object spans two buffers, with an untouched gap in the middle.
+    constexpr size_t block = 4096;
+    alignas(block) std::array<uint8_t, 3 * block> source{}, destination{};
+    std::fill_n(source.begin(), block, 0x31);
+    std::fill_n(source.begin() + 2 * block, block, 0x72);
+    destination.fill(0xff);
+    const std::vector<std::string> keys{"discontiguous-nof-key"};
+    std::vector<std::vector<Slice>> put_slices{
+        {{source.data(), block}, {source.data() + 2 * block, block}}};
+    ReplicateConfig config;
+    config.replica_num = 0;
+    config.nof_replica_num = 1;
+    config.replica_counts_explicit = true;
+    auto put = (*client)->BatchPut(keys, put_slices, config);
+    ASSERT_EQ(put.size(), 1u);
+    ASSERT_TRUE(put.front().has_value());
+
+    std::unordered_map<std::string, std::vector<Slice>> get_slices{
+        {keys.front(), {{destination.data(), block},
+                        {destination.data() + 2 * block, block}}}};
+    auto get = (*client)->BatchGet(keys, get_slices);
+    ASSERT_EQ(get.size(), 1u);
+    ASSERT_TRUE(get.front().has_value());
+    EXPECT_TRUE(std::equal(source.begin(), source.begin() + block,
+                           destination.begin()));
+    EXPECT_TRUE(std::equal(source.begin() + 2 * block, source.end(),
+                           destination.begin() + 2 * block));
+    EXPECT_TRUE(std::all_of(destination.begin() + block,
+                            destination.begin() + 2 * block,
+                            [](uint8_t byte) { return byte == 0xff; }));
+}
+#endif
 
 TEST(NofWorkerPoolTest, VectorBuffersKeepOffsetsAcrossChunks) {
     auto mock = std::make_shared<VectorMockInitiator>();

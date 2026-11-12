@@ -10,6 +10,7 @@
 #include <cctype>
 #include <chrono>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <limits>
@@ -40,7 +41,8 @@ bool BuildNofLogicalSlices(const std::vector<Slice>& input,
     output->reserve(input.size());
     uint64_t remaining = logical_size;
     for (const auto& slice : input) {
-        if (slice.ptr == nullptr || slice.size == 0) {
+        if (slice.ptr == nullptr || slice.size == 0 ||
+            slice.size > UINTPTR_MAX - reinterpret_cast<uintptr_t>(slice.ptr)) {
             return false;
         }
         const size_t used =
@@ -2287,11 +2289,22 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
     if (!BuildNofLogicalSlices(slices, logical_size, &io_slices))
         return std::nullopt;
     auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
-    if (std::any_of(io_slices.begin(), io_slices.end(), [&](const Slice& slice) {
-            return runtime.FindDeviceForPointer(slice.ptr) != nullptr;
-        })) {
-        return submitNofOperation(handle, nullptr, logical_size, op_code,
-                                  &io_slices);
+    const auto is_device = [&](const Slice& slice) {
+        return runtime.FindDeviceForPointer(slice.ptr) != nullptr;
+    };
+    if (std::any_of(io_slices.begin(), io_slices.end(), is_device)) {
+        if (!std::all_of(io_slices.begin(), io_slices.end(), is_device))
+            return std::nullopt;
+        auto next = reinterpret_cast<uintptr_t>(io_slices.front().ptr);
+        for (const auto& slice : io_slices) {
+            if (reinterpret_cast<uintptr_t>(slice.ptr) != next) {
+                return submitNofOperation(handle, nullptr, logical_size,
+                                          op_code, &io_slices);
+            }
+            next += slice.size;
+        }
+        return submitNofOperation(handle, io_slices.front().ptr, logical_size,
+                                  op_code);
     }
     const auto caps = nof_initiator_->GetCapabilities();
     // Preserve the contiguous path for backends without SGL support.
@@ -2380,10 +2393,18 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
     }
 
     if (slices) {
-        if (!caps.supports_sgl) return std::nullopt;
-        for (const auto& slice : *slices)
-            if (reinterpret_cast<uintptr_t>(slice.ptr) % ptr_alignment)
+        if (!caps.supports_sgl) {
+            LOG(ERROR) << "NoF backend does not support vector I/O";
+            return std::nullopt;
+        }
+        for (const auto& slice : *slices) {
+            if (reinterpret_cast<uintptr_t>(slice.ptr) % ptr_alignment) {
+                LOG(ERROR) << "NoF slice address " << slice.ptr
+                           << " is not aligned to " << ptr_alignment
+                           << " bytes";
                 return std::nullopt;
+            }
+        }
     }
     const NofIOOp op =
         (op_code == TransferRequest::READ) ? NofIOOp::kRead : NofIOOp::kWrite;

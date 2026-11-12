@@ -70,6 +70,62 @@ std::optional<size_t> GetTransportRegistrationLimit(
 
 namespace {
 
+#ifdef USE_NOF
+bool ParseEnvSize(const char* name, size_t* out) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+
+    char* end_ptr = nullptr;
+    errno = 0;
+    unsigned long long parsed = std::strtoull(value, &end_ptr, 10);
+    if (errno != 0 || end_ptr == value ||
+        (end_ptr != nullptr && *end_ptr != '\0') ||
+        parsed > std::numeric_limits<size_t>::max()) {
+        LOG(WARNING) << "Invalid " << name << "=" << value
+                     << ", ignoring store replica override";
+        return false;
+    }
+
+    *out = static_cast<size_t>(parsed);
+    return true;
+}
+
+ReplicateConfig ApplyStoreReplicaOverrideFromEnv(
+    const ReplicateConfig& config) {
+    ReplicateConfig resolved = config;
+
+    if (config.replica_num != 1 || config.nof_replica_num != 0 ||
+        config.dfs_replica_num != 0) {
+        return resolved;
+    }
+
+    size_t replica_num = resolved.replica_num;
+    size_t nof_replica_num = resolved.nof_replica_num;
+    bool has_replica_override =
+        ParseEnvSize("MC_STORE_REPLICA_NUM", &replica_num);
+    bool has_nof_override =
+        ParseEnvSize("MC_STORE_NOF_REPLICA_NUM", &nof_replica_num);
+
+    if (!has_replica_override && !has_nof_override) {
+        return resolved;
+    }
+
+    if (replica_num == 0 && nof_replica_num == 0) {
+        LOG(WARNING) << "Ignoring invalid store replica override: "
+                     << "MC_STORE_REPLICA_NUM=" << replica_num
+                     << ", MC_STORE_NOF_REPLICA_NUM=" << nof_replica_num
+                     << ". At least one replica count must be > 0";
+        return resolved;
+    }
+
+    resolved.replica_num = replica_num;
+    resolved.nof_replica_num = nof_replica_num;
+    return resolved;
+}
+#endif
+
 constexpr size_t kObjectChecksumD2HChunkSize = 8 * 1024 * 1024;
 constexpr auto kInitialLeaderReadyTimeout = std::chrono::seconds(30);
 
@@ -109,53 +165,6 @@ std::function<std::shared_ptr<NVMeoFInitiator>()>&
 DefaultNofInitiatorFactoryForTestingSlot() {
     static std::function<std::shared_ptr<NVMeoFInitiator>()> factory;
     return factory;
-}
-
-struct ContiguousSliceRange {
-    void* ptr = nullptr;
-    size_t size = 0;
-};
-
-std::optional<ContiguousSliceRange> GetContiguousSliceRange(
-    std::span<const Slice> slices) {
-    if (slices.empty()) {
-        return std::nullopt;
-    }
-
-    uintptr_t expected_ptr = 0;
-    uintptr_t start_ptr = 0;
-    size_t total_size = 0;
-    for (size_t i = 0; i < slices.size(); ++i) {
-        const auto& slice = slices[i];
-        if (slice.ptr == nullptr) {
-            return std::nullopt;
-        }
-
-        const auto current_ptr = reinterpret_cast<uintptr_t>(slice.ptr);
-        if (i == 0) {
-            start_ptr = current_ptr;
-            expected_ptr = current_ptr;
-        } else if (current_ptr != expected_ptr) {
-            return std::nullopt;
-        }
-
-        if (slice.size > std::numeric_limits<size_t>::max() - total_size) {
-            return std::nullopt;
-        }
-        if (slice.size > std::numeric_limits<uintptr_t>::max() - current_ptr) {
-            return std::nullopt;
-        }
-
-        total_size += slice.size;
-        expected_ptr = current_ptr + slice.size;
-    }
-
-    if (total_size == 0) {
-        return std::nullopt;
-    }
-
-    return ContiguousSliceRange{.ptr = reinterpret_cast<void*>(start_ptr),
-                                .size = total_size};
 }
 
 ErrorCode ScatterFragmentError(const Status& status) {
@@ -1816,6 +1825,15 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     const std::vector<QueryResult>& query_results,
     std::unordered_map<std::string, std::vector<Slice>>& slices,
     bool prefer_alloc_in_same_node) {
+    return BatchGet(object_keys, query_results, slices,
+                    prefer_alloc_in_same_node, {});
+}
+
+std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
+    const std::vector<std::string>& object_keys,
+    const std::vector<QueryResult>& query_results,
+    std::unordered_map<std::string, std::vector<Slice>>& slices,
+    bool prefer_alloc_in_same_node, const NofReadBufferRestorer& nof_restorer) {
     if (!transfer_submitter_) {
         LOG(ERROR) << "TransferSubmitter not initialized";
         std::vector<tl::expected<void, ErrorCode>> results;
@@ -1839,6 +1857,12 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
         return results;
     }
     if (prefer_alloc_in_same_node) {
+        if (nof_restorer) {
+            LOG(ERROR)
+                << "NoF read restoration does not support same-node mode";
+            return std::vector<tl::expected<void, ErrorCode>>(
+                object_keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+        }
         return BatchGetWhenPreferSameNode(object_keys, query_results, slices);
     }
 
@@ -1850,6 +1874,15 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
     std::vector<DfsReadRequest> dfs_read_requests;
     std::vector<size_t> dfs_read_indices;
     std::vector<tl::expected<void, ErrorCode>> results(object_keys.size());
+    // Completion threads only enqueue indices. Restore on this caller thread,
+    // where the application's device context is already available, while SPDK
+    // continues reading the other objects. Allocate all queue storage up front.
+    auto nof_completions =
+        nof_restorer
+            ? std::make_shared<NofReadCompletionQueue>(object_keys.size())
+            : nullptr;
+    size_t pending_nof_reads = 0;
+    pending_transfers.reserve(object_keys.size());
     // Record batch get transfer latency (Submit + Wait)
     auto t0_batch_get = std::chrono::steady_clock::now();
 
@@ -1906,17 +1939,6 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                 DfsReadRequest{key, desc, slices_it->second});
             dfs_read_indices.push_back(i);
             continue;
-        } else if (replica.is_nof_replica()) {
-            auto contiguous_range = GetContiguousSliceRange(slices_it->second);
-            if (!contiguous_range.has_value()) {
-                LOG(ERROR) << "NoF transfer requires contiguous slices";
-                results[i] = tl::unexpected(ErrorCode::INVALID_PARAMS);
-                continue;
-            }
-            future = transfer_submitter_->submit(
-                replica, slices_it->second, TransferRequest::READ,
-                contiguous_range->ptr, contiguous_range->size,
-                TransferIntent::kForegroundGet);
         } else {
             future = transfer_submitter_->submit(
                 replica, slices_it->second, TransferRequest::READ, nullptr, 0,
@@ -1938,6 +1960,12 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
 
         pending_transfers.emplace_back(i, key, std::move(*future), replica,
                                        cache_used);
+        if (nof_completions && replica.is_nof_replica()) {
+            std::get<2>(pending_transfers.back())
+                .notifyNofCompletion(nof_completions,
+                                     pending_transfers.size() - 1);
+            ++pending_nof_reads;
+        }
     }
 
     if (!dfs_read_requests.empty()) {
@@ -1993,7 +2021,11 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                     results[index] = tl::unexpected(checksum_result.error());
                     continue;
                 }
-                results[index] = {};
+                if (nof_restorer && query_results[index].IsLeaseExpired()) {
+                    results[index] = tl::unexpected(ErrorCode::LEASE_EXPIRED);
+                } else {
+                    results[index] = {};
+                }
             }
         }
         if (dfs_metric && dfs_success_keys > 0) {
@@ -2008,10 +2040,16 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                 << ", latency_us=" << dfs_read_latency_us;
     }
 
-    // Wait for all transfers to complete
-    for (auto& [index, key, future, stored_replica, cache_used] :
-         pending_transfers) {
+    auto complete_transfer = [&](auto& transfer,
+                                 std::chrono::steady_clock::time_point
+                                     nof_completed_at = {}) {
+        auto& [index, key, future, stored_replica, cache_used] = transfer;
         ErrorCode result = future.get();
+        // Non-NoF transports do not publish a completion timestamp. Observe
+        // their completion before running any potentially blocking H2D copy.
+        auto completed_at = nof_restorer && !stored_replica.is_nof_replica()
+                                ? std::chrono::steady_clock::now()
+                                : nof_completed_at;
 
         // Release the cache block after transfer completes (memcpy is done)
         if (hot_cache_ && cache_used) {
@@ -2027,16 +2065,48 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
             auto slices_it = slices.find(key);
             if (slices_it == slices.end()) {
                 results[index] = tl::unexpected(ErrorCode::INVALID_PARAMS);
-                continue;
+                return;
             }
             auto checksum_result = VerifyObjectChecksum(
                 key, slices_it->second, calculate_total_size(stored_replica),
                 query_results[index].object_checksum);
             if (!checksum_result) {
                 results[index] = tl::unexpected(checksum_result.error());
-                continue;
+                return;
             }
             results[index] = {};
+
+            if (nof_restorer) {
+                // Once a transfer is complete, another object's H2D must not
+                // consume its lease. NoF uses its published SSD completion
+                // time; other transports are checked before restoration starts.
+                if (query_results[index].IsLeaseExpired(completed_at)) {
+                    LOG(WARNING)
+                        << "lease_expired_before_data_transfer_completed key="
+                        << key;
+                    results[index] = tl::unexpected(ErrorCode::LEASE_EXPIRED);
+                    return;
+                }
+            }
+            if (nof_restorer && stored_replica.is_nof_replica()) {
+                try {
+                    results[index] = nof_restorer(index);
+                } catch (const std::bad_alloc&) {
+                    results[index] =
+                        tl::unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+                } catch (const std::exception& error) {
+                    LOG(ERROR) << "NoF read restoration exception for key "
+                               << key << ": " << error.what();
+                    results[index] = tl::unexpected(ErrorCode::INTERNAL_ERROR);
+                } catch (...) {
+                    results[index] = tl::unexpected(ErrorCode::INTERNAL_ERROR);
+                }
+                if (!results[index]) {
+                    LOG(ERROR) << "NoF read restoration failed for key " << key
+                               << ": " << toString(results[index].error());
+                    return;
+                }
+            }
 
             // Frequency admission: only promote frequently accessed keys.
             // Skip when cache was used (data served from local cache).
@@ -2048,17 +2118,40 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchGet(
                 }
             }
         }
-    }
+    };
 
-    // As lease expired is a rare case, we check all the results with the same
-    // time_point to avoid too many syscalls
-    std::chrono::steady_clock::time_point now =
-        std::chrono::steady_clock::now();
-    for (size_t i = 0; i < object_keys.size(); ++i) {
-        if (results[i].has_value() && query_results[i].IsLeaseExpired(now)) {
-            LOG(WARNING) << "lease_expired_before_data_transfer_completed key="
-                         << object_keys[i];
-            results[i] = tl::unexpected(ErrorCode::LEASE_EXPIRED);
+    if (nof_restorer) {
+        // All reads have already been submitted. Drain and check the other
+        // transports before H2D can block this caller thread; checking them
+        // afterwards would incorrectly include the NoF restoration latency.
+        // NoF-only batches proceed directly to their completion queue.
+        for (auto& transfer : pending_transfers) {
+            if (!std::get<3>(transfer).is_nof_replica()) {
+                complete_transfer(transfer);
+            }
+        }
+        // A slow first NoF key must not hold up H2D for another ready NoF key.
+        while (pending_nof_reads > 0) {
+            const auto completion = nof_completions->Wait();
+            auto& transfer = pending_transfers[completion.index];
+            complete_transfer(transfer, completion.completed_at);
+            --pending_nof_reads;
+        }
+    } else {
+        for (auto& transfer : pending_transfers) {
+            complete_transfer(transfer);
+        }
+        // Preserve the legacy batch-end lease check when no restoration is
+        // requested, using one time_point for the whole batch.
+        auto now = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < object_keys.size(); ++i) {
+            if (results[i].has_value() &&
+                query_results[i].IsLeaseExpired(now)) {
+                LOG(WARNING)
+                    << "lease_expired_before_data_transfer_completed key="
+                    << object_keys[i];
+                results[i] = tl::unexpected(ErrorCode::LEASE_EXPIRED);
+            }
         }
     }
 
@@ -2124,6 +2217,9 @@ tl::expected<void, ErrorCode> Client::Put(const ObjectKey& key,
     }
 
     ReplicateConfig client_cfg = AttachHostId(config);
+#ifdef USE_NOF
+    client_cfg = ApplyStoreReplicaOverrideFromEnv(client_cfg);
+#endif
     AttachHcaAffinity(client_cfg, slices);
     if (protocol_ == "cxl") {
         client_cfg.preferred_segment = local_hostname_;
@@ -2342,6 +2438,9 @@ tl::expected<void, ErrorCode> Client::Upsert(const ObjectKey& key,
     }
 
     ReplicateConfig client_cfg = AttachHostId(config);
+#ifdef USE_NOF
+    client_cfg = ApplyStoreReplicaOverrideFromEnv(client_cfg);
+#endif
     AttachHcaAffinity(client_cfg, slices);
     if (protocol_ == "cxl") {
         client_cfg.preferred_segment = local_hostname_;
@@ -2503,6 +2602,8 @@ class PutOperation {
 
     std::string key;
     std::vector<Slice> slices;
+    // Needed only when generic remote staging and NoF staging are both active.
+    std::vector<Slice> nof_source_slices;
     std::optional<uint64_t> object_checksum;
     std::vector<std::vector<Slice>> batched_slices;
 
@@ -2935,7 +3036,8 @@ void Client::StartBatchUpsert(std::vector<PutOperation>& ops,
     }
 }
 
-void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
+void Client::SubmitTransfers(std::vector<PutOperation>& ops,
+                             const NofWriteBufferStager& nof_stager) {
     if (std::all_of(ops.begin(), ops.end(),
                     [](const PutOperation& op) { return op.IsResolved(); })) {
         return;
@@ -2988,28 +3090,40 @@ void Client::SubmitTransfers(std::vector<PutOperation>& ops) {
                 const auto replica_type = replica.is_memory_replica()
                                               ? ReplicaType::MEMORY
                                               : ReplicaType::NOF_SSD;
-                std::optional<TransferFuture> submit_result;
-                if (replica.is_nof_replica()) {
-                    auto contiguous_range = GetContiguousSliceRange(op.slices);
-                    if (!contiguous_range.has_value()) {
-                        std::string failure_context =
-                            "NoF transfer requires contiguous slices for "
-                            "replica " +
-                            std::to_string(replica_idx);
-                        op.transfer_summary.RecordFailure(
-                            replica_type, ErrorCode::INVALID_PARAMS);
-                        op.AppendFailureContext(failure_context);
+                std::vector<Slice> staged_slices;
+                auto* transfer_slices = &op.slices;
+                if (replica.is_nof_replica() && nof_stager) {
+                    tl::expected<std::vector<Slice>, ErrorCode> staged =
+                        tl::unexpected(ErrorCode::INTERNAL_ERROR);
+                    try {
+                        staged = nof_stager(op.nof_source_slices.empty()
+                                                ? op.slices
+                                                : op.nof_source_slices,
+                                            replica);
+                    } catch (const std::bad_alloc&) {
+                        staged = tl::unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+                    } catch (const std::exception& error) {
+                        LOG(ERROR) << "NoF write staging exception for key "
+                                   << op.key << ": " << error.what();
+                    } catch (...) {
+                        LOG(ERROR)
+                            << "NoF write staging exception for key " << op.key;
+                    }
+                    if (!staged) {
+                        op.transfer_summary.RecordFailure(replica_type,
+                                                          staged.error());
+                        op.AppendFailureContext(
+                            "Failed to stage NoF write buffers for replica " +
+                            std::to_string(replica_idx));
                         continue;
                     }
-                    submit_result = transfer_submitter_->submit(
-                        replica, op.slices, TransferRequest::WRITE,
-                        contiguous_range->ptr, contiguous_range->size,
-                        TransferIntent::kUnspecified);
-                } else {
-                    submit_result = transfer_submitter_->submit(
-                        replica, op.slices, TransferRequest::WRITE, nullptr, 0,
-                        TransferIntent::kUnspecified);
+                    staged_slices = std::move(*staged);
+                    transfer_slices = &staged_slices;
                 }
+                std::optional<TransferFuture> submit_result;
+                submit_result = transfer_submitter_->submit(
+                    replica, *transfer_slices, TransferRequest::WRITE, nullptr,
+                    0, TransferIntent::kUnspecified);
 
                 if (!submit_result) {
                     std::string failure_context =
@@ -3766,6 +3880,14 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchWriteWhenPreferSameNode(
     return CollectResults(ops);
 }
 
+tl::expected<NofIoRequirements, ErrorCode> Client::GetNofIoRequirements(
+    const Replica::Descriptor& replica, size_t logical_size) {
+    if (!transfer_submitter_) {
+        return tl::unexpected(ErrorCode::INVALID_PARAMS);
+    }
+    return transfer_submitter_->GetNofIoRequirements(replica, logical_size);
+}
+
 std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     const std::vector<ObjectKey>& keys,
     std::vector<std::vector<Slice>>& batched_slices,
@@ -3777,12 +3899,23 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     const std::vector<ObjectKey>& keys,
     std::vector<std::vector<Slice>>& batched_slices,
     const ReplicateConfig& config, const WriteBufferStager& stager) {
+    return BatchPut(keys, batched_slices, config, stager, {});
+}
+
+std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
+    const std::vector<ObjectKey>& keys,
+    std::vector<std::vector<Slice>>& batched_slices,
+    const ReplicateConfig& config, const WriteBufferStager& stager,
+    const NofWriteBufferStager& nof_stager) {
     if (!config.ValidSessionIds(keys.size()) ||
         !config.HasValidKeyHints(keys.size())) {
         return std::vector<tl::expected<void, ErrorCode>>(
             keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
     }
     ReplicateConfig client_cfg = AttachHostId(config);
+#ifdef USE_NOF
+    client_cfg = ApplyStoreReplicaOverrideFromEnv(client_cfg);
+#endif
     if (protocol_ == "cxl") {
         client_cfg.preferred_segment = local_hostname_;
     }
@@ -3798,10 +3931,19 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
         return BatchWriteWhenPreferSameNode(ops, false);
     }
     StartBatchPut(ops, client_cfg);
+    if (stager && nof_stager) {
+        for (auto& op : ops) {
+            if (!op.IsResolved() &&
+                std::any_of(op.replicas.begin(), op.replicas.end(),
+                            [](const auto& r) { return r.is_nof_replica(); })) {
+                op.nof_source_slices = op.slices;
+            }
+        }
+    }
     StageWriteBuffersForRemoteReplicas(ops, stager);
 
     auto t0 = std::chrono::steady_clock::now();
-    SubmitTransfers(ops);
+    SubmitTransfers(ops, nof_stager);
     WaitForTransfers(ops);
     SubmitDfsWrites(ops);
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -3834,6 +3976,9 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchUpsert(
             keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
     }
     ReplicateConfig client_cfg = AttachHostId(config);
+#ifdef USE_NOF
+    client_cfg = ApplyStoreReplicaOverrideFromEnv(client_cfg);
+#endif
     if (protocol_ == "cxl") {
         client_cfg.preferred_segment = local_hostname_;
     }
@@ -3883,6 +4028,9 @@ Client::StartBatchPutForSizes(const std::vector<std::string>& keys,
     }
 
     ReplicateConfig client_cfg = AttachHostId(config);
+#ifdef USE_NOF
+    client_cfg = ApplyStoreReplicaOverrideFromEnv(client_cfg);
+#endif
     if (protocol_ == "cxl") {
         client_cfg.preferred_segment = local_hostname_;
     }
@@ -4899,19 +5047,9 @@ ErrorCode Client::TransferData(const Replica::Descriptor& replica_descriptor,
     }
 
     std::optional<TransferFuture> future;
-    if (replica_descriptor.is_nof_replica()) {
-        auto contiguous_range = GetContiguousSliceRange(slices);
-        if (!contiguous_range.has_value()) {
-            LOG(ERROR) << "NoF transfer requires contiguous slices";
-            return ErrorCode::INVALID_PARAMS;
-        }
-        future = transfer_submitter_->submit(replica_descriptor, slices,
-                                             op_code, contiguous_range->ptr,
-                                             contiguous_range->size, intent);
-    } else {
-        future = transfer_submitter_->submit(replica_descriptor, slices,
-                                             op_code, nullptr, 0, intent);
-    }
+    future = transfer_submitter_->submit(replica_descriptor, slices, op_code,
+                                         nullptr, 0, intent);
+
     if (!future) {
         LOG(ERROR) << "Failed to submit transfer operation";
         return ErrorCode::TRANSFER_FAIL;

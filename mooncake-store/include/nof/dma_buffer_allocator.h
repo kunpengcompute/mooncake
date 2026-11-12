@@ -14,6 +14,9 @@ class DmaBufferAllocator {
    public:
     virtual ~DmaBufferAllocator() = default;
 
+    // True only for memory from the SPDK Host DMA pool.
+    virtual bool IsSpdkHostDma() const { return false; }
+
     // nullptr on failure. align semantics match the backing allocator
     // (spdk_zmalloc / aligned_alloc respectively).
     virtual void* Alloc(size_t size, size_t align, int socket_id = -1) = 0;

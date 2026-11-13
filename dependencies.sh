@@ -229,7 +229,7 @@ elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS
                      libunwind-devel \
                      numactl-devel \
                      python3-devel \
-                     boost1.78-devel \
+                     boost-devel \
                      openssl-devel \
                      protobuf-devel \
                      yaml-cpp-devel \
@@ -237,7 +237,6 @@ elif [ "$OS" = "centos" ] || [ "$OS" = "rhel" ] || [ "$OS" = "rocky" ] || [ "$OS
                      hiredis-devel \
                      liburing-devel \
                      jemalloc-devel \
-                     msgpack-devel \
                      zeromq-devel \
                      libzstd-devel \
                      pkgconf-pkg-config \
@@ -468,9 +467,9 @@ if [ "$INSTALL_SPDK" = true ]; then
     check_success "Failed to change to SPDK directory"
 
     # Checkout specific version
-    echo "Checking out SPDK version v23.01.1..."
-    git checkout v23.01.1
-    check_success "Failed to checkout SPDK version v23.01.1"
+    echo "Checking out SPDK version v26.01..."
+    git checkout v26.01
+    check_success "Failed to checkout SPDK version v26.01"
 
     # Initialize submodules
     echo "Initializing SPDK submodules..."
@@ -482,7 +481,16 @@ if [ "$INSTALL_SPDK" = true ]; then
     ./scripts/pkgdep.sh --rdma
     check_success "Failed to install SPDK RDMA dependencies"
 
-    # DPDK bundled with SPDK v23.01.1 does not recognize HiSilicon part 0xd06.
+    # SPDK 26.01 installs its Python tools with uv. Use the pkgdep virtualenv
+    # so pip also works on distributions with an externally managed Python.
+    export PATH="${PIP_VIRTDIR:-/var/spdk/dependencies/pip}/bin:$PATH"
+    if ! command -v uv >/dev/null 2>&1; then
+        python3 -m pip install uv
+        check_success "Failed to install uv for SPDK Python tools"
+    fi
+
+    # DPDK bundled with SPDK v26.01 recognizes HiSilicon part 0xd06, but its
+    # native hip12 target needs recent compiler support. Keep the generic fallback.
     # Keep explicit platform and cross-compilation settings supplied by the user.
     case "$(uname -m)" in
         aarch64|arm64)
@@ -506,6 +514,22 @@ if [ "$INSTALL_SPDK" = true ]; then
     echo "Configuring SPDK with RDMA support..."
     ./configure --with-rdma
     check_success "Failed to configure SPDK"
+
+    # Build ISA-L explicitly even when SPDK's configure disables it. Mooncake
+    # links the archive from isa-l/.libs into its shared libraries.
+    echo "Building ISA-L..."
+    cd "${REPO_ROOT}/extern/spdk/isa-l"
+    check_success "Failed to change to ISA-L directory"
+    ./autogen.sh
+    check_success "Failed to generate ISA-L configure script"
+    CFLAGS="${CFLAGS:+${CFLAGS} }-fPIC" ./configure --prefix=/usr --libdir=/usr/lib64 --disable-shared
+    check_success "Failed to configure ISA-L"
+    make -j$(nproc)
+    check_success "Failed to build ISA-L"
+    test -f .libs/libisal.a
+    check_success "ISA-L static library was not generated"
+    cd "${REPO_ROOT}/extern/spdk"
+    check_success "Failed to return to SPDK directory"
 
     # Build SPDK
     echo "Building SPDK (using $(nproc) cores)..."
@@ -539,7 +563,7 @@ echo -e "  ${GREEN}✓${NC} System packages"
 echo -e "  ${GREEN}✓${NC} Git submodules"
 echo -e "  ${GREEN}✓${NC} Go $GOVER"
 if [ "$INSTALL_SPDK" = true ]; then
-    echo -e "  ${GREEN}✓${NC} SPDK (v23.01.1)"
+    echo -e "  ${GREEN}✓${NC} SPDK (v26.01)"
 fi
 echo
 echo -e "You can now build and run Mooncake."

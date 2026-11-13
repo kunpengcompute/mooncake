@@ -223,6 +223,9 @@ MasterService::MasterService(const MasterServiceConfig& config)
       default_kv_soft_pin_ttl_(config.default_kv_soft_pin_ttl),
       max_kv_soft_pin_ttl_(config.max_kv_soft_pin_ttl),
       allow_evict_soft_pinned_objects_(config.allow_evict_soft_pinned_objects),
+      enable_soft_pin_ttl_reclaim_(config.enable_soft_pin_ttl_reclaim),
+      enable_nof_soft_pin_access_renewal_(
+          config.enable_nof_soft_pin_access_renewal),
       eviction_ratio_(config.eviction_ratio),
       eviction_high_watermark_ratio_(config.eviction_high_watermark_ratio),
       tenant_eviction_high_watermark_ratio_(
@@ -259,9 +262,6 @@ MasterService::MasterService(const MasterServiceConfig& config)
       quota_bytes_(config.quota_bytes),
       enable_multi_tenants_(config.enable_multi_tenants),
       segment_manager_(config.memory_allocator, config.enable_cxl),
-      nof_segment_manager_(config.enable_nof_pt_allocation
-                               ? BufferAllocatorType::OFFSET
-                               : config.memory_allocator),
 #ifdef USE_NOF
       enable_nof_pt_allocation_(config.enable_nof_pt_allocation),
       nof_pt_replica_num_(config.nof_pt_replica_num),
@@ -848,19 +848,35 @@ auto MasterService::MountNoFSegment(const NoFSegment& segment,
                << ", error=nof_pool_disabled";
     return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
 #else
-    ScopedNoFSegmentAccess nof_segment_access =
-        nof_segment_manager_.getNoFSegmentAccess();
-
+    std::shared_lock<std::shared_mutex> snapshot_lock(master_state_mutex_);
     LOG(INFO) << "NoF segment mount: "
               << "client_id=" << client_id
               << ", action=mount_segment, segment_name=" << segment.name;
 
-    auto err = nof_segment_access.MountSegment(segment, client_id);
+    auto err = [&] {
+        auto access = nof_segment_manager_.getNoFSegmentAccess();
+        return access.MountSegment(segment, client_id);
+    }();
     if (err == ErrorCode::SEGMENT_ALREADY_EXISTS) {
         // Return OK because this is an idempotent operation
         return {};
     } else if (err != ErrorCode::OK) {
         return tl::make_unexpected(err);
+    }
+    if (enable_oplog_ && ordered_oplog_writer_) {
+        NoFSegmentOp op;
+        op.segment_id = segment.id;
+        op.owner_client_id = client_id;
+        op.segment_name = segment.name;
+        op.transport_endpoint = segment.te_endpoint;
+        op.base = segment.base;
+        op.capacity = segment.size;
+        op.host_id = segment.host_id;
+        op.rack_id = segment.rack_id;
+        auto bytes = struct_pack::serialize(op);
+        PersistSegmentOpForHAOrEnqueue(
+            "MountNoFSegment", OpType::NOF_SEGMENT_MOUNT, segment.te_endpoint,
+            std::string(bytes.begin(), bytes.end()));
     }
     if (pt_rebuild_scheduler_) {
         pt_rebuild_scheduler_->RequestRebuild();
@@ -1247,11 +1263,43 @@ auto MasterService::ReMountNoFSegment(const std::vector<NoFSegment>& segments,
                << ", error=nof_pool_disabled";
     return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
 #else
-    ScopedNoFSegmentAccess nof_segment_access =
-        nof_segment_manager_.getNoFSegmentAccess();
-    ErrorCode err = nof_segment_access.ReMountSegment(segments, client_id);
-    if (err != ErrorCode::OK) {
-        return tl::make_unexpected(err);
+    std::shared_lock<std::shared_mutex> snapshot_lock(master_state_mutex_);
+    std::vector<MountedNoFSegmentSnapshot> mounted;
+    {
+        auto access = nof_segment_manager_.getNoFSegmentAccess();
+        ErrorCode err = access.ReMountSegment(segments, client_id);
+        if (err != ErrorCode::OK) {
+            return tl::make_unexpected(err);
+        }
+        access.GetMountedSegments(mounted);
+    }
+    if (enable_oplog_ && ordered_oplog_writer_) {
+        for (const auto& segment : segments) {
+            auto found = std::find_if(
+                mounted.begin(), mounted.end(), [&](const auto& item) {
+                    return item.segment_id == segment.id &&
+                           item.client_id == client_id &&
+                           item.status == SegmentStatus::OK;
+                });
+            if (found == mounted.end()) {
+                continue;
+            }
+            const auto& mounted_segment = found->segment;
+            NoFSegmentOp op;
+            op.segment_id = mounted_segment.id;
+            op.owner_client_id = client_id;
+            op.segment_name = mounted_segment.name;
+            op.transport_endpoint = mounted_segment.te_endpoint;
+            op.base = mounted_segment.base;
+            op.capacity = mounted_segment.size;
+            op.host_id = mounted_segment.host_id;
+            op.rack_id = mounted_segment.rack_id;
+            auto bytes = struct_pack::serialize(op);
+            PersistSegmentOpForHAOrEnqueue(
+                "ReMountNoFSegment", OpType::NOF_SEGMENT_MOUNT,
+                mounted_segment.te_endpoint,
+                std::string(bytes.begin(), bytes.end()));
+        }
     }
     if (pt_rebuild_scheduler_) {
         pt_rebuild_scheduler_->RequestRebuild();
@@ -2236,7 +2284,7 @@ MasterService::ObjectMap::iterator MasterService::EraseMetadata(
     ReleaseLocalDiskUsage(metadata.GetAllReplicas());
     FreeDfsReplicas(key, metadata.GetAllReplicas());
     AccountCacheTotalRemoval(metadata);
-    if (metadata.GetCommittedSoftPinTimeout()) {
+    if (metadata.GetCommittedSoftPinState()) {
         soft_pin_deadline_index_.Remove(tenant_id.MakeScopedKey(key));
     }
     switch (quota_mode) {
@@ -2349,10 +2397,12 @@ void MasterService::SoftPinDeadlineIndex::RemoveIfMatches(
 }
 
 std::vector<MasterService::SoftPinDeadlineIndex::Entry>
-MasterService::SoftPinDeadlineIndex::PopExpired(const TimePoint& now) {
+MasterService::SoftPinDeadlineIndex::PopExpired(const TimePoint& now,
+                                                size_t limit) {
     std::vector<Entry> expired;
     std::lock_guard lock(mutex_);
-    while (!heap_.empty() && heap_.top().deadline <= now) {
+    while (!heap_.empty() && heap_.top().deadline <= now &&
+           expired.size() < limit) {
         Entry entry = heap_.top();
         heap_.pop();
 
@@ -2487,7 +2537,13 @@ bool MasterService::IsSoftPinActive(
 
 void MasterService::CleanupExpiredSoftPins(
     const std::chrono::system_clock::time_point& now) {
-    auto expired_entries = soft_pin_deadline_index_.PopExpired(now);
+    // While TTL reclaim is enabled the batch is bounded so a large expiry wave
+    // cannot stall the cleanup thread; the remainder is drained on later
+    // rounds.
+    const size_t limit = enable_soft_pin_ttl_reclaim_
+                             ? kSoftPinTtlReclaimBatchSize
+                             : std::numeric_limits<size_t>::max();
+    auto expired_entries = soft_pin_deadline_index_.PopExpired(now, limit);
 
     // Each deadline is resolved on its own, under the key the scoped key
     // names: the key may have been republished since, and only the deadline
@@ -2495,12 +2551,48 @@ void MasterService::CleanupExpiredSoftPins(
     int expired_count = 0;
     for (const auto& entry : expired_entries) {
         auto [tenant_id, key] = TenantId::ParseScopedKey(entry.scoped_key);
-        MetadataAccessorRO accessor(
-            this, ObjectIdentity{std::move(tenant_id), std::move(key)});
-        if (accessor.IsPublished() &&
-            accessor.Get().ExpireSoftPinIfDeadlineMatches(entry.deadline,
-                                                          now)) {
+        std::optional<SoftPinReclaimCandidate> candidate;
+        if (enable_soft_pin_ttl_reclaim_) {
+            candidate.emplace(SoftPinReclaimCandidate{tenant_id, key});
+        }
+        bool nof_only = false;
+        {
+            MetadataAccessorRO accessor(
+                this, ObjectIdentity{std::move(tenant_id), std::move(key)});
+            if (!accessor.IsPublished()) {
+                continue;
+            }
+            const auto& metadata = accessor.Get();
+            const bool is_nof_only = metadata.IsNoFOnly();
+            const bool allow_renew =
+                enable_nof_soft_pin_access_renewal_ && is_nof_only;
+
+            // Lock-protected three-state check: kRenew re-inserts a still-live
+            // sliding-window deadline (metric unchanged); kExpire clears the
+            // pin; kAlreadyCleared skips a slot concurrently released by
+            // another path.
+            const auto state =
+                metadata.EvaluateSoftPinAtExpiry(now, allow_renew);
+            switch (state.action) {
+                case ObjectMetadata::SoftPinExpiryAction::kRenew:
+                    soft_pin_deadline_index_.Upsert(entry.scoped_key,
+                                                    state.new_deadline);
+                    continue;
+                case ObjectMetadata::SoftPinExpiryAction::kAlreadyCleared:
+                    continue;
+                case ObjectMetadata::SoftPinExpiryAction::kExpire:
+                    break;
+            }
             ++expired_count;
+            // A NoF-only object is not kept resident by any memory or disk
+            // replica, so the eviction thread can reclaim it without waiting
+            // for allocation pressure.
+            nof_only = candidate && is_nof_only;
+        }
+        if (nof_only) {
+            std::lock_guard lock(soft_pin_reclaim_queue_mutex_);
+            soft_pin_reclaim_queue_.push(std::move(*candidate));
+            need_soft_pin_reclaim_.store(true, std::memory_order_relaxed);
         }
     }
     if (expired_count > 0) {
@@ -2933,6 +3025,7 @@ auto MasterService::UnmountNoFSegment(const UUID& segment_id,
     return tl::make_unexpected(ErrorCode::UNAVAILABLE_IN_CURRENT_MODE);
 #else
     size_t metrics_dec_capacity = 0;  // to update the metrics
+    std::string te_endpoint;
 
     std::shared_lock<std::shared_mutex> client_lock(client_mutex_);
     std::shared_lock<std::shared_mutex> shared_lock(master_state_mutex_);
@@ -2943,6 +3036,14 @@ auto MasterService::UnmountNoFSegment(const UUID& segment_id,
     {
         ScopedNoFSegmentAccess segment_access =
             nof_segment_manager_.getNoFSegmentAccess();
+        std::vector<MountedNoFSegmentSnapshot> mounted;
+        segment_access.GetMountedSegments(mounted);
+        for (const auto& item : mounted) {
+            if (item.segment_id == segment_id) {
+                te_endpoint = item.segment.te_endpoint;
+                break;
+            }
+        }
         ErrorCode err = segment_access.PrepareUnmountSegment(
             segment_id, metrics_dec_capacity);
         if (err == ErrorCode::SEGMENT_NOT_FOUND) {
@@ -2969,6 +3070,13 @@ auto MasterService::UnmountNoFSegment(const UUID& segment_id,
     {
         std::lock_guard<std::mutex> lock(nof_heartbeat_mutex_);
         nof_heartbeat_states_.erase(segment_id);
+    }
+    if (enable_oplog_ && ordered_oplog_writer_ && !te_endpoint.empty()) {
+        NoFSegmentUnmountOp op{segment_id, te_endpoint};
+        auto bytes = struct_pack::serialize(op);
+        PersistSegmentOpForHAOrEnqueue("UnmountNoFSegment",
+                                       OpType::NOF_SEGMENT_UNMOUNT, te_endpoint,
+                                       std::string(bytes.begin(), bytes.end()));
     }
     if (pt_rebuild_scheduler_) {
         pt_rebuild_scheduler_->RequestRebuild();
@@ -3286,11 +3394,15 @@ struct MasterService::LegacyRestoreContext {
     const std::vector<StandbyObjectEntry>& objects;
     const std::unordered_map<std::string, const StandbySegmentInfo*>&
         segments_by_alias;
+    const std::unordered_map<std::string, const StandbySegmentInfo*>&
+        nof_segments_by_endpoint;
     std::unordered_map<std::string, std::shared_ptr<BufferAllocatorBase>>&
         allocators;
     std::unordered_map<std::string, uint64_t>& accounted_bytes;
     size_t& rejected_count;
     size_t& already_existing_count;
+    size_t& dropped_stale_replica_count;
+    size_t& skipped_stale_object_count;
     std::vector<std::pair<TenantId, std::string>>& repair_remove_keys;
     std::vector<std::pair<TenantId, std::string>>& repair_canonical_keys;
     std::vector<std::pair<TenantId, route::ObjectRef>>& installed;
@@ -3446,11 +3558,27 @@ tl::expected<void, ErrorCode> MasterService::ValidateLegacyStandbyEntries(
         }
         const auto discarded_it = ctx.discarded_replicas.find(owner);
         size_t reliable = 0;
+        bool dropped_stale_nof_replica = false;
         for (size_t desc_idx = 0;
              desc_idx < accepted_entry.entry->metadata.replicas.size();
              ++desc_idx) {
             const auto& desc =
                 accepted_entry.entry->metadata.replicas[desc_idx];
+            if (desc.is_nof_replica() &&
+                !ctx.nof_segments_by_endpoint.contains(
+                    desc.get_nof_descriptor()
+                        .buffer_descriptor.transport_endpoint_)) {
+                LOG(WARNING)
+                    << "RestoreFromStandbySnapshot: dropping replica id="
+                    << desc.id << " on unknown NoF endpoint="
+                    << desc.get_nof_descriptor()
+                           .buffer_descriptor.transport_endpoint_
+                    << ", tenant=" << accepted_entry.tenant_id.value()
+                    << ", key=" << accepted_entry.user_key;
+                ++ctx.dropped_stale_replica_count;
+                dropped_stale_nof_replica = true;
+                continue;
+            }
             if (desc.status == ReplicaStatus::REMOVED ||
                 desc.status == ReplicaStatus::FAILED ||
                 (discarded_it != ctx.discarded_replicas.end() &&
@@ -3460,6 +3588,14 @@ tl::expected<void, ErrorCode> MasterService::ValidateLegacyStandbyEntries(
             ++reliable;
         }
         if (reliable == 0) {
+            if (dropped_stale_nof_replica &&
+                discarded_it == ctx.discarded_replicas.end()) {
+                ++ctx.skipped_stale_object_count;
+                ctx.repair_remove_keys.emplace_back(accepted_entry.tenant_id,
+                                                    accepted_entry.user_key);
+                accepted_entry.entry = nullptr;
+                continue;
+            }
             // Covers both overlap casualties and objects that arrived with
             // every replica already REMOVED/FAILED: an object with no
             // readable replica is dropped instead of lingering as
@@ -3470,7 +3606,8 @@ tl::expected<void, ErrorCode> MasterService::ValidateLegacyStandbyEntries(
             ctx.repair_remove_keys.emplace_back(accepted_entry.tenant_id,
                                                 accepted_entry.user_key);
             accepted_entry.entry = nullptr;
-        } else if (discarded_it != ctx.discarded_replicas.end()) {
+        } else if (discarded_it != ctx.discarded_replicas.end() ||
+                   dropped_stale_nof_replica) {
             // Survives with some descriptors discarded: the canonical
             // repair record carries only the survivors.
             ctx.repair_canonical_keys.emplace_back(accepted_entry.tenant_id,
@@ -3535,6 +3672,10 @@ tl::expected<void, ErrorCode> MasterService::ConstructLegacyStandbyReplicas(
             } else if (desc.is_nof_replica()) {
                 const auto& buffer =
                     desc.get_nof_descriptor().buffer_descriptor;
+                if (!ctx.nof_segments_by_endpoint.contains(
+                        buffer.transport_endpoint_)) {
+                    continue;
+                }
                 if (buffer.size_ != standby_meta.size || buffer.size_ == 0) {
                     NoteLegacyStandbyRejection(ctx, entry,
                                                "invalid_nof_descriptor");
@@ -3601,10 +3742,13 @@ tl::expected<size_t, ErrorCode> MasterService::InstallLegacyStandbyObjects(
     // A snapshot whose objects all fail to land is a failed restore, not
     // an empty cluster: reporting success here would let the supervisor
     // serve on zero state. Duplicates of already-served objects are the
-    // exception, since their state is present already. How partial
-    // restores gate serving is N07/N08 scope (#3808), not this stop-gap.
+    // exception, since their state is present already. Objects whose NoF
+    // registrations were lost are cache misses rather than rejected entries.
+    // How partial restores gate serving is N07/N08 scope (#3808), not this
+    // stop-gap.
     if (!ctx.objects.empty() && restored_count == 0 &&
-        ctx.already_existing_count < ctx.objects.size()) {
+        ctx.already_existing_count + ctx.skipped_stale_object_count <
+            ctx.objects.size()) {
         LOG(ERROR) << "RestoreFromStandbySnapshot: every standby object "
                    << "was rejected, objects=" << ctx.objects.size()
                    << ", rejected=" << ctx.rejected_count;
@@ -3794,15 +3938,40 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
     std::vector<StandbySegmentInfo> restored_memory_segments;
     std::unordered_map<std::string, const StandbySegmentInfo*>
         memory_segments_by_alias;
+    std::unordered_map<std::string, const StandbySegmentInfo*>
+        nof_segments_by_endpoint;
+    std::unordered_set<UUID, boost::hash<UUID>> nof_segment_ids;
     std::unordered_map<std::string, std::shared_ptr<BufferAllocatorBase>>
         restored_allocators;
     std::unordered_set<std::string> restored_invalid_endpoints;
     for (const auto& seg : segments) {
+        if (seg.nof) {
+            const auto& nof = *seg.nof;
+            if (nof.segment_id == UUID{0, 0} ||
+                nof.owner_client_id == UUID{0, 0} || nof.segment_name.empty() ||
+                nof.transport_endpoint.empty() || nof.capacity == 0 ||
+                nof.base >
+                    std::numeric_limits<uintptr_t>::max() - nof.capacity ||
+                nof.segment_name != seg.segment_name ||
+                nof.transport_endpoint != seg.transport_endpoint ||
+                nof.capacity != seg.capacity ||
+                memory_segments_by_alias.contains(seg.transport_endpoint) ||
+                !nof_segment_ids.insert(nof.segment_id).second ||
+                !nof_segments_by_endpoint.emplace(seg.transport_endpoint, &seg)
+                     .second) {
+                LOG(ERROR) << "RestoreFromStandbySnapshot: invalid NoF segment "
+                           << seg.segment_name;
+                return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            }
+            restored_invalid_endpoints.insert(seg.transport_endpoint);
+            continue;
+        }
         if (!seg.is_memory_segment) {
             continue;
         }
         if (seg.segment_name.empty() || seg.transport_endpoint.empty() ||
-            seg.capacity == 0) {
+            seg.capacity == 0 ||
+            nof_segments_by_endpoint.contains(seg.transport_endpoint)) {
             LOG(ERROR) << "RestoreFromStandbySnapshot: invalid memory segment "
                        << "name=" << seg.segment_name
                        << ", endpoint=" << seg.transport_endpoint
@@ -3860,6 +4029,15 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
         legacy_memory_ranges;
     std::unordered_map<const StandbySegmentInfo*, std::map<uintptr_t, uint64_t>>
         bounded_memory_ranges;
+    std::unordered_map<const StandbySegmentInfo*, std::map<uintptr_t, uint64_t>>
+        nof_ranges;
+    std::unordered_map<const StandbySegmentInfo*,
+                       std::vector<AllocatedBuffer::Descriptor>>
+        nof_descriptors;
+    std::unordered_map<const StandbySegmentInfo*, std::vector<Replica*>>
+        nof_replicas;
+    std::unordered_map<std::string, std::shared_ptr<BufferAllocatorBase>>
+        nof_dummy_allocators;
     std::unordered_map<std::string, uint64_t> restored_accounted_memory_bytes;
     size_t restored_object_count = 0;
     size_t dropped_stale_replica_count = 0;
@@ -3869,10 +4047,10 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
     // Objects skipped because the live index already holds them are not
     // losses: their state is present, just not from this snapshot.
     size_t already_existing_count = 0;
-    // Conflict-derived discards become durable repair records after the index
-    // installs, so a later promotion cannot replay them: full drops as
-    // key-level REMOVE, partial discards as a canonical PUT_END carrying only
-    // the survivors.
+    // Conflict-derived and unregistered NoF discards become durable repair
+    // records after the index installs, so a later promotion cannot replay
+    // them: full drops as key-level REMOVE, partial discards as a canonical
+    // PUT_END carrying only the survivors.
     std::vector<std::pair<TenantId, std::string>> repair_remove_keys;
     std::vector<std::pair<TenantId, std::string>> repair_canonical_keys;
     // The publications this call installed, so a failed restore can roll its
@@ -3909,6 +4087,7 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
             std::vector<Replica> replicas;
             replicas.reserve(standby_meta.replicas.size());
             bool dropped_stale_replica = false;
+            bool dropped_stale_nof_replica = false;
 
             for (const auto& desc : standby_meta.replicas) {
                 if (desc.is_memory_replica()) {
@@ -3994,15 +4173,52 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
                 } else if (desc.is_nof_replica()) {
                     const auto& buffer =
                         desc.get_nof_descriptor().buffer_descriptor;
+                    auto segment_it = nof_segments_by_endpoint.find(
+                        buffer.transport_endpoint_);
+                    if (segment_it == nof_segments_by_endpoint.end()) {
+                        // A Put can reach the OpLog before its segment mount.
+                        // Missing registrations turn these replicas into cache
+                        // misses instead of failing the whole promotion.
+                        LOG(WARNING)
+                            << "RestoreFromStandbySnapshot: dropping replica "
+                            << "id=" << desc.id << " on unknown NoF endpoint="
+                            << buffer.transport_endpoint_
+                            << ", tenant=" << tenant_id.value()
+                            << ", key=" << user_key;
+                        ++dropped_stale_replica_count;
+                        dropped_stale_replica = true;
+                        dropped_stale_nof_replica = true;
+                        continue;
+                    }
+                    const auto* segment = segment_it->second;
+                    const auto& nof = *segment->nof;
                     if (buffer.size_ != standby_meta.size ||
-                        buffer.size_ == 0) {
+                        buffer.size_ == 0 ||
+                        buffer.buffer_address_ < nof.base ||
+                        buffer.buffer_address_ - nof.base >= nof.capacity ||
+                        buffer.size_ > nof.capacity - (buffer.buffer_address_ -
+                                                       nof.base)) {
                         LOG(ERROR) << "RestoreFromStandbySnapshot: invalid NoF "
                                    << "descriptor, tenant=" << tenant_id.value()
                                    << ", key=" << user_key;
                         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
                     }
+                    if (desc.status == ReplicaStatus::COMPLETE) {
+                        auto& ranges = nof_ranges[segment];
+                        auto next = ranges.lower_bound(buffer.buffer_address_);
+                        const uintptr_t end =
+                            buffer.buffer_address_ + buffer.size_;
+                        if ((next != ranges.end() && end > next->first) ||
+                            (next != ranges.begin() &&
+                             std::prev(next)->first + std::prev(next)->second >
+                                 buffer.buffer_address_)) {
+                            return tl::make_unexpected(
+                                ErrorCode::INVALID_PARAMS);
+                        }
+                        ranges.emplace(buffer.buffer_address_, buffer.size_);
+                    }
                     auto& alloc =
-                        restored_allocators[buffer.transport_endpoint_];
+                        nof_dummy_allocators[buffer.transport_endpoint_];
                     if (!alloc) {
                         alloc = std::make_shared<DummyBufferAllocator>(
                             buffer.transport_endpoint_,
@@ -4049,12 +4265,18 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
                 }
             }
             if (replicas.empty() && dropped_stale_replica) {
+                if (dropped_stale_nof_replica) {
+                    repair_remove_keys.emplace_back(tenant_id, user_key);
+                }
                 LOG(WARNING)
                     << "RestoreFromStandbySnapshot: skipping object with no "
                     << "surviving replicas, tenant=" << tenant_id.value()
                     << ", key=" << user_key;
                 ++chunk_skipped_objects;
                 continue;
+            }
+            if (dropped_stale_nof_replica) {
+                repair_canonical_keys.emplace_back(tenant_id, user_key);
             }
             prepared.push_back({&entry, std::move(tenant_id),
                                 std::move(user_key), std::move(replicas)});
@@ -4087,11 +4309,19 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
 
     if (legacy_objects) {
         LegacyRestoreContext legacy_ctx{
-            *legacy_objects,     memory_segments_by_alias,
-            restored_allocators, restored_accounted_memory_bytes,
-            rejected_count,      already_existing_count,
-            repair_remove_keys,  repair_canonical_keys,
-            installed,           new_known_owner_records};
+            *legacy_objects,
+            memory_segments_by_alias,
+            nof_segments_by_endpoint,
+            restored_allocators,
+            restored_accounted_memory_bytes,
+            rejected_count,
+            already_existing_count,
+            dropped_stale_replica_count,
+            skipped_stale_object_count,
+            repair_remove_keys,
+            repair_canonical_keys,
+            installed,
+            new_known_owner_records};
         if (auto r = ValidateLegacyStandbyEntries(legacy_ctx); !r) {
             return tl::make_unexpected(r.error());
         }
@@ -4129,6 +4359,7 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
     const auto prev_standby_memory_segments = standby_memory_segments_;
     const auto prev_standby_allocator_keepalive = standby_allocator_keepalive_;
     const auto prev_invalid_replica_endpoints = invalid_replica_endpoints_;
+    std::vector<std::pair<UUID, UUID>> restored_nof_segments;
 
     // A failed restore leaves nothing behind: installed keys go back out
     // through the canonical removal, bookkeeping returns to its pre-restore
@@ -4140,6 +4371,14 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
             MetadataAccessorRW accessor(this, tenant, ref);
             if (accessor.IsPublished()) {
                 accessor.Erase();
+            }
+        }
+        for (const auto& [segment_id, owner] : restored_nof_segments) {
+            auto access = nof_segment_manager_.getNoFSegmentAccess();
+            size_t capacity = 0;
+            if (access.PrepareUnmountSegment(segment_id, capacity) ==
+                ErrorCode::OK) {
+                access.CommitUnmountSegment(segment_id, owner, capacity);
             }
         }
         standby_accounted_memory_bytes_ = prev_standby_accounted_memory_bytes;
@@ -4169,6 +4408,137 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
         MasterMetricManager::instance().client_liveness_record_created();
     }
 
+    // Both restore paths publish through PublishRestoredObjects. Collect NoF
+    // replicas from those publications so legacy snapshots and chunked
+    // promotions bind the same live extents.
+    for (const auto& [tenant, ref] : installed) {
+        bool valid = true;
+        {
+            MetadataAccessorRW accessor(this, tenant, ref);
+            accessor.Get().VisitReplicas(
+                [](const Replica& replica) { return replica.is_nof_replica(); },
+                [&](Replica& replica) {
+                    if (!valid) {
+                        return;
+                    }
+                    auto descriptor = replica.get_descriptor()
+                                          .get_nof_descriptor()
+                                          .buffer_descriptor;
+                    const auto found = nof_segments_by_endpoint.find(
+                        descriptor.transport_endpoint_);
+                    if (found == nof_segments_by_endpoint.end()) {
+                        valid = false;
+                        return;
+                    }
+                    const auto* segment = found->second;
+                    const auto& info = *segment->nof;
+                    if (descriptor.size_ !=
+                            accessor.Get().GetPart(0).length() ||
+                        descriptor.size_ == 0 ||
+                        descriptor.buffer_address_ < info.base ||
+                        descriptor.buffer_address_ - info.base >=
+                            info.capacity ||
+                        descriptor.size_ >
+                            info.capacity -
+                                (descriptor.buffer_address_ - info.base)) {
+                        valid = false;
+                        return;
+                    }
+                    if (replica.status() != ReplicaStatus::COMPLETE) {
+                        return;
+                    }
+                    if (legacy_objects) {
+                        auto& ranges = nof_ranges[segment];
+                        auto next =
+                            ranges.lower_bound(descriptor.buffer_address_);
+                        const uintptr_t end =
+                            descriptor.buffer_address_ + descriptor.size_;
+                        if ((next != ranges.end() && end > next->first) ||
+                            (next != ranges.begin() &&
+                             std::prev(next)->first + std::prev(next)->second >
+                                 descriptor.buffer_address_)) {
+                            valid = false;
+                            return;
+                        }
+                        ranges.emplace(descriptor.buffer_address_,
+                                       descriptor.size_);
+                    }
+                    nof_descriptors[segment].push_back(std::move(descriptor));
+                    nof_replicas[segment].push_back(&replica);
+                });
+        }
+        if (!valid) {
+            rollback_restored_state();
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        }
+    }
+
+    // NoF has no client remount callback. Rebuild and bind every live extent
+    // after the final object chunk has been applied.
+    for (const auto& [endpoint, segment] : nof_segments_by_endpoint) {
+        const auto& info = *segment->nof;
+        NoFSegment nof_segment;
+        nof_segment.id = info.segment_id;
+        nof_segment.name = info.segment_name;
+        nof_segment.te_endpoint = endpoint;
+        nof_segment.base = info.base;
+        nof_segment.size = info.capacity;
+        nof_segment.host_id = info.host_id;
+        nof_segment.rack_id = info.rack_id;
+        std::shared_ptr<BufferAllocatorBase> allocator;
+        std::vector<std::unique_ptr<AllocatedBuffer>> buffers;
+        auto& descriptors = nof_descriptors[segment];
+        if (!descriptors.empty()) {
+            std::vector<LiveAllocation> allocations;
+            allocations.reserve(descriptors.size());
+            for (const auto& descriptor : descriptors) {
+                allocations.push_back(
+                    {descriptor.buffer_address_ - info.base, descriptor.size_});
+            }
+            auto imported = ImportOffsetBufferAllocator(
+                info.segment_name, info.base, info.capacity, endpoint,
+                allocations, ReplicaType::NOF_SSD);
+            if (!imported) {
+                rollback_restored_state();
+                return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+            }
+            allocator = std::move(imported->allocator);
+            buffers = std::move(imported->buffers);
+        } else {
+            auto created = CreateBufferAllocator(
+                BufferAllocatorType::OFFSET, info.segment_name, info.base,
+                info.capacity, endpoint, ReplicaType::NOF_SSD);
+            if (!created) {
+                rollback_restored_state();
+                return tl::make_unexpected(created.error());
+            }
+            allocator = std::move(*created);
+        }
+        const auto err = [&] {
+            auto access = nof_segment_manager_.getNoFSegmentAccess();
+            return access.MountSegment(nof_segment, info.owner_client_id,
+                                       std::move(allocator));
+        }();
+        if (err == ErrorCode::OK) {
+            restored_nof_segments.emplace_back(info.segment_id,
+                                               info.owner_client_id);
+        }
+        if (err != ErrorCode::OK ||
+            buffers.size() != nof_replicas[segment].size()) {
+            rollback_restored_state();
+            return tl::make_unexpected(
+                err == ErrorCode::OK ? ErrorCode::INTERNAL_ERROR : err);
+        }
+        for (size_t i = 0; i < buffers.size(); ++i) {
+            if (!nof_replicas[segment][i]->replace_nof_buffer(
+                    std::move(buffers[i]))) {
+                rollback_restored_state();
+                return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+            }
+        }
+        invalid_replica_endpoints_.erase(endpoint);
+    }
+
     if (max_live_id != 0) {
         const ReplicaID desired_next_id = max_live_id + 1;
         ReplicaID current_next_id = Replica::next_id_.load();
@@ -4191,7 +4561,7 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
         return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
     }
 
-    // Durable repair for conflict-derived discards: a later promotion must
+    // Durable repair for discarded replicas: a later promotion must
     // not replay what this one dropped. The whole repair set goes out as one
     // indivisible batch record (REMOVE for full drops, canonical PUT_END
     // carrying only the survivors for partial ones), and the restore fails
@@ -4206,7 +4576,7 @@ tl::expected<void, ErrorCode> MasterService::RestoreFromStandbyState(
     // unrepaired, so the restore fails explicitly instead.
     if ((!repair_remove_keys.empty() || !repair_canonical_keys.empty()) &&
         enable_oplog_ && !ordered_oplog_writer_) {
-        LOG(ERROR) << "RestoreFromStandbySnapshot: conflict discards need "
+        LOG(ERROR) << "RestoreFromStandbySnapshot: discarded replicas need "
                       "durable repair but no OpLog writer is available; "
                       "failing the restore";
         rollback_restored_state();
@@ -4752,6 +5122,9 @@ auto MasterService::ReadReplicaList(const TenantId& tenant_id,
     // when the client is reading it. Read path is group-agnostic: only the
     // object's own lease is refreshed.
     metadata.GrantReadLease(std::chrono::milliseconds(default_kv_lease_ttl_));
+    if (enable_nof_soft_pin_access_renewal_ && metadata.IsNoFOnly()) {
+        metadata.TouchLastAccess();
+    }
 
     // Promotion-on-hit eligibility: only when no MEMORY replica is
     // present but at least one LOCAL_DISK replica is. Decided here while
@@ -5083,13 +5456,17 @@ auto MasterService::InsertMetadata(
     const std::chrono::system_clock::time_point& now,
     const ResolvedSoftPinRequest& soft_pin_request,
     std::vector<Replica>&& replicas, uint64_t pending_quota_charge,
-    std::optional<std::chrono::system_clock::time_point>
-        committed_soft_pin_timeout)
+    std::optional<CommittedSoftPinState> committed_soft_pin_state)
     -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
     assert(!accessor.IsPublished());
     const std::string& key = accessor.GetKey();
     const TenantId& tenant_id = accessor.GetTenantId();
-    const auto deadline_to_index = committed_soft_pin_timeout;
+    std::optional<std::chrono::system_clock::time_point> deadline_to_index;
+    if (committed_soft_pin_state) {
+        deadline_to_index = ObjectMetadata::ComputeSoftPinDeadline(
+            committed_soft_pin_state->last_access_time,
+            committed_soft_pin_state->soft_pin_ttl);
+    }
 
     std::vector<Replica::Descriptor> replica_list;
     std::unordered_set<ReplicaID> eligible_replica_ids;
@@ -5124,7 +5501,7 @@ auto MasterService::InsertMetadata(
     }
 
     accessor.Publish(client_id, now, value_length, std::move(replicas),
-                     std::move(committed_soft_pin_timeout),
+                     std::move(committed_soft_pin_state),
                      config.with_hard_pin, config.data_type, group_id,
                      tenant_id, key);
     auto& metadata = accessor.Get();
@@ -5164,8 +5541,7 @@ auto MasterService::AllocateAndInsertMetadata(
     const std::string& group_id,
     const std::chrono::system_clock::time_point& now,
     const ResolvedSoftPinRequest& soft_pin_request,
-    std::optional<std::chrono::system_clock::time_point>
-        committed_soft_pin_timeout,
+    std::optional<CommittedSoftPinState> committed_soft_pin_state,
     bool* dfs_allocation_failed)
     -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
     assert(!accessor.IsPublished());
@@ -5204,7 +5580,7 @@ auto MasterService::AllocateAndInsertMetadata(
     auto insert_result = InsertMetadata(
         accessor, client_id, value_length, config, group_id, now,
         soft_pin_request, std::move(allocation_result.value()),
-        pending_quota_charge, std::move(committed_soft_pin_timeout));
+        pending_quota_charge, std::move(committed_soft_pin_state));
     if (!insert_result) {
         ReleaseTenantQuota(accessor.QuotaAccount(), pending_quota_charge);
     }
@@ -5934,8 +6310,7 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
     ReplicateConfig allocation_config = config;
     std::string allocation_group_id = group_id;
     std::string allocation_session_id;
-    std::optional<std::chrono::system_clock::time_point>
-        allocation_committed_soft_pin_timeout;
+    std::optional<CommittedSoftPinState> allocation_committed_soft_pin_state;
     auto admit = [&](bool* dfs_allocation_failed)
         -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
         auto now = std::chrono::system_clock::now();
@@ -6046,11 +6421,15 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                     // effectively does not exist — fall through to Case A.
                     if (!metadata.HasReplica(&Replica::fn_is_completed)) {
                         allocation_session_id = metadata.session_id;
-                        allocation_committed_soft_pin_timeout =
-                            metadata.GetCommittedSoftPinTimeout();
-                        if (allocation_committed_soft_pin_timeout &&
-                            *allocation_committed_soft_pin_timeout <= now) {
-                            allocation_committed_soft_pin_timeout.reset();
+                        allocation_committed_soft_pin_state =
+                            metadata.GetCommittedSoftPinState();
+                        if (allocation_committed_soft_pin_state &&
+                            ObjectMetadata::ComputeSoftPinDeadline(
+                                allocation_committed_soft_pin_state
+                                    ->last_access_time,
+                                allocation_committed_soft_pin_state
+                                    ->soft_pin_ttl) <= now) {
+                            allocation_committed_soft_pin_state.reset();
                         }
                         accessor.Erase();
                     } else {
@@ -6071,7 +6450,7 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                 auto result = AllocateAndInsertMetadata(
                     accessor, client_id, slice_length, allocation_config,
                     writer_host_id, allocation_group_id, now, soft_pin_request,
-                    allocation_committed_soft_pin_timeout,
+                    allocation_committed_soft_pin_state,
                     dfs_allocation_failed);
                 if (result) {
                     accessor.Get().session_id = allocation_session_id;
@@ -6196,11 +6575,14 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                 allocation_config = config;
                 allocation_config.with_hard_pin =
                     allocation_config.with_hard_pin || metadata.IsHardPinned();
-                allocation_committed_soft_pin_timeout =
-                    metadata.GetCommittedSoftPinTimeout();
-                if (allocation_committed_soft_pin_timeout &&
-                    *allocation_committed_soft_pin_timeout <= now) {
-                    allocation_committed_soft_pin_timeout.reset();
+                allocation_committed_soft_pin_state =
+                    metadata.GetCommittedSoftPinState();
+                if (allocation_committed_soft_pin_state &&
+                    ObjectMetadata::ComputeSoftPinDeadline(
+                        allocation_committed_soft_pin_state->last_access_time,
+                        allocation_committed_soft_pin_state->soft_pin_ttl) <=
+                        now) {
+                    allocation_committed_soft_pin_state.reset();
                 }
 
                 allocation_group_id = metadata.group_id;
@@ -6289,12 +6671,12 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                                   soft_pin_request,
                                   std::move(*replacement_replicas),
                                   replacement_pending_quota_charge,
-                                  allocation_committed_soft_pin_timeout)
+                                  allocation_committed_soft_pin_state)
                             : AllocateAndInsertMetadata(
                                   accessor, client_id, slice_length,
                                   allocation_config, writer_host_id,
                                   allocation_group_id, now, soft_pin_request,
-                                  allocation_committed_soft_pin_timeout,
+                                  allocation_committed_soft_pin_state,
                                   dfs_allocation_failed);
                 if (!allocate_result) {
                     if (replacement_replicas.has_value()) {
@@ -9760,6 +10142,13 @@ void MasterService::EvictionThreadFunc() {
         }
 #endif
 
+        // NoF soft-pin TTL reclaim. Independent of allocation pressure: the
+        // cleanup pass queues NoF-only objects whose soft pin just expired.
+        if (need_soft_pin_reclaim_.load(std::memory_order_relaxed) ||
+            !soft_pin_deferred_evals_.empty()) {
+            EvictSoftPinExpired(now);
+        }
+
         if (dfs_allocator_ && dfs_allocator_->IsEvictionEnabled()) {
             const auto steady_now = std::chrono::steady_clock::now();
             if (steady_now >= next_dfs_eviction_time) {
@@ -11274,6 +11663,166 @@ void MasterService::NoFBatchEvict(double evict_ratio_target,
             << ", total_freed_size=" << total_freed_size;
 }
 
+void MasterService::EvictSoftPinExpired(
+    const std::chrono::system_clock::time_point& now) {
+    std::vector<SoftPinReclaimCandidate> candidates;
+    {
+        std::lock_guard lock(soft_pin_reclaim_queue_mutex_);
+        candidates.reserve(soft_pin_reclaim_queue_.size());
+        while (!soft_pin_reclaim_queue_.empty()) {
+            candidates.push_back(std::move(soft_pin_reclaim_queue_.front()));
+            soft_pin_reclaim_queue_.pop();
+        }
+        need_soft_pin_reclaim_.store(false, std::memory_order_relaxed);
+    }
+
+    // Fold in the candidates deferred from the previous cycle; the eviction
+    // thread cadence acts as their retry timer.
+    for (auto& entry : soft_pin_deferred_evals_) {
+        candidates.push_back(std::move(entry.second));
+    }
+    soft_pin_deferred_evals_.clear();
+
+    if (candidates.empty()) {
+        return;
+    }
+
+    size_t evicted_count = 0;
+    size_t deferred_count = 0;
+    size_t failed_count = 0;
+    int64_t freed_bytes = 0;
+
+    std::shared_lock<std::shared_mutex> shared_lock(master_state_mutex_);
+
+    const auto is_evictable_nof_replica = [](const Replica& replica) {
+        return replica.is_nof_replica() && replica.is_completed() &&
+               replica.get_refcnt() == 0;
+    };
+
+    for (const auto& candidate : candidates) {
+        const auto& tenant_id = candidate.tenant_id;
+        const auto& key = candidate.key;
+
+        MetadataAccessorRW accessor(this, ObjectIdentity{tenant_id, key},
+                                     MetadataAccessorRW::AsIs{});
+        if (!accessor.IsPublished()) {
+            continue;
+        }
+        auto& metadata = accessor.Get();
+
+        // The screening-to-eviction gap can include a concurrent Get lease
+        // renewal, a re-pin, or new replicas of another type, so every gate is
+        // re-validated here.
+        if (metadata.IsHardPinned() || !metadata.IsLeaseExpired()) {
+            soft_pin_deferred_evals_[tenant_id.MakeScopedKey(key)] = candidate;
+            ++deferred_count;
+            continue;
+        }
+        // A concurrent access re-activated the soft pin: it is indexed again
+        // and will be screened on its next expiry.
+        if (IsSoftPinActive(metadata, now)) {
+            continue;
+        }
+        // The object is no longer NoF-only; the normal eviction path owns it.
+        if (!metadata.IsNoFOnly() ||
+            !metadata.HasReplica(is_evictable_nof_replica)) {
+            continue;
+        }
+
+        // HA strong consistency: persist BEFORE erasing NoF replicas.
+        if (enable_oplog_ && ordered_oplog_writer_) {
+            auto remaining = BuildRemainingReplicaDescriptors(
+                metadata, is_evictable_nof_replica);
+            auto reservation = ReserveBatchOpLogSlot();
+            if (!reservation) {
+                LOG(WARNING)
+                    << "EvictSoftPinExpired: OpLog reservation failed for key="
+                    << key << ", err="
+                    << static_cast<int>(reservation.error())
+                    << ", re-queuing for retry";
+                soft_pin_deferred_evals_[tenant_id.MakeScopedKey(key)] =
+                    candidate;
+                ++failed_count;
+                continue;
+            }
+            std::vector<ReplicaID> removed_ids;
+            metadata.VisitReplicas(is_evictable_nof_replica,
+                                   [&removed_ids](Replica& replica) {
+                                       removed_ids.push_back(replica.id());
+                                       replica.mark_removed();
+                                   });
+            const size_t removed_count = removed_ids.size();
+            tl::expected<OpLogEntry, ErrorCode> persist_result;
+            if (remaining.empty()) {
+                persist_result = AppendReservedOpLogWithDurableFinalize(
+                    std::move(reservation.value()), OpType::REMOVE,
+                    tenant_id.value(), key, {},
+                    [this, removed_ids = std::move(removed_ids)](
+                        const OpLogEntry& durable_entry) {
+                        FinalizeRemovedReplicasAfterDurable(
+                            durable_entry, removed_ids, QuotaEraseMode::kFull);
+                    });
+            } else {
+                persist_result = AppendReservedOpLogWithDurableFinalize(
+                    std::move(reservation.value()), OpType::PUT_END,
+                    tenant_id.value(), key,
+                    SerializeMetadataForOpLogFromReplicaDescriptors(
+                        metadata, remaining),
+                    [this, removed_ids = std::move(removed_ids)](
+                        const OpLogEntry& durable_entry) {
+                        FinalizeRemovedReplicasAfterDurable(
+                            durable_entry, removed_ids, QuotaEraseMode::kFull);
+                    });
+            }
+            if (!persist_result) {
+                LOG(WARNING)
+                    << "EvictSoftPinExpired: OpLog persist failed for key="
+                    << key << ", err="
+                    << static_cast<int>(persist_result.error())
+                    << ", re-queuing for retry";
+                soft_pin_deferred_evals_[tenant_id.MakeScopedKey(key)] =
+                    candidate;
+                ++failed_count;
+            } else {
+                freed_bytes += static_cast<int64_t>(metadata.TotalLength() *
+                                                    removed_count);
+                ++evicted_count;
+                VLOG(1) << "action=nof_soft_pin_reclaim, tenant_id="
+                        << tenant_id.value() << ", key=" << key
+                        << ", removed_replicas=" << removed_count
+                        << ", mode=ha";
+            }
+            continue;
+        }
+
+        // Synchronous erase (non-HA path).
+        const size_t erased = metadata.EraseReplicas(is_evictable_nof_replica);
+        if (erased == 0) {
+            continue;
+        }
+        freed_bytes += static_cast<int64_t>(metadata.TotalLength() * erased);
+        ++evicted_count;
+        PublishKvRemovedAfterEvict(key, erased, "disk", metadata, tenant_id);
+        if (!metadata.IsValid()) {
+            accessor.Erase();
+        }
+        VLOG(1) << "action=nof_soft_pin_reclaim, tenant_id="
+                << tenant_id.value() << ", key=" << key
+                << ", removed_replicas=" << erased << ", mode=sync";
+    }
+
+    if (evicted_count > 0 || failed_count > 0) {
+        LOG(INFO) << "action=soft_pin_ttl_reclaim_round, evicted_count="
+                  << evicted_count << ", freed_bytes=" << freed_bytes
+                  << ", deferred=" << deferred_count
+                  << ", failed=" << failed_count;
+    }
+    if (evicted_count > 0) {
+        MasterMetricManager::instance().inc_soft_pin_reclaimed(
+            static_cast<int64_t>(evicted_count), freed_bytes);
+    }
+}
+
 void MasterService::ClientMonitorFunc() {
     while (client_monitor_running_) {
         const auto now = ClientLivenessRecord::Clock::now();
@@ -11477,6 +12026,16 @@ bool MasterService::TryUnmountNoFSegmentByHeartbeat(
     // restart.
     if (MasterNofInitiator())
         MasterNofInitiator()->CloseSegment(snapshot.segment.te_endpoint);
+    if (enable_oplog_ && ordered_oplog_writer_ &&
+        !snapshot.segment.te_endpoint.empty()) {
+        NoFSegmentUnmountOp op{snapshot.segment_id,
+                               snapshot.segment.te_endpoint};
+        auto bytes = struct_pack::serialize(op);
+        PersistSegmentOpForHAOrEnqueue("NofHeartbeatUnmount",
+                                       OpType::NOF_SEGMENT_UNMOUNT,
+                                       snapshot.segment.te_endpoint,
+                                       std::string(bytes.begin(), bytes.end()));
+    }
     MasterMetricManager::instance()
         .inc_nof_segments_unmounted_by_heartbeat_total();
     if (pt_rebuild_scheduler_) {

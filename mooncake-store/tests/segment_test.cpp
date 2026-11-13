@@ -460,8 +460,50 @@ TEST_F(SegmentTest, MemoryUsageSnapshotCountsSharedCxlAllocatorOnce) {
     EXPECT_EQ(snapshot.segments.at("cxl_pool").capacity_bytes, kSegmentSize);
 }
 
+TEST_F(SegmentTest, NoFMountUsesOffsetAndPreservesTopology) {
+    NoFSegmentManager segment_manager;
+    NoFSegment segment;
+    segment.id = generate_uuid();
+    segment.name = "nof_topology_segment";
+    segment.base = 0;
+    segment.size = 4096;
+    segment.te_endpoint = "nof_topology_endpoint";
+    segment.host_id = "storage-host";
+    segment.rack_id = "storage-rack";
+    const auto client_id = generate_uuid();
+
+    auto bytes = struct_pack::serialize(segment);
+    NoFSegment decoded;
+    ASSERT_EQ(struct_pack::deserialize_to(decoded, bytes),
+              struct_pack::errc::ok);
+    {
+        auto access = segment_manager.getNoFSegmentAccess();
+        ASSERT_EQ(access.MountSegment(decoded, client_id), ErrorCode::OK);
+        std::vector<NoFSegment> mounted;
+        ASSERT_EQ(access.GetClientSegments(client_id, mounted), ErrorCode::OK);
+        ASSERT_EQ(mounted.size(), 1u);
+        EXPECT_EQ(mounted.front().host_id, segment.host_id);
+        EXPECT_EQ(mounted.front().rack_id, segment.rack_id);
+    }
+    auto allocator = GetNoFAllocatorForTesting(segment_manager, segment.id);
+    ASSERT_NE(std::dynamic_pointer_cast<OffsetBufferAllocator>(allocator),
+              nullptr);
+    auto buffer = allocator->allocate(segment.size);
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->data(), nullptr);  // Namespace offset zero is valid.
+    buffer.reset();
+    {
+        auto access = segment_manager.getNoFSegmentAccess();
+        size_t capacity = 0;
+        ASSERT_EQ(access.PrepareUnmountSegment(segment.id, capacity),
+                  ErrorCode::OK);
+        ASSERT_EQ(access.CommitUnmountSegment(segment.id, client_id, capacity),
+                  ErrorCode::OK);
+    }
+}
+
 TEST_F(SegmentTest, NoFUsageSnapshotSurvivesMetricsReset) {
-    NoFSegmentManager segment_manager(BufferAllocatorType::OFFSET);
+    NoFSegmentManager segment_manager;
     constexpr size_t kSegmentSize = 16 * 1024 * 1024;
     constexpr size_t kAllocationSize = 4 * 1024 * 1024;
 
@@ -1265,7 +1307,7 @@ NoFSegment MakePtNoFSegment(size_t index, std::string name, std::string host,
 }  // namespace
 
 TEST_F(SegmentTest, NoFSpaceReportsTrackMountedSegments) {
-    NoFSegmentManager manager(BufferAllocatorType::OFFSET);
+    NoFSegmentManager manager;
     const UUID client = generate_uuid();
     auto a = MakePtNoFSegment(0, "nof-a", "host-a", "rack-a");
     auto b = MakePtNoFSegment(1, "nof-b", "host-b");
@@ -1295,7 +1337,7 @@ TEST_F(SegmentTest, NoFSpaceReportsTrackMountedSegments) {
 }
 
 TEST_F(SegmentTest, NoFSpaceReportsRunConcurrentlyWithSharedLockHolders) {
-    NoFSegmentManager manager(BufferAllocatorType::OFFSET);
+    NoFSegmentManager manager;
     const UUID client = generate_uuid();
     auto segment = MakePtNoFSegment(0, "nof-blocking", "host-a");
     {
@@ -1320,7 +1362,7 @@ TEST_F(SegmentTest, NoFSpaceReportsRunConcurrentlyWithSharedLockHolders) {
 }
 
 TEST_F(SegmentTest, NoFSpaceReportScanDoesNotObserveHalfMount) {
-    NoFSegmentManager manager(BufferAllocatorType::OFFSET);
+    NoFSegmentManager manager;
     const UUID client = generate_uuid();
     auto a = MakePtNoFSegment(0, "nof-a", "host-a");
     {

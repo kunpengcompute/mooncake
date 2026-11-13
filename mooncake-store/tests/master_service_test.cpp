@@ -751,6 +751,274 @@ TEST_F(MasterServiceTest, PutStartOnePlusOneAllowsSingleAllocatedReplica) {
     ASSERT_EQ(put_start_result->size(), 1u);
     EXPECT_TRUE(put_start_result->front().is_memory_replica());
 }
+
+TEST_F(MasterServiceTest, SoftPinTtlReclaimErasesExpiredNoFOnlyObject) {
+    auto service_config = MasterServiceConfig::builder()
+                              .set_enable_soft_pin_ttl_reclaim(true)
+                              .build();
+    std::unique_ptr<MasterService> service(new MasterService(service_config));
+    [[maybe_unused]] const auto mem_context = PrepareSimpleSegment(*service);
+    NoFSegment nof_segment =
+        MakeNoFSegment("soft_pin_reclaim_nof", "soft_pin_reclaim_nof_ep");
+    const UUID client_id = generate_uuid();
+    ASSERT_TRUE(service->MountNoFSegment(nof_segment, client_id).has_value());
+
+    const int64_t reclaim_keys_baseline =
+        MasterMetricManager::instance().get_soft_pin_reclaimed_key_count();
+    const int64_t reclaim_bytes_baseline =
+        MasterMetricManager::instance().get_soft_pin_reclaimed_bytes();
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.nof_replica_num = 1;
+    config.soft_pin_action = SoftPinAction::ENABLE;
+    config.soft_pin_ttl_ms = 5000;
+    ASSERT_TRUE(service
+                    ->PutStart(client_id, "nof_only_expired",
+                               TenantId::Default(), 1024, config)
+                    .has_value());
+    // Revoke the in-flight memory replica so the object becomes NoF-only once
+    // the NoF replica completes below.
+    ASSERT_TRUE(service
+                    ->PutRevoke(client_id, "nof_only_expired",
+                                TenantId::Default(), ReplicaType::MEMORY)
+                    .has_value());
+    ASSERT_TRUE(service
+                    ->PutEnd(client_id, "nof_only_expired", TenantId::Default(),
+                             ReplicaType::NOF_SSD)
+                    .has_value());
+    ASSERT_TRUE(GetSoftPinDeadline(*service, "nof_only_expired").has_value());
+
+    const auto now = std::chrono::system_clock::now();
+    SetSoftPinDeadlineForTest(*service, "nof_only_expired", now);
+    CleanupExpiredSoftPinsAt(*service, now);
+    EXPECT_FALSE(GetSoftPinDeadline(*service, "nof_only_expired").has_value());
+    MasterServiceTestPeer(*service).RunSoftPinTtlEvictionForTesting(now);
+
+    EXPECT_EQ(
+        MasterMetricManager::instance().get_soft_pin_reclaimed_key_count(),
+        reclaim_keys_baseline + 1);
+    EXPECT_GT(MasterMetricManager::instance().get_soft_pin_reclaimed_bytes(),
+              reclaim_bytes_baseline);
+    auto get = service->GetReplicaList("nof_only_expired", TenantId::Default());
+    ASSERT_FALSE(get.has_value());
+    EXPECT_EQ(get.error(), ErrorCode::OBJECT_NOT_FOUND);
+}
+
+TEST_F(MasterServiceTest, SoftPinTtlReclaimSkipsNonNoFOnlyObject) {
+    auto service_config = MasterServiceConfig::builder()
+                              .set_enable_soft_pin_ttl_reclaim(true)
+                              .build();
+    std::unique_ptr<MasterService> service(new MasterService(service_config));
+    [[maybe_unused]] const auto mem_context = PrepareSimpleSegment(*service);
+    const UUID client_id = generate_uuid();
+
+    const int64_t reclaim_keys_baseline =
+        MasterMetricManager::instance().get_soft_pin_reclaimed_key_count();
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.soft_pin_action = SoftPinAction::ENABLE;
+    config.soft_pin_ttl_ms = 5000;
+    PutCompletedObject(*service, client_id, "memory_only_expired", config);
+    ASSERT_TRUE(
+        GetSoftPinDeadline(*service, "memory_only_expired").has_value());
+
+    const auto now = std::chrono::system_clock::now();
+    SetSoftPinDeadlineForTest(*service, "memory_only_expired", now);
+    CleanupExpiredSoftPinsAt(*service, now);
+    EXPECT_FALSE(
+        GetSoftPinDeadline(*service, "memory_only_expired").has_value());
+    MasterServiceTestPeer(*service).RunSoftPinTtlEvictionForTesting(now);
+
+    // Only the soft pin is unprotected; the resident memory replica is left for
+    // the normal eviction path to reclaim under allocation pressure.
+    EXPECT_EQ(
+        MasterMetricManager::instance().get_soft_pin_reclaimed_key_count(),
+        reclaim_keys_baseline);
+    EXPECT_TRUE(
+        service->GetReplicaList("memory_only_expired", TenantId::Default())
+            .has_value());
+}
+
+TEST_F(MasterServiceTest, SoftPinTtlReclaimSwitchOffLeavesObjectResident) {
+    std::unique_ptr<MasterService> service(new MasterService());
+    [[maybe_unused]] const auto mem_context = PrepareSimpleSegment(*service);
+    NoFSegment nof_segment =
+        MakeNoFSegment("soft_pin_no_reclaim_nof", "soft_pin_no_reclaim_nof_ep");
+    const UUID client_id = generate_uuid();
+    ASSERT_TRUE(service->MountNoFSegment(nof_segment, client_id).has_value());
+
+    const int64_t reclaim_keys_baseline =
+        MasterMetricManager::instance().get_soft_pin_reclaimed_key_count();
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.nof_replica_num = 1;
+    config.soft_pin_action = SoftPinAction::ENABLE;
+    config.soft_pin_ttl_ms = 5000;
+    ASSERT_TRUE(service
+                    ->PutStart(client_id, "nof_no_reclaim", TenantId::Default(),
+                               1024, config)
+                    .has_value());
+    ASSERT_TRUE(service
+                    ->PutRevoke(client_id, "nof_no_reclaim",
+                                TenantId::Default(), ReplicaType::MEMORY)
+                    .has_value());
+    ASSERT_TRUE(service
+                    ->PutEnd(client_id, "nof_no_reclaim", TenantId::Default(),
+                             ReplicaType::NOF_SSD)
+                    .has_value());
+    ASSERT_TRUE(GetSoftPinDeadline(*service, "nof_no_reclaim").has_value());
+
+    const auto now = std::chrono::system_clock::now();
+    SetSoftPinDeadlineForTest(*service, "nof_no_reclaim", now);
+    CleanupExpiredSoftPinsAt(*service, now);
+    EXPECT_FALSE(GetSoftPinDeadline(*service, "nof_no_reclaim").has_value());
+    MasterServiceTestPeer(*service).RunSoftPinTtlEvictionForTesting(now);
+
+    EXPECT_EQ(
+        MasterMetricManager::instance().get_soft_pin_reclaimed_key_count(),
+        reclaim_keys_baseline);
+    EXPECT_TRUE(service->GetReplicaList("nof_no_reclaim", TenantId::Default())
+                    .has_value());
+}
+
+TEST_F(MasterServiceTest, SoftPinTtlReclaimDefersLiveLease) {
+    auto service_config = MasterServiceConfig::builder()
+                              .set_default_kv_lease_ttl(60000)
+                              .set_enable_soft_pin_ttl_reclaim(true)
+                              .build();
+    std::unique_ptr<MasterService> service(new MasterService(service_config));
+    [[maybe_unused]] const auto mem_context = PrepareSimpleSegment(*service);
+    NoFSegment nof_segment = MakeNoFSegment("soft_pin_reclaim_leased_nof",
+                                            "soft_pin_reclaim_leased_nof_ep");
+    const UUID client_id = generate_uuid();
+    ASSERT_TRUE(service->MountNoFSegment(nof_segment, client_id).has_value());
+
+    const int64_t reclaim_keys_baseline =
+        MasterMetricManager::instance().get_soft_pin_reclaimed_key_count();
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.nof_replica_num = 1;
+    config.soft_pin_action = SoftPinAction::ENABLE;
+    config.soft_pin_ttl_ms = 5000;
+    ASSERT_TRUE(service
+                    ->PutStart(client_id, "nof_leased_expired",
+                               TenantId::Default(), 1024, config)
+                    .has_value());
+    ASSERT_TRUE(service
+                    ->PutRevoke(client_id, "nof_leased_expired",
+                                TenantId::Default(), ReplicaType::MEMORY)
+                    .has_value());
+    ASSERT_TRUE(service
+                    ->PutEnd(client_id, "nof_leased_expired",
+                             TenantId::Default(), ReplicaType::NOF_SSD)
+                    .has_value());
+    ASSERT_TRUE(GetSoftPinDeadline(*service, "nof_leased_expired").has_value());
+
+    // A read grants a live object lease, so the reclaim round must defer the
+    // physical erase even though the soft pin itself has expired.
+    ASSERT_TRUE(
+        service->GetReplicaList("nof_leased_expired", TenantId::Default())
+            .has_value());
+
+    const auto now = std::chrono::system_clock::now();
+    SetSoftPinDeadlineForTest(*service, "nof_leased_expired", now);
+    CleanupExpiredSoftPinsAt(*service, now);
+    EXPECT_FALSE(
+        GetSoftPinDeadline(*service, "nof_leased_expired").has_value());
+    MasterServiceTestPeer(*service).RunSoftPinTtlEvictionForTesting(now);
+
+    EXPECT_EQ(
+        MasterMetricManager::instance().get_soft_pin_reclaimed_key_count(),
+        reclaim_keys_baseline);
+    EXPECT_TRUE(
+        service->GetReplicaList("nof_leased_expired", TenantId::Default())
+            .has_value());
+}
+
+TEST_F(MasterServiceTest, NoFAccessRenewalSlidesDeadlineWhenEnabled) {
+    auto service_config = MasterServiceConfig::builder()
+                              .set_enable_nof_soft_pin_access_renewal(true)
+                              .build();
+    std::unique_ptr<MasterService> service(new MasterService(service_config));
+    [[maybe_unused]] const auto mem_context = PrepareSimpleSegment(*service);
+    NoFSegment nof_segment =
+        MakeNoFSegment("soft_pin_renewal_nof", "soft_pin_renewal_nof_ep");
+    const UUID client_id = generate_uuid();
+    ASSERT_TRUE(service->MountNoFSegment(nof_segment, client_id).has_value());
+
+    const int64_t pin_keys_baseline =
+        MasterMetricManager::instance().get_soft_pin_key_count();
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.nof_replica_num = 1;
+    config.soft_pin_action = SoftPinAction::ENABLE;
+    config.soft_pin_ttl_ms = 5000;
+    ASSERT_TRUE(service
+                    ->PutStart(client_id, "nof_renewed", TenantId::Default(),
+                               1024, config)
+                    .has_value());
+    ASSERT_TRUE(service
+                    ->PutRevoke(client_id, "nof_renewed", TenantId::Default(),
+                                ReplicaType::MEMORY)
+                    .has_value());
+    ASSERT_TRUE(service
+                    ->PutEnd(client_id, "nof_renewed", TenantId::Default(),
+                             ReplicaType::NOF_SSD)
+                    .has_value());
+    const auto deadline = GetSoftPinDeadline(*service, "nof_renewed");
+    ASSERT_TRUE(deadline.has_value());
+
+    // The read hit must slide the NoF-only sliding-window deadline forward.
+    // Sleep past the clock's finest tick so the touched last_access_time is
+    // strictly later than the write that anchored the original deadline.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(service->GetReplicaList("nof_renewed", TenantId::Default())
+                    .has_value());
+    CleanupExpiredSoftPinsAt(*service, *deadline);
+
+    const auto renewed = GetSoftPinDeadline(*service, "nof_renewed");
+    ASSERT_TRUE(renewed.has_value());
+    EXPECT_GT(*renewed, *deadline);
+    EXPECT_EQ(MasterMetricManager::instance().get_soft_pin_key_count(),
+              pin_keys_baseline + 1);
+}
+
+TEST_F(MasterServiceTest, NoFAccessRenewalRequiresNoFOnly) {
+    auto service_config = MasterServiceConfig::builder()
+                              .set_enable_nof_soft_pin_access_renewal(true)
+                              .build();
+    std::unique_ptr<MasterService> service(new MasterService(service_config));
+    [[maybe_unused]] const auto mem_context = PrepareSimpleSegment(*service);
+    const UUID client_id = generate_uuid();
+
+    const int64_t pin_keys_baseline =
+        MasterMetricManager::instance().get_soft_pin_key_count();
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.soft_pin_action = SoftPinAction::ENABLE;
+    config.soft_pin_ttl_ms = 5000;
+    PutCompletedObject(*service, client_id, "memory_only_renewal", config);
+    const auto deadline = GetSoftPinDeadline(*service, "memory_only_renewal");
+    ASSERT_TRUE(deadline.has_value());
+
+    // The switch is on, but a non-NoF-only object must keep a static window.
+    ASSERT_TRUE(
+        service->GetReplicaList("memory_only_renewal", TenantId::Default())
+            .has_value());
+    CleanupExpiredSoftPinsAt(*service, *deadline);
+
+    EXPECT_FALSE(
+        GetSoftPinDeadline(*service, "memory_only_renewal").has_value());
+    EXPECT_EQ(MasterMetricManager::instance().get_soft_pin_key_count(),
+              pin_keys_baseline);
+}
+
 #endif
 
 TEST_F(MasterServiceTest, DfsPutEndAllAndUpsertTopologyAreAtomic) {

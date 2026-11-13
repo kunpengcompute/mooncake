@@ -45,6 +45,11 @@ void MasterServiceTestPeer::RunTenantEvictForTesting() {
     service_.EvictTenantsOverWatermark();
 }
 
+void MasterServiceTestPeer::RunSoftPinTtlEvictionForTesting(
+    const std::chrono::system_clock::time_point& now) {
+    service_.EvictSoftPinExpired(now);
+}
+
 void MasterServiceTestPeer::SetKvTenantEpochTrackingForTesting(bool enabled) {
     service_.kv_track_tenant_epochs_ = enabled;
 }

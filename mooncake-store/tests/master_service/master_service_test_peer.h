@@ -61,6 +61,12 @@ class MasterServiceTestPeer {
     // Drive one tenant watermark eviction pass without the periodic worker.
     void RunTenantEvictForTesting();
 
+    // Drive one soft-pin TTL reclaim round synchronously (drains the queue
+    // populated by CleanupExpiredSoftPins), without the periodic eviction
+    // worker.
+    void RunSoftPinTtlEvictionForTesting(
+        const std::chrono::system_clock::time_point& now);
+
     // The service's walks over tenants and over one tenant's objects.
     auto ReadCursor(const TenantId& tenant_id) const {
         return service_.ReadCursor(tenant_id);

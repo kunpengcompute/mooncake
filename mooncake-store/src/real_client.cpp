@@ -4752,7 +4752,12 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
         if (npu && !accelerator->ValidateRange(buffer, size))
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         size_t registration_size = size;
-        const bool te_registered = !npu || !ascend_data_staging_;
+        const bool skip_te_hbm_mr =
+            npu && ascend_parameter_direct_ &&
+            Environ::Process().GetTypedOr(
+                EnvironmentVariable<bool>{"MC_NOF_SKIP_TE_HBM_MR"}, false);
+        const bool staged_device = npu && ascend_data_staging_;
+        const bool te_registered = !staged_device && !skip_te_hbm_mr;
         if (te_registered) {
             auto *shm_helper = ShmHelper::getInstance();
             if (!npu && shm_helper->is_hugepage()) {
@@ -4763,11 +4768,15 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
             auto rc = client_->RegisterLocalMemory(
                 buffer, registration_size, kWildcardLocation, false, true);
             if (!rc) return rc;
+        } else if (skip_te_hbm_mr) {
+            LOG_FIRST_N(INFO, 1)
+                << "MC_NOF_SKIP_TE_HBM_MR enabled: skipping Transfer Engine "
+                   "HBM MR registration";
         }
         if (npu) ascend_device_buffers_.insert(buffer);
         registered_buffer_sizes_[buffer] = {size, te_registered, false};
         ascend_registration_refs_[buffer] = 1;
-        if (nof_runtime_.initiator && te_registered) {
+        if (nof_runtime_.initiator && !staged_device) {
             const auto rc =
                 npu ? nof_runtime_.initiator->RegisterDeviceMemory(buffer, size)
                     : nof_runtime_.initiator->RegisterMemory(buffer,

@@ -36,6 +36,7 @@
 #include "config/dfs_enablement_config.h"
 #include "config/master_metadata_config.h"
 #include "environ.h"
+#include "environment_variables.h"
 #include "segment.h"
 #include "segment/region_driver.h"
 // nof_runtime.h is compiled unconditionally (returns a null initiator in
@@ -351,19 +352,24 @@ MasterService::MasterService(const MasterServiceConfig& config)
     }
 
 #ifdef USE_NOF
-    if (nof_heartbeat_interval_sec_.count() <= 0) {
-        LOG(ERROR) << "nof_heartbeat_interval_sec must be positive, current "
-                   << nof_heartbeat_interval_sec_.count();
-        throw std::invalid_argument("Invalid nof heartbeat interval");
-    }
-    if (nof_heartbeat_probe_timeout_ms_.count() <= 0) {
-        LOG(ERROR) << "nof_heartbeat_probe_timeout_ms must be positive, "
-                   << "current " << nof_heartbeat_probe_timeout_ms_.count();
-        throw std::invalid_argument("Invalid nof heartbeat probe timeout");
-    }
-    if (nof_heartbeat_failures_threshold_ == 0) {
-        LOG(ERROR) << "nof_heartbeat_failures_threshold must be positive";
-        throw std::invalid_argument("Invalid nof heartbeat failure threshold");
+    const bool nof_heartbeat_enabled = Environ::Process().GetTypedOr(
+        NoFHeartbeatEnvironmentVariables::MC_NOF_HEARTBEAT_ENABLED, true);
+    if (nof_heartbeat_enabled) {
+        if (nof_heartbeat_interval_sec_.count() <= 0) {
+            LOG(ERROR) << "nof_heartbeat_interval_sec must be positive, current "
+                       << nof_heartbeat_interval_sec_.count();
+            throw std::invalid_argument("Invalid nof heartbeat interval");
+        }
+        if (nof_heartbeat_probe_timeout_ms_.count() <= 0) {
+            LOG(ERROR) << "nof_heartbeat_probe_timeout_ms must be positive, "
+                       << "current " << nof_heartbeat_probe_timeout_ms_.count();
+            throw std::invalid_argument("Invalid nof heartbeat probe timeout");
+        }
+        if (nof_heartbeat_failures_threshold_ == 0) {
+            LOG(ERROR) << "nof_heartbeat_failures_threshold must be positive";
+            throw std::invalid_argument(
+                "Invalid nof heartbeat failure threshold");
+        }
     }
 
     nof_probe_fn_ = &DefaultProbeNofSegment;
@@ -477,10 +483,14 @@ MasterService::MasterService(const MasterServiceConfig& config)
     VLOG(1) << "action=start_client_monitor_thread";
 
 #ifdef USE_NOF
-    nof_heartbeat_running_ = true;
-    nof_heartbeat_thread_ =
-        std::thread(&MasterService::NofHeartbeatThreadFunc, this);
-    VLOG(1) << "action=start_nof_heartbeat_thread";
+    if (nof_heartbeat_enabled) {
+        nof_heartbeat_running_ = true;
+        nof_heartbeat_thread_ =
+            std::thread(&MasterService::NofHeartbeatThreadFunc, this);
+    }
+    LOG(INFO) << "NoF heartbeat "
+              << (nof_heartbeat_enabled ? "enabled" : "disabled")
+              << ", MC_NOF_HEARTBEAT_ENABLED=" << nof_heartbeat_enabled;
 #endif
 
     // Start task cleanup thread

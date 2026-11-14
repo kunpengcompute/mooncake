@@ -539,8 +539,12 @@ class SpdkInitiator::Impl {
             // seconds and would stall first-time opens of other endpoints.
             auto new_info = std::make_unique<ctrlr_info>();
             new_info->src_addr = tr.src_addr;
-            if (ConnectController(&tr.trid, new_info.get()) != 0 ||
-                !new_info->ctrlr) {
+            const int rc = ConnectController(&tr.trid, new_info.get());
+            if (rc != 0 || !new_info->ctrlr) {
+                LOG(ERROR) << "NoF controller connect failed: endpoint="
+                           << tr.ctrlr_key << ", src_addr=" << tr.src_addr
+                           << ", probe_rc=" << rc
+                           << ", attached=" << (new_info->ctrlr != nullptr);
                 return nullptr;
             }
             new_info->key = tr.ctrlr_key;
@@ -1145,72 +1149,115 @@ class SpdkInitiator::Impl {
             if (error_reason) *error_reason = "alloc_fail";
             return false;
         }
-        // Read existing data without changing namespace contents or capacity.
-        auto run_io = [&]() {
-            auto* ctx = probe_pool_.Acquire();
-            ctx->adaptor = {&ProbeReadComplete, ctx};
-            ctx->seg = seg_handle;
-            int ret = SubmitIO(seg_handle, buffer, 0, block_size,
-                               NofIOOp::kRead, &ctx->adaptor);
-            if (ret != 0) {
-                probe_pool_.Recycle(ctx);
-                if (error_reason) {
-                    *error_reason =
-                        IsControllerConnectionError(ret)
-                            ? "controller_error:" + std::to_string(ret)
-                            : "submit_fail";
-                }
-                if (IsControllerConnectionError(ret))
-                    InvalidateController(seg_handle);
-                AbortSegment(seg_handle);
-                return false;
+        NofProbeContext* probe_ctx = probe_pool_.Acquire();
+        probe_ctx->adaptor = {&ProbeReadComplete, probe_ctx};
+        probe_ctx->seg = seg_handle;
+        auto* qpair = seg_handle->qpair.load();
+        errno = 0;
+        const int submit_rc = SubmitIO(seg_handle, buffer, 0, block_size,
+                                       NofIOOp::kRead, &probe_ctx->adaptor);
+        const int submit_errno = errno;
+        if (submit_rc != 0) {
+            LOG(WARNING) << "NoF heartbeat read submission failed: endpoint="
+                         << tr_str
+                         << ", qid=" << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
+                         << ", qpair=" << qpair << ", lba=0, bytes="
+                         << block_size << ", submit_rc=" << submit_rc
+                         << ", submit_errno=" << submit_errno
+                         << ", connected="
+                         << (qpair && spdk_nvme_qpair_is_connected(qpair))
+                         << ", qpair_failure_reason="
+                         << (qpair ? spdk_nvme_qpair_get_failure_reason(qpair)
+                                   : 0);
+            probe_pool_.Recycle(probe_ctx);
+            if (error_reason) {
+                *error_reason = IsControllerConnectionError(submit_rc)
+                                    ? "controller_error:" +
+                                          std::to_string(submit_rc)
+                                    : "submit_fail";
             }
-            auto deadline = std::chrono::steady_clock::now() +
-                            std::chrono::milliseconds(timeout_ms);
-            while (!ctx->done.load(std::memory_order_acquire) &&
-                   std::chrono::steady_clock::now() < deadline) {
-                int admin_ret = PollAdminCompletions(seg_handle);
-                int64_t poll_ret = PollCompletion(seg_handle, 0);
-                if (IsControllerConnectionError(admin_ret) ||
-                    IsControllerConnectionError(poll_ret)) {
-                    if (error_reason)
-                        *error_reason =
-                            "controller_error:" +
-                            std::to_string(admin_ret < 0 ? admin_ret
-                                                         : poll_ret);
-                    InvalidateController(seg_handle);
-                    AbortSegment(seg_handle);
-                    if (ctx->done.load(std::memory_order_acquire))
-                        probe_pool_.Recycle(ctx);
-                    else
-                        probe_pool_.Quarantine(ctx);
-                    return false;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            bool done = ctx->done.load(std::memory_order_acquire);
-            bool ok = done && ctx->success.load(std::memory_order_acquire);
-            if (!ok && error_reason) {
-                std::lock_guard<std::mutex> lock(ctx->error_mutex);
-                *error_reason = done ? ctx->error_reason : "completion_timeout";
-            }
-            if (!done) {
+            if (IsControllerConnectionError(submit_rc)) {
                 InvalidateController(seg_handle);
-                AbortSegment(seg_handle);
             }
-            if (ctx->done.load(std::memory_order_acquire))
-                probe_pool_.Recycle(ctx);
-            else
-                probe_pool_.Quarantine(ctx);
-            return ok;
-        };
-        const bool ok = run_io();
-        // AbortSegment above completes callbacks before this DMA buffer is
-        // freed.
-        if (!seg_handle->qpair || ok)
-            spdk_free(buffer);
-        else {
             AbortSegment(seg_handle);
+            spdk_free(buffer);
+            return false;
+        }
+
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(timeout_ms);
+        int64_t last_poll_rc = 0;
+        int64_t first_poll_error = 0;
+        int first_poll_errno = 0;
+        int64_t connection_error = 0;
+        uint64_t poll_count = 0;
+        uint64_t completions_seen = 0;
+        while (!probe_ctx->done.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            const int admin_ret = PollAdminCompletions(seg_handle);
+            errno = 0;
+            last_poll_rc = PollCompletion(seg_handle, 0);
+            const int poll_errno = errno;
+            ++poll_count;
+            if (last_poll_rc > 0) {
+                completions_seen += static_cast<uint64_t>(last_poll_rc);
+            } else if (last_poll_rc < 0 && first_poll_error == 0) {
+                first_poll_error = last_poll_rc;
+                first_poll_errno = poll_errno;
+            }
+            if (IsControllerConnectionError(admin_ret) ||
+                IsControllerConnectionError(last_poll_rc)) {
+                connection_error = IsControllerConnectionError(admin_ret)
+                                       ? admin_ret
+                                       : last_poll_rc;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        const bool done = probe_ctx->done.load(std::memory_order_acquire);
+        const bool ok = connection_error == 0 && done &&
+                        probe_ctx->success.load(std::memory_order_acquire);
+        if (!ok) {
+            std::string reason = done ? "completion_error" : "completion_timeout";
+            if (connection_error != 0) {
+                reason = "controller_error:" + std::to_string(connection_error);
+            } else if (done) {
+                std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
+                if (!probe_ctx->error_reason.empty()) {
+                    reason = probe_ctx->error_reason;
+                }
+            }
+            if (error_reason) *error_reason = reason;
+            LOG(WARNING) << "NoF heartbeat read failed: endpoint=" << tr_str
+                         << ", qid=" << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
+                         << ", qpair=" << qpair << ", lba=0, bytes="
+                         << block_size << ", timeout_ms=" << timeout_ms
+                         << ", submit_rc=" << submit_rc
+                         << ", poll_count=" << poll_count
+                         << ", completions_seen=" << completions_seen
+                         << ", first_poll_error=" << first_poll_error
+                         << ", first_poll_errno=" << first_poll_errno
+                         << ", last_poll_rc=" << last_poll_rc
+                         << ", connected="
+                         << (qpair && spdk_nvme_qpair_is_connected(qpair))
+                         << ", qpair_failure_reason="
+                         << (qpair ? spdk_nvme_qpair_get_failure_reason(qpair)
+                                   : 0)
+                         << ", reason=" << reason;
+        }
+
+        if (connection_error != 0 || !done) {
+            InvalidateController(seg_handle);
+            AbortSegment(seg_handle);
+        }
+        // An unsuccessful abort can leave SPDK holding both the probe
+        // context and its DMA buffer until the controller is drained.
+        if (probe_ctx->done.load(std::memory_order_acquire)) {
+            probe_pool_.Recycle(probe_ctx);
+            spdk_free(buffer);
+        } else {
+            probe_pool_.Quarantine(probe_ctx);
             if (!seg_handle->qpair) spdk_free(buffer);
         }
         return ok;
@@ -1293,9 +1340,10 @@ class SpdkInitiator::Impl {
         if (!c.success) {
             {
                 std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
-                probe_ctx->error_reason = c.error_string.empty()
-                                              ? "completion_error"
-                                              : c.error_string;
+                probe_ctx->error_reason =
+                    "completion_error:" + c.error_string +
+                    ", sc=" + std::to_string(c.sc) +
+                    ", sct=" + std::to_string(c.sct);
             }
             probe_ctx->success.store(false, std::memory_order_release);
         } else {

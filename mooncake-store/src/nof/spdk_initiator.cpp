@@ -426,6 +426,7 @@ struct ctrlr_info {
 // address, a monotonically increasing id is never recycled (a new Impl could
 // otherwise inherit a dead one's leftover registration records).
 std::atomic<uint64_t> g_nof_owner_token{1};
+std::atomic<uint64_t> g_nof_probe_id{1};
 
 }  // namespace
 
@@ -1153,6 +1154,10 @@ class SpdkInitiator::Impl {
         NofProbeContext* probe_ctx = probe_pool_.Acquire();
         probe_ctx->adaptor = {&ProbeReadComplete, probe_ctx};
         probe_ctx->seg = seg_handle;
+        probe_ctx->probe_id =
+            g_nof_probe_id.fetch_add(1, std::memory_order_relaxed);
+        probe_ctx->submitted_at = std::chrono::steady_clock::now();
+        probe_ctx->timeout = std::chrono::milliseconds(timeout_ms);
         auto* qpair = seg_handle->qpair.load();
         errno = 0;
         const int submit_rc = SubmitIO(seg_handle, buffer, 0, block_size,
@@ -1160,8 +1165,9 @@ class SpdkInitiator::Impl {
         const int submit_errno = errno;
         if (submit_rc != 0) {
             LOG(WARNING) << "NoF heartbeat read submission failed: endpoint="
-                         << tr_str
-                         << ", qid=" << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
+                         << tr_str << ", probe_id=" << probe_ctx->probe_id
+                         << ", qid="
+                         << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
                          << ", qpair=" << qpair << ", lba=0, bytes="
                          << block_size << ", submit_rc=" << submit_rc
                          << ", submit_errno=" << submit_errno
@@ -1230,8 +1236,16 @@ class SpdkInitiator::Impl {
                 }
             }
             if (error_reason) *error_reason = reason;
+            auto* ctrlr = spdk_nvme_ns_get_ctrlr(seg_handle->ns);
+            const auto* opts = spdk_nvme_ctrlr_get_opts(ctrlr);
             LOG(WARNING) << "NoF heartbeat read failed: endpoint=" << tr_str
-                         << ", qid=" << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
+                         << ", probe_id=" << probe_ctx->probe_id
+                         << ", cntlid=" << spdk_nvme_ctrlr_get_id(ctrlr)
+                         << ", qid="
+                         << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
+                         << ", hostnqn=" << opts->hostnqn
+                         << ", src_addr="
+                         << (opts->src_addr[0] ? opts->src_addr : "auto")
                          << ", qpair=" << qpair << ", lba=0, bytes="
                          << block_size << ", timeout_ms=" << timeout_ms
                          << ", submit_rc=" << submit_rc
@@ -1338,6 +1352,22 @@ class SpdkInitiator::Impl {
 
     static void ProbeReadComplete(void* ctx, const NofIOCompletion& c) {
         auto* probe_ctx = reinterpret_cast<NofProbeContext*>(ctx);
+        const auto elapsed =
+            std::chrono::steady_clock::now() - probe_ctx->submitted_at;
+        if (elapsed >= probe_ctx->timeout) {
+            auto* seg = probe_ctx->seg;
+            auto* ctrlr = spdk_nvme_ns_get_ctrlr(seg->ns);
+            LOG(WARNING) << "NoF heartbeat read completed after timeout budget: "
+                         << "probe_id=" << probe_ctx->probe_id
+                         << ", cntlid=" << spdk_nvme_ctrlr_get_id(ctrlr)
+                         << ", qid=" << spdk_nvme_qpair_get_id(seg->qpair)
+                         << ", nsid=" << spdk_nvme_ns_get_id(seg->ns)
+                         << ", elapsed_ms="
+                         << std::chrono::duration_cast<std::chrono::milliseconds>(
+                                elapsed).count()
+                         << ", success=" << c.success << ", sc=" << c.sc
+                         << ", sct=" << c.sct << ", status=" << c.error_string;
+        }
         if (!c.success) {
             {
                 std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);

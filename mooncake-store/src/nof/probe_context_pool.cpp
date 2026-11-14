@@ -7,6 +7,9 @@ void NofProbeContext::Reset() {
     done.store(false, std::memory_order_release);
     success.store(false, std::memory_order_release);
     error_reason.clear();
+    probe_id = 0;
+    submitted_at = {};
+    timeout = std::chrono::milliseconds::zero();
     adaptor = {};
     seg = nullptr;
 }

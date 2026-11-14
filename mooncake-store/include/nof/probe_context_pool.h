@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stack>
@@ -18,6 +20,9 @@ struct NofProbeContext {
     std::atomic<bool> success{false};
     std::mutex error_mutex;
     std::string error_reason;
+    uint64_t probe_id{0};
+    std::chrono::steady_clock::time_point submitted_at{};
+    std::chrono::milliseconds timeout{0};
     NofIOAdaptor adaptor{};
     // Segment the probe was submitted on. Used by the initiator teardown
     // drain to find the qpair a timed-out probe is still outstanding on.

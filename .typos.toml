@@ -11,6 +11,8 @@ wqs = "wqs"
 hsa = "hsa"
 Optin = "Optin"
 HPE = "HPE"
+# NVMe Asynchronous Event Request, used by the SPDK AER callback.
+aer = "aer"
 
 [default.extend-identifiers]
 # CPython buffer protocol flag from the Python C API.

@@ -50,7 +50,7 @@ NofBackend ResolveNofBackend() {
 }  // namespace
 #endif  // USE_NOF
 
-NofRuntime CreateNofRuntime() {
+NofRuntime CreateNofRuntime(const std::string& source_ip) {
 #ifdef USE_NOF
     if (ResolveNofBackend() == NofBackend::kNone) {
         // Runtime-disable: nullptr initiator is the uniform "NoF unavailable"
@@ -59,9 +59,10 @@ NofRuntime CreateNofRuntime() {
         // allocator never actually reaches ClientBufferAllocator.
         return NofRuntime{nullptr, std::make_shared<SystemDmaAllocator>()};
     }
-    return NofRuntime{std::make_shared<SpdkInitiator>(),
+    return NofRuntime{std::make_shared<SpdkInitiator>(source_ip),
                       std::make_shared<SpdkDmaAllocator>()};
 #else
+    (void)source_ip;
     // Non-USE_NOF builds ignore MC_NOF_BACKEND (a backend that isn't compiled
     // in cannot be selected).
     return NofRuntime{nullptr, std::make_shared<SystemDmaAllocator>()};

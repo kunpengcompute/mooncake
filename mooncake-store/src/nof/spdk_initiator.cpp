@@ -18,6 +18,7 @@
 #include <sched.h>
 #endif
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <spdk/dma.h>
@@ -434,7 +435,7 @@ std::atomic<uint64_t> g_nof_owner_token{1};
 
 class SpdkInitiator::Impl {
    public:
-    Impl() = default;
+    explicit Impl(std::string source_ip) : source_ip_(std::move(source_ip)) {}
 
     ~Impl() {
         if (!env_guard_) {
@@ -1341,7 +1342,8 @@ class SpdkInitiator::Impl {
             {
                 std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);
                 probe_ctx->error_reason =
-                    "completion_error:" + c.error_string +
+                    (c.error_string.empty() ? "completion_error"
+                                            : c.error_string) +
                     ", sc=" + std::to_string(c.sc) +
                     ", sct=" + std::to_string(c.sct);
             }
@@ -1389,11 +1391,12 @@ class SpdkInitiator::Impl {
                             "defaulting to ns=1";
         }
 
+        info->src_addr = source_ip_;
 #if defined(USE_ASCEND_NDR) || defined(USE_ASCEND_STAGING)
         auto& route = AscendStorageConfig::GetInstance();
         if (route.HasRoute()) {
             if (info->trid.trtype != SPDK_NVME_TRANSPORT_RDMA) return -EINVAL;
-            info->src_addr = route.Device().rdma_ip;
+            if (info->src_addr.empty()) info->src_addr = route.Device().rdma_ip;
         }
 #endif
         info->ctrlr_key = std::string(info->trid.traddr) + "|" +
@@ -1420,7 +1423,9 @@ class SpdkInitiator::Impl {
             if (!info->src_addr.empty())
                 std::snprintf(opts->src_addr, sizeof(opts->src_addr), "%s",
                               info->src_addr.c_str());
-            LOG(INFO) << "Attaching to " << trid->traddr << " " << trid->subnqn;
+            LOG(INFO) << "Attaching to " << trid->traddr << " " << trid->subnqn
+                      << ", src_addr="
+                      << (info->src_addr.empty() ? "auto" : info->src_addr);
             return true;
         };
 
@@ -1474,6 +1479,7 @@ class SpdkInitiator::Impl {
     // Member order matters: env_guard_ is declared FIRST so it is destroyed
     // LAST — all qpairs/ctrlrs are detached before spdk_env_fini runs.
     std::shared_ptr<SpdkEnvGuard> env_guard_;
+    const std::string source_ip_;
 #ifdef USE_SPDK_NPU_UB
     std::mutex device_mutex_;
     std::map<void*, size_t> device_buffers_;
@@ -1495,7 +1501,8 @@ class SpdkInitiator::Impl {
 // SpdkInitiator forwarding
 // ---------------------------------------------------------------------------
 
-SpdkInitiator::SpdkInitiator() : impl_(std::make_unique<Impl>()) {}
+SpdkInitiator::SpdkInitiator(std::string source_ip)
+    : impl_(std::make_unique<Impl>(std::move(source_ip))) {}
 SpdkInitiator::~SpdkInitiator() = default;
 
 NofSegmentHandle* SpdkInitiator::OpenSegment(const std::string& tr_str) {

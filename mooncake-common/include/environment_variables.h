@@ -261,6 +261,7 @@ struct NoFDebugEnvironmentVariables {
 
 struct NoFHeartbeatEnvironmentVariables {
     MC_DEFINE_ENV_VAR(bool, MC_NOF_HEARTBEAT_ENABLED);
+    MC_DEFINE_ENV_VAR(std::string, MC_NOF_HEARTBEAT_SRC_IP);
 };
 
 struct SpdkControllerEnvironmentVariables {

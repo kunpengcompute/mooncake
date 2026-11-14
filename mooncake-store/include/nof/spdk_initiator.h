@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include "nof/dma_buffer_allocator.h"
 #include "nof/nvmeof_initiator.h"
@@ -13,7 +14,7 @@ namespace mooncake {
 // acquired lazily on first OpenSegment / ProbeSegment.
 class SpdkInitiator : public NVMeoFInitiator {
    public:
-    SpdkInitiator();
+    explicit SpdkInitiator(std::string source_ip = {});
     ~SpdkInitiator() override;
 
     SpdkInitiator(const SpdkInitiator&) = delete;

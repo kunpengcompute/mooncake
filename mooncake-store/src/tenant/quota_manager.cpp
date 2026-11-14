@@ -204,8 +204,8 @@ void TenantQuotaManager::ApplyPolicies(
         policies.emplace(TenantId(tenant_id), policy);
     }
     std::lock_guard<std::mutex> recompute_lock(recompute_mutex_);
-    auto result = table_.ApplyTenantPolicies(
-        policies, allocatable_capacity_(), allocatable_nof_capacity_());
+    auto result = table_.ApplyTenantPolicies(policies, allocatable_capacity_(),
+                                             allocatable_nof_capacity_());
     if (!result) {
         throw std::invalid_argument(
             "tenant quota policy exceeds atomic accounting range");

@@ -534,8 +534,7 @@ std::string MasterAdminServer::BuildTenantQuotaMetricsText() const {
         << "# HELP mooncake_tenant_quota_effective_bytes_sum Global effective "
            "tenant quota sum in bytes\n"
         << "# TYPE mooncake_tenant_quota_effective_bytes_sum gauge\n"
-        << "mooncake_tenant_quota_effective_bytes_sum " << effective_sum
-        << "\n"
+        << "mooncake_tenant_quota_effective_bytes_sum " << effective_sum << "\n"
         << "# HELP mooncake_tenant_quota_nof_allocatable_capacity_bytes Global "
            "NoF tenant quota allocatable capacity in bytes\n"
         << "# TYPE mooncake_tenant_quota_nof_allocatable_capacity_bytes gauge\n"
@@ -1481,8 +1480,8 @@ void MasterAdminServer::HandleUpsertTenantQuota(
             return;
         }
         auto http_snapshot = ToHttpTenantQuotaSnapshot(result.value());
-        if (auto nof_result = service->GetNoFTenantQuotaSnapshot(
-                tenant_id_result.value());
+        if (auto nof_result =
+                service->GetNoFTenantQuotaSnapshot(tenant_id_result.value());
             nof_result.has_value()) {
             MergeNoFIntoTenantQuotaSnapshot(http_snapshot, nof_result.value());
         }

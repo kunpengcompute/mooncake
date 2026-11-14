@@ -686,9 +686,10 @@ curl -X POST "http://localhost:9003/api/v1/drain_jobs/cancel?job_id=00000000-000
 
 ### Tenant Quota Endpoints
 
-Tenant quota policies limit how much memory each tenant may cache. These
-endpoints require tenant quota to be enabled on the master; otherwise they
-return HTTP `409` with `UNAVAILABLE_IN_CURRENT_MODE`.
+Tenant quota policies limit how much memory each tenant may cache, and, in a
+`USE_NOF` build, how much NoF SSD space each tenant may use. These endpoints
+require tenant quota to be enabled on the master; otherwise they return HTTP
+`409` with `UNAVAILABLE_IN_CURRENT_MODE`.
 
 A quota snapshot has the following structure:
 
@@ -700,7 +701,12 @@ A quota snapshot has the following structure:
   "charged_bytes": 21474836480,
   "admission_closed": false,
   "over_quota": false,
-  "has_explicit_policy": true
+  "has_explicit_policy": true,
+  "nof_requested_quota_bytes": 1099511627776,
+  "nof_effective_quota_bytes": 1099511627776,
+  "nof_charged_bytes": 0,
+  "nof_admission_closed": true,
+  "nof_over_quota": false
 }
 ```
 
@@ -712,6 +718,15 @@ A quota snapshot has the following structure:
 - `admission_closed` (boolean): Whether new allocations are currently rejected for the tenant
 - `over_quota` (boolean): Whether the tenant is currently over its effective quota
 - `has_explicit_policy` (boolean): Whether an explicit policy exists for the tenant
+- `nof_requested_quota_bytes` (integer): NoF quota configured by the policy; `0` when none is set
+- `nof_effective_quota_bytes` (integer): NoF quota actually enforced, after fair-share recomputation across tenants
+- `nof_charged_bytes` (integer): Bytes currently charged to the tenant's NoF tier
+- `nof_admission_closed` (boolean): Whether new NoF allocations are currently rejected for the tenant
+- `nof_over_quota` (boolean): Whether the tenant's NoF tier is currently over its effective quota
+
+The `nof_*` fields are always present. They stay `0`/`false` while the tenant has
+no NoF quota, in which case the NoF tier is tracking-only and admits every NoF
+write (`nof_admission_closed` is `true` for such an account but is not enforced).
 
 #### `GET /api/v1/tenant_quotas`
 List quota snapshots for all tenants, or query a single tenant.
@@ -737,7 +752,12 @@ curl http://localhost:9003/api/v1/tenant_quotas
       "charged_bytes": 21474836480,
       "admission_closed": false,
       "over_quota": false,
-      "has_explicit_policy": true
+      "has_explicit_policy": true,
+      "nof_requested_quota_bytes": 1099511627776,
+      "nof_effective_quota_bytes": 1099511627776,
+      "nof_charged_bytes": 0,
+      "nof_admission_closed": true,
+      "nof_over_quota": false
     }
   ]
 }
@@ -761,17 +781,22 @@ Create or update the quota policy of a tenant.
 **Request Body**:
 ```json
 {
-  "requested_quota_bytes": 107374182400
+  "requested_quota_bytes": 107374182400,
+  "nof_quota_bytes": 1099511627776
 }
 ```
 
 `requested_quota_bytes` must be in the range `[1, 2^63 - 1]`.
+`nof_quota_bytes` is optional and defaults to `0`; it must be in the range
+`[0, 2^63 - 1]`, where `0` leaves the tenant's NoF tier tracking-only. The value
+is always accepted, but only has an effect when the master serves a NoF pool
+(`USE_NOF` build with mounted NoF segments).
 
 **Example**:
 ```bash
 curl -X PUT "http://localhost:9003/api/v1/tenant_quotas?tenant_id=tenant-a" \
   -H "Content-Type: application/json" \
-  -d '{"requested_quota_bytes": 107374182400}'
+  -d '{"requested_quota_bytes": 107374182400, "nof_quota_bytes": 1099511627776}'
 ```
 
 **Success Response** (HTTP 200): the resulting quota snapshot in `data`.

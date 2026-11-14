@@ -430,11 +430,11 @@ TenantQuotaPolicyMap TenantQuotaTable::GetTenantPolicies() const {
     return policies;
 }
 
-void TenantQuotaTable::RecomputeEffectiveQuotas(
-    uint64_t memory_capacity_bytes, uint64_t nof_capacity_bytes) {
-    ApplyEffectiveQuotas(
-        accounts_, BuildEffectiveQuotaAssignments(ListTenantSnapshots(),
-                                                  memory_capacity_bytes));
+void TenantQuotaTable::RecomputeEffectiveQuotas(uint64_t memory_capacity_bytes,
+                                                uint64_t nof_capacity_bytes) {
+    ApplyEffectiveQuotas(accounts_,
+                         BuildEffectiveQuotaAssignments(ListTenantSnapshots(),
+                                                        memory_capacity_bytes));
     ApplyEffectiveQuotas(
         nof_accounts_, BuildEffectiveQuotaAssignments(ListNoFTenantSnapshots(),
                                                       nof_capacity_bytes));
@@ -567,8 +567,8 @@ TenantQuotaSnapshot TenantQuotaTable::MakeSnapshot(
         .charged_bytes = charged_bytes,
         .admission_closed = account.AdmissionClosed(),
         .has_explicit_policy = account.has_explicit_policy_,
-        .over_quota = account.EnforceQuota() &&
-                      charged_bytes > effective_quota_bytes,
+        .over_quota =
+            account.EnforceQuota() && charged_bytes > effective_quota_bytes,
     };
 }
 

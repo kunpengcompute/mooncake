@@ -300,8 +300,7 @@ tl::expected<TenantQuotaPolicySnapshot, std::string> ParseTenantQuotaPolicyYaml(
         const auto nof_quota_node = entry["nof_quota"];
         if (nof_quota_node) {
             if (!nof_quota_node.IsScalar()) {
-                return tl::make_unexpected(
-                    "tenant nof_quota must be a scalar");
+                return tl::make_unexpected("tenant nof_quota must be a scalar");
             }
             std::string nof_quota;
             try {
@@ -313,8 +312,8 @@ tl::expected<TenantQuotaPolicySnapshot, std::string> ParseTenantQuotaPolicyYaml(
             auto nof_quota_bytes = ParseTenantQuotaBytes(nof_quota);
             if (!nof_quota_bytes) {
                 return tl::make_unexpected("invalid nof_quota for tenant '" +
-                                           name + "': " +
-                                           nof_quota_bytes.error());
+                                           name +
+                                           "': " + nof_quota_bytes.error());
             }
             policy.nof_quota_bytes = nof_quota_bytes.value();
         }

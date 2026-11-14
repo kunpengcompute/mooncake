@@ -1093,8 +1093,8 @@ class MasterService {
     };
     TenantQuotaEvictionResult EvictTenantMemoryForQuota(
         const TenantId& tenant_id, uint64_t target_bytes);
-    TenantQuotaEvictionResult EvictTenantNoFForQuota(
-        const TenantId& tenant_id, uint64_t target_bytes);
+    TenantQuotaEvictionResult EvictTenantNoFForQuota(const TenantId& tenant_id,
+                                                     uint64_t target_bytes);
 
     // Background pass: evict any tenant that is over its own watermark down to
     // (watermark - eviction_ratio) of its effective quota. Called from

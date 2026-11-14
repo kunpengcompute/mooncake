@@ -241,16 +241,16 @@ DEFINE_validator(tenant_eviction_high_watermark_ratio,
                      }
                      return true;
                  });
-DEFINE_validator(
-    nof_tenant_eviction_high_watermark_ratio,
-    [](const char* flagname, double value) {
-        if (value < 0.0 || value > 1.0) {
-            LOG(FATAL) << "NoF tenant eviction high watermark ratio "
-                          "must be between 0.0 and 1.0";
-            return false;
-        }
-        return true;
-    });
+DEFINE_validator(nof_tenant_eviction_high_watermark_ratio,
+                 [](const char* flagname, double value) {
+                     if (value < 0.0 || value > 1.0) {
+                         LOG(FATAL)
+                             << "NoF tenant eviction high watermark ratio "
+                                "must be between 0.0 and 1.0";
+                         return false;
+                     }
+                     return true;
+                 });
 DEFINE_validator(nof_eviction_ratio, [](const char* flagname, double value) {
     if (value < 0.0 || value > 1.0) {
         LOG(FATAL) << "NoF eviction ratio must be between 0.0 and 1.0";

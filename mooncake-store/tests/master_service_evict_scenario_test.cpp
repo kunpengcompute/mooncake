@@ -579,10 +579,9 @@ TEST_F(MasterServiceEvictScenarioTest,
 
 TEST_F(MasterServiceEvictScenarioTest,
        GlobalEvictReclaimsOnlySelectedTenantQuota) {
-    MasterScenario scenario(
-        "global eviction preserves tenant isolation",
-        TenantConfig(
-            {{"tenant-a", {kObjectSize, 0}}, {"tenant-b", {kObjectSize, 0}}}));
+    MasterScenario scenario("global eviction preserves tenant isolation",
+                            TenantConfig({{"tenant-a", {kObjectSize, 0}},
+                                          {"tenant-b", {kObjectSize, 0}}}));
     const auto base = ExpiredBase();
     scenario.Given(MemoryNode("memory"))
         .Given(Objects({"same-key"})

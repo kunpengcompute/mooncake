@@ -736,6 +736,10 @@ mooncake_master \
 | `--tenant_quota_connector_type` | `file` | Tenant quota policy connector type: `file` or `etcd` when built with `STORE_USE_ETCD=ON` |
 | `--tenant_quota_connector_uri` | empty | Connector URI; for `file`, the writable YAML policy path; for `etcd`, the endpoints string |
 | `--tenant_eviction_high_watermark_ratio` | `0.90` | Usage ratio of a tenant's own effective quota that triggers background eviction for that tenant; `0` disables it |
+| `--nof_tenant_eviction_high_watermark_ratio` | `0.90` | Usage ratio of a tenant's own NoF effective quota that triggers background eviction of that tenant's NoF replicas; `0` disables it. Only meaningful with `--enable_multi_tenants` in a `USE_NOF` build |
+
+Tenants can also be given a NoF (NVMe-oF SSD) quota alongside their memory quota;
+see [Multi-Tenant Deployment](multi-tenancy.md).
 
 ### High Availability
 
@@ -1076,6 +1080,10 @@ Master-side flags for the NVMe-oF SSD pool. They control eviction within the NoF
 | `--nof_heartbeat_interval_sec` | `10` | How often the master probes each mounted NoF segment |
 | `--nof_heartbeat_probe_timeout_ms` | `1000` | Timeout for a single NoF heartbeat probe |
 | `--nof_heartbeat_failures_threshold` | `3` | Consecutive NoF heartbeat failures before a segment is unmounted |
+
+Per-tenant NoF quotas and the per-tenant NoF watermark
+(`--nof_tenant_eviction_high_watermark_ratio`) are configured through the tenant
+quota policy; see [Multi-Tenant Deployment](multi-tenancy.md).
 
 ### Master Configuration File
 

@@ -2445,8 +2445,8 @@ MasterService::ObjectMap::iterator MasterService::EraseMetadata(
                 metadata.nof_ledger.PendingBytes() != 0) {
                 auto nof_refund_result = metadata.nof_ledger.RefundPending(
                     GetBoundTenantNoFQuotaHandle(tenant_state));
-                LogTenantQuotaLedgerError(nof_refund_result, "refund_pending_nof",
-                                          tenant_id, key);
+                LogTenantQuotaLedgerError(nof_refund_result,
+                                          "refund_pending_nof", tenant_id, key);
             }
             if (enable_multi_tenants_ &&
                 metadata.memory_ledger.TotalChargedBytes() != 0) {
@@ -2458,11 +2458,10 @@ MasterService::ObjectMap::iterator MasterService::EraseMetadata(
             }
             if (enable_multi_tenants_ &&
                 metadata.nof_ledger.TotalChargedBytes() != 0) {
-                LOG(ERROR)
-                    << "tenant quota NoF ledger still owns bytes during "
-                       "preserved metadata erase tenant="
-                    << tenant_id.value() << ", key=" << key
-                    << ", bytes=" << metadata.nof_ledger.TotalChargedBytes();
+                LOG(ERROR) << "tenant quota NoF ledger still owns bytes during "
+                              "preserved metadata erase tenant="
+                           << tenant_id.value() << ", key=" << key << ", bytes="
+                           << metadata.nof_ledger.TotalChargedBytes();
             }
             break;
     }
@@ -3213,8 +3212,8 @@ auto MasterService::UnmountNoFSegment(const UUID& segment_id,
     {
         ScopedNoFSegmentAccess segment_access =
             nof_segment_manager_.getNoFSegmentAccess();
-        auto err = segment_access.CommitUnmountSegment(
-            segment_id, client_id, metrics_dec_capacity);
+        auto err = segment_access.CommitUnmountSegment(segment_id, client_id,
+                                                       metrics_dec_capacity);
         if (err != ErrorCode::OK) {
             return tl::make_unexpected(err);
         }
@@ -5745,8 +5744,8 @@ auto MasterService::AllocateAndInsertMetadata(
         return tl::make_unexpected(quota_result.error());
     }
     if (pending_nof_quota_charge > 0) {
-        auto nof_quota_result = ChargeTenantQuota(
-            accessor.NoFQuotaAccount(), pending_nof_quota_charge);
+        auto nof_quota_result = ChargeTenantQuota(accessor.NoFQuotaAccount(),
+                                                  pending_nof_quota_charge);
         if (!nof_quota_result) {
             ReleaseTenantQuota(accessor.QuotaAccount(), pending_quota_charge);
             return tl::make_unexpected(nof_quota_result.error());
@@ -5764,11 +5763,11 @@ auto MasterService::AllocateAndInsertMetadata(
         return tl::make_unexpected(allocation_result.error());
     }
 
-    auto insert_result = InsertMetadata(
-        accessor, client_id, value_length, config, group_id, now,
-        soft_pin_request, std::move(allocation_result.value()),
-        pending_quota_charge, pending_nof_quota_charge,
-        std::move(committed_soft_pin_state));
+    auto insert_result =
+        InsertMetadata(accessor, client_id, value_length, config, group_id, now,
+                       soft_pin_request, std::move(allocation_result.value()),
+                       pending_quota_charge, pending_nof_quota_charge,
+                       std::move(committed_soft_pin_state));
     if (!insert_result) {
         ReleaseTenantQuota(accessor.QuotaAccount(), pending_quota_charge);
         if (pending_nof_quota_charge > 0) {
@@ -6640,8 +6639,8 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                         accessor.Erase();
                     } else {
                         auto settle_result = SettlePrimaryWriteQuotaIfReady(
-                            accessor.QuotaAccount(),
-                            accessor.NoFQuotaAccount(), metadata);
+                            accessor.QuotaAccount(), accessor.NoFQuotaAccount(),
+                            metadata);
                         if (!settle_result) {
                             return tl::make_unexpected(settle_result.error());
                         }
@@ -10332,15 +10331,13 @@ void MasterService::EvictNoFTenantsOverWatermark() {
         }
         const double excess_ratio = used_ratio - nof_target_ratio;
         const auto target_bytes = static_cast<uint64_t>(
-            excess_ratio *
-            static_cast<double>(snapshot.effective_quota_bytes));
+            excess_ratio * static_cast<double>(snapshot.effective_quota_bytes));
         if (target_bytes == 0) {
             continue;
         }
 
         VLOG(1) << "[TENANT-NOF-EVICT-TRIGGER] tenant=" << snapshot.tenant_id
-                << " used_ratio=" << used_ratio
-                << " high_watermark="
+                << " used_ratio=" << used_ratio << " high_watermark="
                 << nof_tenant_eviction_high_watermark_ratio_
                 << " target_ratio=" << nof_target_ratio
                 << " target_bytes=" << target_bytes;
@@ -11001,9 +10998,8 @@ MasterService::EvictTenantMemoryForQuota(const TenantId& tenant_id,
     return total;
 }
 
-MasterService::TenantQuotaEvictionResult
-MasterService::EvictTenantNoFForQuota(const TenantId& tenant_id,
-                                      uint64_t target_bytes) {
+MasterService::TenantQuotaEvictionResult MasterService::EvictTenantNoFForQuota(
+    const TenantId& tenant_id, uint64_t target_bytes) {
     TenantQuotaEvictionResult total;
     if (!enable_multi_tenants_ || target_bytes == 0) {
         return total;
@@ -11066,8 +11062,8 @@ MasterService::EvictTenantNoFForQuota(const TenantId& tenant_id,
                     LOG(WARNING)
                         << "EvictTenantNoFForQuota: OpLog reservation failed "
                            "for key="
-                        << key << ", err="
-                        << static_cast<int>(reservation.error())
+                        << key
+                        << ", err=" << static_cast<int>(reservation.error())
                         << ", skipping eviction";
                     continue;
                 }
@@ -11106,8 +11102,8 @@ MasterService::EvictTenantNoFForQuota(const TenantId& tenant_id,
                     LOG(WARNING)
                         << "EvictTenantNoFForQuota: OpLog persist failed "
                            "for key="
-                        << key << ", err="
-                        << static_cast<int>(persist_result.error())
+                        << key
+                        << ", err=" << static_cast<int>(persist_result.error())
                         << ", skipping eviction";
                     continue;
                 }

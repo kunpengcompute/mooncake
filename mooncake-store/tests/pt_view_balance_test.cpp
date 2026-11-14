@@ -522,7 +522,7 @@ int main() {
               "scenario12: no Rack pair dominates more than 25% rows");
 
         std::vector<PtSegmentSnapshot> five_racks = four_racks;
-        five_racks.push_back(MakeSegment("segmentE", "hostE", 16, 0, "rackE"));
+        five_racks.push_back(MakeSegment("segment_E", "hostE", 16, 0, "rackE"));
         auto five_view = PtViewBuilder::Build(five_racks, config);
         Check(five_view.has_value(), "scenario12: scale-out view builds");
         if (five_view) {

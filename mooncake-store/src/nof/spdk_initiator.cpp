@@ -255,7 +255,7 @@ class SpdkEnvGuard {
         // Deliberately leaked (like RegistryMutex): a probe-only initiator
         // never registers memory, so the NofRegistryBundle below is first
         // constructed by its ~Impl backstop during static destruction —
-        // after function-local statics like this one have already been
+        // after function-local static variables like this one have been
         // destroyed. The bundle's constructor calls Acquire(), which must
         // not touch a destroyed static. Leaking also means the pin below
         // never releases, so spdk_env_fini never runs at all; the OS

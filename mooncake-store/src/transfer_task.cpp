@@ -761,7 +761,20 @@ void NofWorkerPool::workerThread(int work_idx) {
                             }
 #endif
                             LOG(ERROR) << "work " << work_idx << ", seg "
-                                       << task->seg_handle << " submit io fail";
+                                       << task->seg_handle << " submit io fail"
+                                       << ", rc=" << ret
+                                       << ", op="
+                                       << (task->op == NofIOOp::kWrite ? "write"
+                                                                        : "read")
+                                       << ", ssd_offset=" << submit_off
+                                       << ", bytes=" << submit_bytes
+                                       << ", block_size=" << block_size
+                                       << ", slices=" << task->buffers.size();
+                            if (task->error_detail.empty()) {
+                                task->error_detail =
+                                    "NoF I/O submission failed, rc=" +
+                                    std::to_string(ret);
+                            }
                             // Return the pool slot: a sub-task taken out
                             // and then failing to submit must be returned,
                             // or repeated failures would exhaust the 4096

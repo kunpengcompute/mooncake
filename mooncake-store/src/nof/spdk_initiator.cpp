@@ -1342,7 +1342,12 @@ class SpdkInitiator::Impl {
             IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
                 IBV_ACCESS_REMOTE_WRITE,
             &mr);
-        if (rc) return rc;
+        if (rc) {
+            LOG(ERROR) << "NoF HBM memory translation failed: pd=" << pd
+                       << ", addr=" << addr << ", bytes=" << length
+                       << ", rc=" << rc;
+            return rc;
+        }
         result->size = sizeof(*result);
         result->iov_count = 1;
         result->iov = {addr, length};

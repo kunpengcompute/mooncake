@@ -187,7 +187,7 @@ struct HttpSegmentsDetailResponse {
 YLT_REFL(HttpSegmentsDetailResponse, total_segments);
 
 std::string WriteTenantQuotaPolicyForTest(
-    const std::map<std::string, uint64_t>& tenant_quotas) {
+    const std::map<std::string, TenantQuotaLimits>& tenant_quotas) {
     TenantQuotaPolicySnapshot snapshot;
     snapshot.tenant_quotas = tenant_quotas;
     auto path = std::filesystem::temp_directory_path() /

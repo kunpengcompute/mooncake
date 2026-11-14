@@ -108,6 +108,12 @@ static constexpr double DEFAULT_EVICTION_HIGH_WATERMARK_RATIO = 0.90;
 static constexpr double DEFAULT_TENANT_EVICTION_HIGH_WATERMARK_RATIO = 0.90;
 static constexpr double DEFAULT_NOF_EVICTION_RATIO = 0.05;
 static constexpr double DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO = 0.90;
+// NoF twin of the tenant watermark above: when a tenant's NoF usage crosses
+// this ratio of its NoF quota, the background pass evicts that tenant's NoF
+// replicas down to the NoF low watermark. 0.0 disables the pass. Inert unless
+// enable_multi_tenants is set.
+static constexpr double DEFAULT_NOF_TENANT_EVICTION_HIGH_WATERMARK_RATIO =
+    0.90;
 static constexpr int64_t DEFAULT_MASTER_VIEW_LEASE_TTL_SEC = 5;  // in seconds
 static constexpr int64_t DEFAULT_CLIENT_LIVE_TTL_SEC = 10;       // in seconds
 static constexpr int64_t DEFAULT_CLIENT_SUSPICION_TTL_SEC = 20;  // in seconds

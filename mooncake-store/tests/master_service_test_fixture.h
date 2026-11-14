@@ -275,7 +275,7 @@ class MasterServiceTest : public ::testing::Test {
     }
 
     std::string WriteTenantPolicyFile(
-        const std::map<std::string, uint64_t>& tenant_quotas) {
+        const std::map<std::string, TenantQuotaLimits>& tenant_quotas) {
         TenantQuotaPolicySnapshot snapshot;
         snapshot.tenant_quotas = tenant_quotas;
         auto path =
@@ -291,9 +291,10 @@ class MasterServiceTest : public ::testing::Test {
 
     MasterServiceConfig MakeStrictTenantConfig(
         const std::vector<std::string>& tenants) {
-        std::map<std::string, uint64_t> tenant_quotas;
+        std::map<std::string, TenantQuotaLimits> tenant_quotas;
         for (const auto& tenant : tenants) {
-            tenant_quotas.emplace(tenant, kStrictTenantQuotaBytes);
+            tenant_quotas.emplace(
+                tenant, TenantQuotaLimits{kStrictTenantQuotaBytes, 0});
         }
         return MasterServiceConfig::builder()
             .set_enable_multi_tenants(true)
@@ -310,9 +311,10 @@ class MasterServiceTest : public ::testing::Test {
         config.enable_metric_reporting = false;
         config.enable_multi_tenants = true;
         config.tenant_quota_connector_type = "file";
-        std::map<std::string, uint64_t> tenant_quotas;
+        std::map<std::string, TenantQuotaLimits> tenant_quotas;
         for (const auto& tenant : tenants) {
-            tenant_quotas.emplace(tenant, kStrictTenantQuotaBytes);
+            tenant_quotas.emplace(
+                tenant, TenantQuotaLimits{kStrictTenantQuotaBytes, 0});
         }
         config.tenant_quota_connector_uri =
             WriteTenantPolicyFile(tenant_quotas);

@@ -18,14 +18,17 @@ class ShardedTenantQuotaTable {
     static constexpr size_t kNumShards = NumShards;
 
     TenantQuotaResult UpsertTenantPolicy(const TenantId& tenant_id,
-                                         uint64_t requested_quota_bytes,
-                                         uint64_t allocatable_capacity_bytes);
+                                         const TenantQuotaLimits& policy,
+                                         uint64_t memory_capacity_bytes,
+                                         uint64_t nof_capacity_bytes);
     TenantQuotaResult DisableTenantPolicyIfEmpty(const TenantId& tenant_id);
     TenantQuotaResult ApplyTenantPolicies(const TenantQuotaPolicyMap& policies,
-                                          uint64_t allocatable_capacity_bytes);
+                                          uint64_t memory_capacity_bytes,
+                                          uint64_t nof_capacity_bytes);
     TenantQuotaPolicyMap GetTenantPolicies() const;
 
-    void RecomputeEffectiveQuotas(uint64_t allocatable_capacity_bytes);
+    void RecomputeEffectiveQuotas(uint64_t memory_capacity_bytes,
+                                  uint64_t nof_capacity_bytes);
 
     bool IsTenantRegistered(const TenantId& tenant_id) const;
     // May create a stable closed tombstone for a previously unseen tenant.
@@ -34,10 +37,19 @@ class ShardedTenantQuotaTable {
         const TenantId& tenant_id) const;
     std::vector<TenantQuotaSnapshot> ListTenantSnapshots() const;
 
+    // NoF tier symmetric entry points (defer to nof_accounts_). Unlike the
+    // memory tier, a new NoF account admits writes until it gets a policy.
+    TenantQuotaHandle GetOrCreateNoFTenantHandle(const TenantId& tenant_id);
+    std::optional<TenantQuotaSnapshot> GetNoFTenantSnapshot(
+        const TenantId& tenant_id) const;
+    std::vector<TenantQuotaSnapshot> ListNoFTenantSnapshots() const;
+
     // Rebuild overwrites runtime accounting and must only run while data-plane
     // charge/release operations are quiescent.
     TenantQuotaResult RebuildUsage(const TenantQuotaUsageMap& usage,
-                                   uint64_t allocatable_capacity_bytes);
+                                   uint64_t memory_capacity_bytes);
+    TenantQuotaResult RebuildNoFUsage(const TenantQuotaUsageMap& usage,
+                                      uint64_t nof_capacity_bytes);
 
    private:
     struct Shard {
@@ -48,7 +60,8 @@ class ShardedTenantQuotaTable {
     size_t GetShardIndex(const TenantId& tenant_id) const;
     Shard& GetShard(const TenantId& tenant_id);
     const Shard& GetShard(const TenantId& tenant_id) const;
-    void RecomputeEffectiveQuotasLocked(uint64_t allocatable_capacity_bytes);
+    void RecomputeMemoryEffectiveQuotasLocked(uint64_t memory_capacity_bytes);
+    void RecomputeNoFEffectiveQuotasLocked(uint64_t nof_capacity_bytes);
 
     std::array<Shard, kNumShards> shards_;
     mutable std::mutex recompute_mutex_;

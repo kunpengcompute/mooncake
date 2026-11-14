@@ -7,6 +7,7 @@
 #include <map>
 #include <sstream>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -193,10 +194,17 @@ struct HttpTenantQuotaSnapshot {
     bool admission_closed{true};
     bool over_quota{false};
     bool has_explicit_policy{false};
+    uint64_t nof_requested_quota_bytes{0};
+    uint64_t nof_effective_quota_bytes{0};
+    uint64_t nof_charged_bytes{0};
+    bool nof_admission_closed{true};
+    bool nof_over_quota{false};
 };
 YLT_REFL(HttpTenantQuotaSnapshot, tenant_id, requested_quota_bytes,
          effective_quota_bytes, charged_bytes, admission_closed, over_quota,
-         has_explicit_policy);
+         has_explicit_policy, nof_requested_quota_bytes,
+         nof_effective_quota_bytes, nof_charged_bytes, nof_admission_closed,
+         nof_over_quota);
 
 HttpTenantQuotaSnapshot ToHttpTenantQuotaSnapshot(
     const TenantQuotaSnapshot& snapshot) {
@@ -209,6 +217,15 @@ HttpTenantQuotaSnapshot ToHttpTenantQuotaSnapshot(
         .over_quota = snapshot.over_quota,
         .has_explicit_policy = snapshot.has_explicit_policy,
     };
+}
+
+void MergeNoFIntoTenantQuotaSnapshot(HttpTenantQuotaSnapshot& out,
+                                     const TenantQuotaSnapshot& nof_snapshot) {
+    out.nof_requested_quota_bytes = nof_snapshot.requested_quota_bytes;
+    out.nof_effective_quota_bytes = nof_snapshot.effective_quota_bytes;
+    out.nof_charged_bytes = nof_snapshot.charged_bytes;
+    out.nof_admission_closed = nof_snapshot.admission_closed;
+    out.nof_over_quota = nof_snapshot.over_quota;
 }
 
 struct HttpTenantQuotaListResponse {
@@ -231,8 +248,9 @@ YLT_REFL(HttpTenantQuotaDeleteResponse, success, data);
 
 struct HttpTenantQuotaPolicyRequest {
     uint64_t requested_quota_bytes{0};
+    uint64_t nof_quota_bytes{0};
 };
-YLT_REFL(HttpTenantQuotaPolicyRequest, requested_quota_bytes);
+YLT_REFL(HttpTenantQuotaPolicyRequest, requested_quota_bytes, nof_quota_bytes);
 
 tl::expected<std::string, ErrorCode> ParseAdminTenantId(
     coro_http::coro_http_request& req) {
@@ -406,13 +424,20 @@ std::string MasterAdminServer::BuildTenantQuotaMetricsText() const {
     }
     auto snapshots_result = service->ListTenantQuotaSnapshots();
     auto capacity_result = service->GetTenantQuotaAllocatableCapacityBytes();
-    if (!snapshots_result || !capacity_result) {
+    auto nof_snapshots_result = service->ListNoFTenantQuotaSnapshots();
+    auto nof_capacity_result =
+        service->GetTenantNoFQuotaAllocatableCapacityBytes();
+    if (!snapshots_result || !capacity_result || !nof_snapshots_result ||
+        !nof_capacity_result) {
         return "";
     }
 
     const auto& snapshots = snapshots_result.value();
+    const auto& nof_snapshots = nof_snapshots_result.value();
     uint64_t requested_sum = 0;
     uint64_t effective_sum = 0;
+    uint64_t nof_requested_sum = 0;
+    uint64_t nof_effective_sum = 0;
     std::ostringstream tenant_metrics;
     tenant_metrics
         << "# HELP mooncake_tenant_quota_requested_bytes Requested tenant "
@@ -455,6 +480,48 @@ std::string MasterAdminServer::BuildTenantQuotaMetricsText() const {
                        << (snapshot.has_explicit_policy ? 1 : 0) << "\n";
     }
     tenant_metrics
+        << "# HELP mooncake_tenant_quota_nof_requested_bytes Requested NoF "
+           "tenant quota policy in bytes\n"
+        << "# TYPE mooncake_tenant_quota_nof_requested_bytes gauge\n"
+        << "# HELP mooncake_tenant_quota_nof_effective_bytes Effective NoF "
+           "tenant quota in bytes\n"
+        << "# TYPE mooncake_tenant_quota_nof_effective_bytes gauge\n"
+        << "# HELP mooncake_tenant_quota_nof_charged_bytes NoF tenant quota "
+           "charge in bytes\n"
+        << "# TYPE mooncake_tenant_quota_nof_charged_bytes gauge\n"
+        << "# HELP mooncake_tenant_quota_nof_admission_closed NoF tenant "
+           "quota admission-closed flag\n"
+        << "# TYPE mooncake_tenant_quota_nof_admission_closed gauge\n"
+        << "# HELP mooncake_tenant_quota_nof_over_quota NoF tenant over-quota "
+           "flag\n"
+        << "# TYPE mooncake_tenant_quota_nof_over_quota gauge\n"
+        << "# HELP mooncake_tenant_quota_nof_explicit_policy NoF tenant "
+           "explicit policy flag\n"
+        << "# TYPE mooncake_tenant_quota_nof_explicit_policy gauge\n";
+    for (const auto& snapshot : nof_snapshots) {
+        nof_requested_sum += snapshot.requested_quota_bytes;
+        nof_effective_sum += snapshot.effective_quota_bytes;
+        const auto tenant = EscapePrometheusLabel(snapshot.tenant_id.value());
+        tenant_metrics
+            << "mooncake_tenant_quota_nof_requested_bytes{tenant_id=\""
+            << tenant << "\"} " << snapshot.requested_quota_bytes << "\n";
+        tenant_metrics
+            << "mooncake_tenant_quota_nof_effective_bytes{tenant_id=\""
+            << tenant << "\"} " << snapshot.effective_quota_bytes << "\n";
+        tenant_metrics << "mooncake_tenant_quota_nof_charged_bytes{tenant_id=\""
+                       << tenant << "\"} " << snapshot.charged_bytes << "\n";
+        tenant_metrics
+            << "mooncake_tenant_quota_nof_admission_closed{tenant_id=\""
+            << tenant << "\"} " << (snapshot.admission_closed ? 1 : 0) << "\n";
+        tenant_metrics << "mooncake_tenant_quota_nof_over_quota{tenant_id=\""
+                       << tenant << "\"} " << (snapshot.over_quota ? 1 : 0)
+                       << "\n";
+        tenant_metrics
+            << "mooncake_tenant_quota_nof_explicit_policy{tenant_id=\""
+            << tenant << "\"} " << (snapshot.has_explicit_policy ? 1 : 0)
+            << "\n";
+    }
+    tenant_metrics
         << "# HELP mooncake_tenant_quota_allocatable_capacity_bytes Global "
            "tenant quota allocatable capacity in bytes\n"
         << "# TYPE mooncake_tenant_quota_allocatable_capacity_bytes gauge\n"
@@ -468,6 +535,21 @@ std::string MasterAdminServer::BuildTenantQuotaMetricsText() const {
            "tenant quota sum in bytes\n"
         << "# TYPE mooncake_tenant_quota_effective_bytes_sum gauge\n"
         << "mooncake_tenant_quota_effective_bytes_sum " << effective_sum
+        << "\n"
+        << "# HELP mooncake_tenant_quota_nof_allocatable_capacity_bytes Global "
+           "NoF tenant quota allocatable capacity in bytes\n"
+        << "# TYPE mooncake_tenant_quota_nof_allocatable_capacity_bytes gauge\n"
+        << "mooncake_tenant_quota_nof_allocatable_capacity_bytes "
+        << nof_capacity_result.value() << "\n"
+        << "# HELP mooncake_tenant_quota_nof_requested_bytes_sum Global "
+           "requested NoF tenant quota sum in bytes\n"
+        << "# TYPE mooncake_tenant_quota_nof_requested_bytes_sum gauge\n"
+        << "mooncake_tenant_quota_nof_requested_bytes_sum " << nof_requested_sum
+        << "\n"
+        << "# HELP mooncake_tenant_quota_nof_effective_bytes_sum Global "
+           "effective NoF tenant quota sum in bytes\n"
+        << "# TYPE mooncake_tenant_quota_nof_effective_bytes_sum gauge\n"
+        << "mooncake_tenant_quota_nof_effective_bytes_sum " << nof_effective_sum
         << "\n";
 
     return tenant_metrics.str();
@@ -1313,10 +1395,23 @@ void MasterAdminServer::HandleGetTenantQuotas(
                                    result.error());
                 return;
             }
+            std::unordered_map<std::string, TenantQuotaSnapshot> nof_by_tenant;
+            if (auto nof_result = service->ListNoFTenantQuotaSnapshots();
+                nof_result.has_value()) {
+                for (const auto& nof_snapshot : nof_result.value()) {
+                    nof_by_tenant.emplace(nof_snapshot.tenant_id.value(),
+                                          nof_snapshot);
+                }
+            }
             HttpTenantQuotaListResponse payload;
             payload.data.reserve(result->size());
             for (const auto& snapshot : result.value()) {
-                payload.data.push_back(ToHttpTenantQuotaSnapshot(snapshot));
+                auto http_snapshot = ToHttpTenantQuotaSnapshot(snapshot);
+                if (auto it = nof_by_tenant.find(snapshot.tenant_id.value());
+                    it != nof_by_tenant.end()) {
+                    MergeNoFIntoTenantQuotaSnapshot(http_snapshot, it->second);
+                }
+                payload.data.push_back(std::move(http_snapshot));
             }
             WriteJsonResponse(resp, coro_http::status_type::ok, payload);
             return;
@@ -1334,10 +1429,15 @@ void MasterAdminServer::HandleGetTenantQuotas(
                                result.error());
             return;
         }
+        auto http_snapshot = ToHttpTenantQuotaSnapshot(result.value());
+        if (auto nof_result =
+                service->GetNoFTenantQuotaSnapshot(tenant_id_result.value());
+            nof_result.has_value()) {
+            MergeNoFIntoTenantQuotaSnapshot(http_snapshot, nof_result.value());
+        }
         WriteJsonResponse(
             resp, coro_http::status_type::ok,
-            HttpTenantQuotaResponse{
-                .data = ToHttpTenantQuotaSnapshot(result.value())});
+            HttpTenantQuotaResponse{.data = std::move(http_snapshot)});
     });
 }
 
@@ -1364,19 +1464,31 @@ void MasterAdminServer::HandleUpsertTenantQuota(
                            "Tenant quota must be in [1, 2^63 - 1] bytes");
         return;
     }
+    if (body_result->nof_quota_bytes > TenantQuotaAccount::kMaxChargedBytes) {
+        WriteErrorResponse(resp, coro_http::status_type::bad_request,
+                           ErrorCode::INVALID_PARAMS,
+                           "NoF quota must be in [0, 2^63 - 1] bytes");
+        return;
+    }
 
     WithActiveService(resp, [&](auto service) {
         auto result = service->UpsertTenantQuotaPolicy(
-            tenant_id_result.value(), body_result->requested_quota_bytes);
+            tenant_id_result.value(), body_result->requested_quota_bytes,
+            body_result->nof_quota_bytes);
         if (!result.has_value()) {
             WriteErrorResponse(resp, ErrorCodeToHttpStatus(result.error()),
                                result.error());
             return;
         }
+        auto http_snapshot = ToHttpTenantQuotaSnapshot(result.value());
+        if (auto nof_result = service->GetNoFTenantQuotaSnapshot(
+                tenant_id_result.value());
+            nof_result.has_value()) {
+            MergeNoFIntoTenantQuotaSnapshot(http_snapshot, nof_result.value());
+        }
         WriteJsonResponse(
             resp, coro_http::status_type::ok,
-            HttpTenantQuotaResponse{
-                .data = ToHttpTenantQuotaSnapshot(result.value())});
+            HttpTenantQuotaResponse{.data = std::move(http_snapshot)});
     });
 }
 

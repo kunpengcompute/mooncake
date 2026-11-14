@@ -38,7 +38,8 @@ class BatchReadTest : public MasterServiceTest {
     MasterServiceConfig MultiTenantConfig() {
         TenantQuotaPolicySnapshot snapshot;
         for (const TenantId& tenant_id : {kTenantA, kTenantB, kTenantC}) {
-            snapshot.tenant_quotas.emplace(tenant_id.value(), 1ULL << 30);
+            snapshot.tenant_quotas.emplace(tenant_id.value(),
+                                           TenantQuotaLimits{1ULL << 30, 0});
         }
         policy_path_ = std::filesystem::temp_directory_path() /
                        ("mooncake_batch_read_test_" +

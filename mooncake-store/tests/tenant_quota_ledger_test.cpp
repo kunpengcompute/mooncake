@@ -9,8 +9,9 @@ class TenantQuotaLedgerTest : public ::testing::Test {
    protected:
     void SetUp() override {
         ASSERT_TRUE(table_.UpsertTenantPolicy(
-            tenant_id_, TenantQuotaAccount::kMaxChargedBytes));
-        table_.RecomputeEffectiveQuotas(TenantQuotaAccount::kMaxChargedBytes);
+            tenant_id_, {TenantQuotaAccount::kMaxChargedBytes, 0}));
+        table_.RecomputeEffectiveQuotas(TenantQuotaAccount::kMaxChargedBytes,
+                                        0);
         account_ = table_.GetOrCreateTenantHandle(tenant_id_);
     }
 

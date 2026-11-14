@@ -191,7 +191,7 @@ class MasterServiceEvictScenarioTest : public ::testing::Test {
     }
 
     MasterServiceConfig TenantConfig(
-        const std::map<std::string, uint64_t>& quotas) {
+        const std::map<std::string, TenantQuotaLimits>& quotas) {
         auto config = EvictConfig();
         config.enable_multi_tenants = true;
         config.tenant_quota_connector_type = "file";
@@ -201,7 +201,7 @@ class MasterServiceEvictScenarioTest : public ::testing::Test {
 
     MasterServiceConfig HaConfig(
         const std::string& cluster_id,
-        const std::map<std::string, uint64_t>& quotas = {}) {
+        const std::map<std::string, TenantQuotaLimits>& quotas = {}) {
         auto config = EvictConfig();
         config.enable_ha = true;
         config.enable_oplog = true;
@@ -243,7 +243,8 @@ class MasterServiceEvictScenarioTest : public ::testing::Test {
     }
 
    private:
-    std::string WritePolicyFile(const std::map<std::string, uint64_t>& quotas) {
+    std::string WritePolicyFile(
+        const std::map<std::string, TenantQuotaLimits>& quotas) {
         TenantQuotaPolicySnapshot snapshot;
         snapshot.tenant_quotas = quotas;
         const auto path =
@@ -487,9 +488,9 @@ TEST_F(MasterServiceEvictScenarioTest,
 TEST_F(MasterServiceEvictScenarioTest, OpLogRecordsEvictedTenantAndKey) {
     const std::string cluster_id = "evict_scenario_oplog";
     auto backend = std::make_shared<EvictFakeBatchHaKvBackend>();
-    MasterScenario scenario("eviction writes tenant-scoped oplog",
-                            HaConfig(cluster_id, {{"tenant-a", kObjectSize}}),
-                            backend);
+    MasterScenario scenario(
+        "eviction writes tenant-scoped oplog",
+        HaConfig(cluster_id, {{"tenant-a", {kObjectSize, 0}}}), backend);
     scenario.Given(MemoryNode("memory"))
         .Given(Objects({"cold"})
                    .Size(kObjectSize)
@@ -516,7 +517,7 @@ TEST_F(MasterServiceEvictScenarioTest,
     const std::string tenant = TenantId::Default().value();
     auto backend = std::make_shared<EvictBlockingBatchHaKvBackend>();
     MasterScenario scenario("durability gates eviction quota reclamation",
-                            HaConfig(cluster_id, {{tenant, kObjectSize}}),
+                            HaConfig(cluster_id, {{tenant, {kObjectSize, 0}}}),
                             backend);
     scenario.Given(MemoryNode("memory").Capacity(kObjectSize))
         .Given(Objects({"cold"})
@@ -580,7 +581,8 @@ TEST_F(MasterServiceEvictScenarioTest,
        GlobalEvictReclaimsOnlySelectedTenantQuota) {
     MasterScenario scenario(
         "global eviction preserves tenant isolation",
-        TenantConfig({{"tenant-a", kObjectSize}, {"tenant-b", kObjectSize}}));
+        TenantConfig(
+            {{"tenant-a", {kObjectSize, 0}}, {"tenant-b", {kObjectSize, 0}}}));
     const auto base = ExpiredBase();
     scenario.Given(MemoryNode("memory"))
         .Given(Objects({"same-key"})
@@ -609,9 +611,10 @@ TEST_F(MasterServiceEvictScenarioTest,
        TenantOverQuotaRejectsAdmissionAndBackgroundPassReclaims) {
     MasterScenario scenario(
         "over-quota admission rejects; the tenant pass makes room",
-        TenantConfig({{"tenant-a", kObjectSize}, {"tenant-b", kObjectSize}}));
+        TenantConfig(
+            {{"tenant-a", {kObjectSize, 0}}, {"tenant-b", {kObjectSize, 0}}}));
     scenario.Given(MemoryNode("memory"))
-        .Given(Objects({"tenant-a-old"})
+        .Given(Objects({"same-key"})
                    .Size(kObjectSize)
                    .ForTenant("tenant-a")
                    .CompleteOn("memory")
@@ -626,12 +629,12 @@ TEST_F(MasterServiceEvictScenarioTest,
         .When(PutStart("tenant-a-new", kObjectSize)
                   .ForTenant("tenant-a")
                   .ExpectError(ErrorCode::TENANT_QUOTA_EXCEEDED))
-        .Then(Object("tenant-a-old").ForTenant("tenant-a").IsReadable())
+        .Then(Object("same-key").ForTenant("tenant-a").IsReadable())
         // The pass reclaims tenant-a's own expired object. tenant-b is over
         // its watermark too, but its object is hard-pinned, so the pass frees
         // nothing for it and never reaches across tenants to compensate.
         .When(EvictTenants())
-        .Then(Object("tenant-a-old").ForTenant("tenant-a").DoesNotExist())
+        .Then(Object("same-key").ForTenant("tenant-a").DoesNotExist())
         .Then(Object("tenant-b-object").ForTenant("tenant-b").IsReadable())
         // With headroom built ahead of it, the retry is admitted.
         .When(PutStart("tenant-a-new", kObjectSize)

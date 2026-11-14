@@ -47,8 +47,8 @@ TEST(BatchReplicaClearTenantRpcTest, UsesClientTenantAndKeepsTenantsIsolated) {
     ScopedPolicyFile policy_file;
     TenantQuotaPolicySnapshot policy;
     policy.tenant_quotas = {
-        {std::string(TenantId::kDefaultValue), 64 * 1024 * 1024},
-        {kTenant, 64 * 1024 * 1024},
+        {std::string(TenantId::kDefaultValue), {64 * 1024 * 1024, 0}},
+        {kTenant, {64 * 1024 * 1024, 0}},
     };
     {
         std::ofstream output(policy_file.path());

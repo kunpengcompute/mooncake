@@ -111,7 +111,8 @@ class MasterServiceTenantQuotaTest : public ::testing::Test {
         const std::map<TenantId, uint64_t>& tenant_quotas) {
         TenantQuotaPolicySnapshot snapshot;
         for (const auto& [tenant_id, quota] : tenant_quotas) {
-            snapshot.tenant_quotas.emplace(tenant_id.value(), quota);
+            snapshot.tenant_quotas.emplace(tenant_id.value(),
+                                           TenantQuotaLimits{quota, 0});
         }
         auto path =
             std::filesystem::temp_directory_path() /
@@ -467,7 +468,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     EXPECT_FALSE(TenantId(control_tenant).IsValid());
 
     auto register_default =
-        service.UpsertTenantQuotaPolicy(TenantId::Default(), 100);
+        service.UpsertTenantQuotaPolicy(TenantId::Default(), 100, 0);
     ASSERT_TRUE(register_default.has_value())
         << toString(register_default.error());
     PutComplete(service, client_id, "registered-default", TenantId::Default(),
@@ -573,7 +574,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     {
         std::ofstream out(initial_policy);
         TenantQuotaPolicySnapshot replacement;
-        replacement.tenant_quotas = {{"tenant-a", 1000}};
+        replacement.tenant_quotas = {{"tenant-a", {1000, 0}}};
         out << FormatTenantQuotaPolicyYaml(replacement);
     }
     ReloadTenantQuotaPolicyFromStore(service);
@@ -605,7 +606,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     {
         std::ofstream out(initial_policy);
         TenantQuotaPolicySnapshot replacement;
-        replacement.tenant_quotas = {{"tenant-a", 1000}};
+        replacement.tenant_quotas = {{"tenant-a", {1000, 0}}};
         out << FormatTenantQuotaPolicyYaml(replacement);
     }
     ReloadTenantQuotaPolicyFromStore(service);
@@ -648,7 +649,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     {
         std::ofstream out(initial_policy);
         TenantQuotaPolicySnapshot replacement;
-        replacement.tenant_quotas = {{"tenant-a", 1000}};
+        replacement.tenant_quotas = {{"tenant-a", {1000, 0}}};
         out << FormatTenantQuotaPolicyYaml(replacement);
     }
     ReloadTenantQuotaPolicyFromStore(service);
@@ -1021,7 +1022,7 @@ TEST_F(MasterServiceTenantQuotaTest, DeletePolicyRequiresTenantWithoutObjects) {
     ASSERT_FALSE(delete_non_empty.has_value());
     EXPECT_EQ(delete_non_empty.error(), ErrorCode::TENANT_NOT_EMPTY);
 
-    auto upsert = service.UpsertTenantQuotaPolicy(TenantId("tenant-b"), 100);
+    auto upsert = service.UpsertTenantQuotaPolicy(TenantId("tenant-b"), 100, 0);
     ASSERT_TRUE(upsert.has_value()) << toString(upsert.error());
     auto delete_empty = service.DeleteTenantQuotaPolicy(TenantId("tenant-b"));
     ASSERT_TRUE(delete_empty.has_value()) << toString(delete_empty.error());
@@ -1034,7 +1035,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     MountSegment(service);
 
     TenantQuotaPolicySnapshot current_policy;
-    current_policy.tenant_quotas = {{"tenant-a", 1000}};
+    current_policy.tenant_quotas = {{"tenant-a", {1000, 0}}};
     auto blocking_store =
         std::make_unique<BlockingTenantQuotaPolicyStore>(current_policy);
     auto* blocking_store_ptr = blocking_store.get();
@@ -1081,7 +1082,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     UUID client_id = MountSegment(service);
 
     TenantQuotaPolicySnapshot current_policy;
-    current_policy.tenant_quotas = {{"tenant-a", 1000}};
+    current_policy.tenant_quotas = {{"tenant-a", {1000, 0}}};
     auto blocking_store =
         std::make_unique<BlockingTenantQuotaPolicyStore>(current_policy);
     auto* blocking_store_ptr = blocking_store.get();
@@ -1253,7 +1254,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     {
         std::ofstream out(initial_policy);
         TenantQuotaPolicySnapshot replacement;
-        replacement.tenant_quotas = {{"tenant-a", 1000}};
+        replacement.tenant_quotas = {{"tenant-a", {1000, 0}}};
         out << FormatTenantQuotaPolicyYaml(replacement);
     }
     ReloadTenantQuotaPolicyFromStore(service);

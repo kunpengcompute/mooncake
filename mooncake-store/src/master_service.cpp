@@ -6795,10 +6795,15 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                 allocation_session_id = metadata.session_id;
                 const auto previous_kv_media = KvMediaSnapshot(metadata);
                 TenantQuotaLedger replacement_charge;
+                TenantQuotaLedger nof_replacement_charge;
                 auto* quota_account = accessor.QuotaAccount();
+                auto* nof_quota_account = accessor.NoFQuotaAccount();
                 const bool has_replacement_charge =
                     enable_multi_tenants_ &&
                     metadata.memory_ledger.TotalChargedBytes() != 0;
+                const bool has_nof_replacement_charge =
+                    enable_multi_tenants_ && nof_quota_account != nullptr &&
+                    metadata.nof_ledger.TotalChargedBytes() != 0;
 
                 // A leased memory snapshot still references the old replica
                 // descriptors. Allocate the replacement before removing the
@@ -6861,6 +6866,43 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                             ReleaseTenantQuota(
                                 quota_account,
                                 replacement_pending_quota_charge);
+                            if (replacement_pending_nof_quota_charge > 0) {
+                                ReleaseTenantQuota(
+                                    accessor.NoFQuotaAccount(),
+                                    replacement_pending_nof_quota_charge);
+                            }
+                        }
+                        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+                    }
+                }
+                if (has_nof_replacement_charge) {
+                    auto nof_transfer_result =
+                        metadata.nof_ledger.TransferReplacementCharge(
+                            nof_quota_account, nof_replacement_charge);
+                    if (!nof_transfer_result) {
+                        LogTenantQuotaLedgerError(
+                            nof_transfer_result, "transfer_replacement_out_nof",
+                            object_id.tenant_id, key);
+                        // Undo the memory transfer so the old metadata keeps
+                        // owning its charge; it is not erased on this path.
+                        if (has_replacement_charge) {
+                            auto undo_result =
+                                replacement_charge.TransferReplacementCharge(
+                                    quota_account, metadata.memory_ledger);
+                            LogTenantQuotaLedgerError(
+                                undo_result, "undo_transfer_replacement_out",
+                                object_id.tenant_id, key);
+                        }
+                        if (replacement_replicas.has_value()) {
+                            FreeDfsReplicas(key, *replacement_replicas);
+                            ReleaseTenantQuota(
+                                quota_account,
+                                replacement_pending_quota_charge);
+                            if (replacement_pending_nof_quota_charge > 0) {
+                                ReleaseTenantQuota(
+                                    accessor.NoFQuotaAccount(),
+                                    replacement_pending_nof_quota_charge);
+                            }
                         }
                         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
                     }
@@ -6924,29 +6966,21 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                                                   "rollback_replacement",
                                                   object_id.tenant_id, key);
                     }
+                    if (has_nof_replacement_charge) {
+                        auto rollback_result =
+                            nof_replacement_charge.ReleaseReplacement(
+                                nof_quota_account);
+                        LogTenantQuotaLedgerError(rollback_result,
+                                                  "rollback_replacement_nof",
+                                                  object_id.tenant_id, key);
+                    }
                     return allocate_result;
                 }
                 if (accessor.IsPublished()) {
                     accessor.Get().session_id = allocation_session_id;
                 }
-                if (has_replacement_charge) {
-                    if (!accessor.IsPublished()) {
-                        auto rollback_result =
-                            replacement_charge.ReleaseReplacement(
-                                quota_account);
-                        LogTenantQuotaLedgerError(rollback_result,
-                                                  "rollback_replacement",
-                                                  object_id.tenant_id, key);
-                        return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
-                    }
-                    auto transfer_result =
-                        replacement_charge.TransferReplacementCharge(
-                            quota_account, accessor.Get().memory_ledger);
-                    if (!transfer_result) {
-                        LogTenantQuotaLedgerError(transfer_result,
-                                                  "transfer_replacement_in",
-                                                  object_id.tenant_id, key);
-                        accessor.Erase();
+                if (has_replacement_charge || has_nof_replacement_charge) {
+                    auto rollback_replacements = [&]() {
                         if (replacement_charge.ReplacedBytes() != 0) {
                             auto rollback_result =
                                 replacement_charge.ReleaseReplacement(
@@ -6955,7 +6989,47 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                                                       "rollback_replacement",
                                                       object_id.tenant_id, key);
                         }
+                        if (nof_replacement_charge.ReplacedBytes() != 0) {
+                            auto rollback_result =
+                                nof_replacement_charge.ReleaseReplacement(
+                                    nof_quota_account);
+                            LogTenantQuotaLedgerError(
+                                rollback_result, "rollback_replacement_nof",
+                                object_id.tenant_id, key);
+                        }
+                    };
+                    if (!accessor.IsPublished()) {
+                        rollback_replacements();
                         return tl::make_unexpected(ErrorCode::INTERNAL_ERROR);
+                    }
+                    if (has_replacement_charge) {
+                        auto transfer_result =
+                            replacement_charge.TransferReplacementCharge(
+                                quota_account, accessor.Get().memory_ledger);
+                        if (!transfer_result) {
+                            LogTenantQuotaLedgerError(transfer_result,
+                                                      "transfer_replacement_in",
+                                                      object_id.tenant_id, key);
+                            accessor.Erase();
+                            rollback_replacements();
+                            return tl::make_unexpected(
+                                ErrorCode::INTERNAL_ERROR);
+                        }
+                    }
+                    if (has_nof_replacement_charge) {
+                        auto nof_transfer_result =
+                            nof_replacement_charge.TransferReplacementCharge(
+                                nof_quota_account, accessor.Get().nof_ledger);
+                        if (!nof_transfer_result) {
+                            LogTenantQuotaLedgerError(
+                                nof_transfer_result,
+                                "transfer_replacement_in_nof",
+                                object_id.tenant_id, key);
+                            accessor.Erase();
+                            rollback_replacements();
+                            return tl::make_unexpected(
+                                ErrorCode::INTERNAL_ERROR);
+                        }
                     }
                 }
                 return allocate_result;
@@ -12079,9 +12153,17 @@ void MasterService::NoFBatchEvict(double evict_ratio_target,
             continue;
         }
 
+        const uint64_t before_charge = CompletedNoFQuotaCharge(metadata);
         const size_t erased = metadata.EraseReplicas(is_evictable_nof_replica);
         if (erased == 0) {
             continue;
+        }
+        const uint64_t after_charge = CompletedNoFQuotaCharge(metadata);
+        if (enable_multi_tenants_ && before_charge > after_charge) {
+            auto release_result = metadata.nof_ledger.ReleaseCommitted(
+                accessor.NoFQuotaAccount(), before_charge - after_charge);
+            LogTenantQuotaLedgerError(release_result, "release_committed_nof",
+                                      tenant_id, key);
         }
 
         total_freed_size += metadata.TotalLength() * erased;
@@ -12244,9 +12326,17 @@ void MasterService::EvictSoftPinExpired(
         }
 
         // Synchronous erase (non-HA path).
+        const uint64_t before_charge = CompletedNoFQuotaCharge(metadata);
         const size_t erased = metadata.EraseReplicas(is_evictable_nof_replica);
         if (erased == 0) {
             continue;
+        }
+        const uint64_t after_charge = CompletedNoFQuotaCharge(metadata);
+        if (enable_multi_tenants_ && before_charge > after_charge) {
+            auto release_result = metadata.nof_ledger.ReleaseCommitted(
+                accessor.NoFQuotaAccount(), before_charge - after_charge);
+            LogTenantQuotaLedgerError(release_result, "release_committed_nof",
+                                      tenant_id, key);
         }
         freed_bytes += static_cast<int64_t>(metadata.TotalLength() * erased);
         ++evicted_count;

@@ -698,6 +698,7 @@ class WrappedMasterServiceConfig {
         nof_heartbeat_probe_timeout_ms = config.nof_heartbeat_probe_timeout_ms;
         nof_heartbeat_failures_threshold =
             config.nof_heartbeat_failures_threshold;
+        enable_ha = config.enable_ha;
         enable_offload = config.enable_offload;
         offload_on_evict = config.offload_on_evict;
         offload_force_evict = config.offload_force_evict;
@@ -1413,6 +1414,7 @@ class MasterServiceConfig {
         nof_heartbeat_probe_timeout_ms = config.nof_heartbeat_probe_timeout_ms;
         nof_heartbeat_failures_threshold =
             config.nof_heartbeat_failures_threshold;
+        enable_ha = config.enable_ha;
         enable_offload = config.enable_offload;
         offload_on_evict = config.offload_on_evict;
         offload_force_evict = config.offload_force_evict;

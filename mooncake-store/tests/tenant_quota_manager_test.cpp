@@ -65,7 +65,7 @@ TEST_F(TenantQuotaManagerTest, UpsertGetListDelete) {
     EXPECT_FALSE(manager->IsTenantRegistered(kTenantA));
     EXPECT_FALSE(manager->GetSnapshot(kTenantA).has_value());
 
-    auto upsert = manager->UpsertPolicy(kTenantA, 100);
+    auto upsert = manager->UpsertPolicy(kTenantA, 100, 1);
     ASSERT_TRUE(upsert.has_value()) << toString(upsert.error());
     EXPECT_EQ(upsert->requested_quota_bytes, 100);
     EXPECT_EQ(upsert->effective_quota_bytes, 100);
@@ -73,8 +73,8 @@ TEST_F(TenantQuotaManagerTest, UpsertGetListDelete) {
     EXPECT_FALSE(upsert->admission_closed);
     EXPECT_TRUE(manager->IsTenantRegistered(kTenantA));
 
-    ASSERT_TRUE(manager->UpsertPolicy(kTenantA, 300).has_value());
-    ASSERT_TRUE(manager->UpsertPolicy(kTenantB, 200).has_value());
+    ASSERT_TRUE(manager->UpsertPolicy(kTenantA, 300, 1).has_value());
+    ASSERT_TRUE(manager->UpsertPolicy(kTenantB, 200, 1).has_value());
     EXPECT_EQ(Snapshot(*manager, kTenantA).requested_quota_bytes, 300);
     EXPECT_EQ(manager->ListSnapshots().size(), 2);
 
@@ -92,12 +92,12 @@ TEST_F(TenantQuotaManagerTest, UpsertGetListDelete) {
 
 TEST_F(TenantQuotaManagerTest, UpsertRejectsOutOfRangeQuota) {
     auto manager = NewManager(NewPolicyPath());
-    auto zero = manager->UpsertPolicy(kTenantA, 0);
+    auto zero = manager->UpsertPolicy(kTenantA, 0, 1);
     ASSERT_FALSE(zero.has_value());
     EXPECT_EQ(zero.error(), ErrorCode::INVALID_PARAMS);
 
     auto too_large = manager->UpsertPolicy(
-        kTenantA, TenantQuotaAccount::kMaxChargedBytes + 1);
+        kTenantA, TenantQuotaAccount::kMaxChargedBytes + 1, 1);
     ASSERT_FALSE(too_large.has_value());
     EXPECT_EQ(too_large.error(), ErrorCode::INVALID_PARAMS);
     EXPECT_FALSE(manager->IsTenantRegistered(kTenantA));
@@ -105,7 +105,7 @@ TEST_F(TenantQuotaManagerTest, UpsertRejectsOutOfRangeQuota) {
 
 TEST_F(TenantQuotaManagerTest, DeleteRefusesTenantThatIsNotEmpty) {
     auto manager = NewManager(NewPolicyPath());
-    ASSERT_TRUE(manager->UpsertPolicy(kTenantA, 100).has_value());
+    ASSERT_TRUE(manager->UpsertPolicy(kTenantA, 100, 1).has_value());
 
     auto& account = manager->AccountFor(kTenantA);
     ASSERT_TRUE(account.TryCharge(10).has_value());
@@ -138,8 +138,8 @@ TEST_F(TenantQuotaManagerTest, PoliciesReloadFromTheStore) {
     const std::string path = NewPolicyPath();
     {
         auto writer = NewManager(path);
-        ASSERT_TRUE(writer->UpsertPolicy(kTenantA, 100).has_value());
-        ASSERT_TRUE(writer->UpsertPolicy(kTenantB, 200).has_value());
+        ASSERT_TRUE(writer->UpsertPolicy(kTenantA, 100, 1).has_value());
+        ASSERT_TRUE(writer->UpsertPolicy(kTenantB, 200, 1).has_value());
     }
 
     auto reader = NewManager(path);
@@ -165,8 +165,8 @@ TEST_F(TenantQuotaManagerTest, PolicyStoreErrorsThrow) {
 TEST_F(TenantQuotaManagerTest, RecomputeFollowsCapacity) {
     capacity_ = 300;
     auto manager = NewManager(NewPolicyPath());
-    ASSERT_TRUE(manager->UpsertPolicy(kTenantA, 100).has_value());
-    ASSERT_TRUE(manager->UpsertPolicy(kTenantB, 200).has_value());
+    ASSERT_TRUE(manager->UpsertPolicy(kTenantA, 100, 1).has_value());
+    ASSERT_TRUE(manager->UpsertPolicy(kTenantB, 200, 1).has_value());
     EXPECT_EQ(Snapshot(*manager, kTenantA).effective_quota_bytes, 100);
     EXPECT_EQ(Snapshot(*manager, kTenantB).effective_quota_bytes, 200);
 
@@ -185,8 +185,8 @@ TEST_F(TenantQuotaManagerTest, RecomputeFollowsCapacity) {
 
 TEST_F(TenantQuotaManagerTest, RebuildUsageOverwritesCharges) {
     auto manager = NewManager(NewPolicyPath());
-    ASSERT_TRUE(manager->UpsertPolicy(kTenantA, 100).has_value());
-    ASSERT_TRUE(manager->UpsertPolicy(kTenantB, 100).has_value());
+    ASSERT_TRUE(manager->UpsertPolicy(kTenantA, 100, 1).has_value());
+    ASSERT_TRUE(manager->UpsertPolicy(kTenantB, 100, 1).has_value());
     auto& account_a = manager->AccountFor(kTenantA);
     EXPECT_EQ(&account_a, &manager->AccountFor(kTenantA));
     ASSERT_TRUE(account_a.TryCharge(10).has_value());

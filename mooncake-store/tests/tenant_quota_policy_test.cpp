@@ -129,7 +129,9 @@ class TenantQuotaPolicyTest : public ::testing::Test {
     }
 
     void Register(const TenantId& tenant_id, uint64_t quota_bytes) {
-        auto upserted = policy_->UpsertPolicy(tenant_id, quota_bytes);
+        // Tenants must declare a NoF quota; these tests only cover the memory
+        // tier, so a placeholder value is enough.
+        auto upserted = policy_->UpsertPolicy(tenant_id, quota_bytes, 1);
         ASSERT_TRUE(upserted.has_value()) << toString(upserted.error());
     }
 

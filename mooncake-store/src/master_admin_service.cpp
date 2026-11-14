@@ -197,7 +197,9 @@ struct HttpTenantQuotaSnapshot {
     uint64_t nof_requested_quota_bytes{0};
     uint64_t nof_effective_quota_bytes{0};
     uint64_t nof_charged_bytes{0};
-    bool nof_admission_closed{true};
+    // A tenant without a NoF account has no NoF policy, so NoF admission stays
+    // open; only a real NoF snapshot can report it closed.
+    bool nof_admission_closed{false};
     bool nof_over_quota{false};
 };
 YLT_REFL(HttpTenantQuotaSnapshot, tenant_id, requested_quota_bytes,

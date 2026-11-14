@@ -82,6 +82,18 @@ tl::expected<TenantQuotaSnapshot, ErrorCode> TenantQuotaManager::UpsertPolicy(
 
     std::lock_guard<std::mutex> policy_lock(policy_mutex_);
     auto policy = BuildPolicySnapshot();
+    // A tenant that predates the NoF tier (already in the persisted policy, but
+    // without a NoF quota) may stay unmetered on the NoF tier. Every other
+    // tenant -- a brand new one, or one that already declared a NoF quota --
+    // must carry an explicit non-zero NoF quota, and a declared NoF quota must
+    // never be cleared back to unlimited.
+    const auto existing = policy.tenant_quotas.find(tenant_id.value());
+    const bool is_new_tenant = existing == policy.tenant_quotas.end();
+    const bool had_nof_quota =
+        !is_new_tenant && existing->second.nof_quota_bytes > 0;
+    if (nof_quota_bytes == 0 && (is_new_tenant || had_nof_quota)) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
     policy.tenant_quotas[tenant_id.value()] = TenantQuotaLimits{
         .memory_quota_bytes = requested_quota_bytes,
         .nof_quota_bytes = nof_quota_bytes,

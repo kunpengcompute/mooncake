@@ -541,7 +541,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     EXPECT_FALSE(TenantId(control_tenant).IsValid());
 
     auto register_default =
-        service.UpsertTenantQuotaPolicy(TenantId::Default(), 100, 0);
+        service.UpsertTenantQuotaPolicy(TenantId::Default(), 100, 1);
     ASSERT_TRUE(register_default.has_value())
         << toString(register_default.error());
     PutComplete(service, client_id, "registered-default", TenantId::Default(),
@@ -1095,7 +1095,7 @@ TEST_F(MasterServiceTenantQuotaTest, DeletePolicyRequiresTenantWithoutObjects) {
     ASSERT_FALSE(delete_non_empty.has_value());
     EXPECT_EQ(delete_non_empty.error(), ErrorCode::TENANT_NOT_EMPTY);
 
-    auto upsert = service.UpsertTenantQuotaPolicy(TenantId("tenant-b"), 100, 0);
+    auto upsert = service.UpsertTenantQuotaPolicy(TenantId("tenant-b"), 100, 1);
     ASSERT_TRUE(upsert.has_value()) << toString(upsert.error());
     auto delete_empty = service.DeleteTenantQuotaPolicy(TenantId("tenant-b"));
     ASSERT_TRUE(delete_empty.has_value()) << toString(delete_empty.error());

@@ -793,7 +793,8 @@ TEST_F(MasterAdminServerTest, TenantQuotaAdminLifecycleEndpoints) {
     admin.SetServiceAvailable(true);
 
     auto upsert = HttpPutJson(port, "/api/v1/tenant_quotas?tenant_id=tenant-a",
-                              "{\"requested_quota_bytes\":800}");
+                              "{\"requested_quota_bytes\":800,"
+                              "\"nof_quota_bytes\":800}");
     EXPECT_EQ(upsert.http_status, 200);
     EXPECT_NE(upsert.body.find("\"tenant_id\":\"tenant-a\""),
               std::string::npos);

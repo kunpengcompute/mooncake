@@ -36,6 +36,7 @@
 #include <spdk/nvme.h>
 
 #include "config/spdk_controller_config.h"
+#include "environ.h"
 #include "nof/page_registry.h"
 #include "nof/probe_context_pool.h"
 #include "nof/padding_buffer_pool.h"
@@ -103,6 +104,28 @@ template <typename T>
 void SetEnvOptsSize(T& opts) {
     if constexpr (requires { opts.opts_size; }) opts.opts_size = sizeof(opts);
 }
+
+#ifdef USE_SPDK_NPU_UB
+template <typename T>
+int ConfigureNpuWriteCapsule(T& opts) {
+    static const bool disable_in_capsule = Environ::Process().GetTypedOr(
+        EnvironmentVariable<bool>{"MC_NOF_DISABLE_HBM_IN_CAPSULE"}, false);
+    if (!disable_in_capsule) return 0;
+
+    if constexpr (requires { opts.rdma_disable_in_capsule_data; }) {
+        opts.rdma_disable_in_capsule_data = true;
+        LOG_FIRST_N(INFO, 1)
+            << "MC_NOF_DISABLE_HBM_IN_CAPSULE enabled: disabling in-capsule "
+               "data for NVMe/RDMA writes from HBM";
+        return 0;
+    } else {
+        LOG_FIRST_N(ERROR, 1)
+            << "MC_NOF_DISABLE_HBM_IN_CAPSULE requires SPDK support for "
+               "rdma_disable_in_capsule_data";
+        return -ENOTSUP;
+    }
+}
+#endif
 
 void ApplyCtrlrOptsFromEnv(struct spdk_nvme_ctrlr_opts* opts) {
     opts->keep_alive_timeout_ms = 0;
@@ -1079,6 +1102,10 @@ class SpdkInitiator::Impl {
         if (device) {
             if (!handle->rdma_domain || !npu_domain_) return -ENOTSUP;
             io->opts.memory_domain = npu_domain_;
+            if (op == NofIOOp::kWrite) {
+                const int rc = ConfigureNpuWriteCapsule(io->opts);
+                if (rc != 0) return rc;
+            }
         }
 #endif
         auto* request = io.get();

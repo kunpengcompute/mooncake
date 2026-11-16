@@ -1,5 +1,6 @@
 #include "ssd_register_client.h"
 
+#include "config/client_host_identity_config.h"
 #include "config/nof_register_config.h"
 
 namespace mooncake {
@@ -39,8 +40,24 @@ int NoFRegisterClient::set_register(const std::string &nqn, size_t nsid,
     segment.id = generate_uuid();
     segment.name = te_endpoint;
     segment.te_endpoint = te_endpoint;
-    segment.host_id = host_id;
+    // Prefer the configured host ID; otherwise use the transport address.
+    segment.host_id =
+        host_id.empty()
+            ? ClientHostIdentityConfig::FromEnvironment(traddr).host_id
+            : host_id;
+    if (segment.host_id.empty()) {
+        LOG(WARNING)
+            << "NoF traddr cannot be resolved to a host_id; segment will "
+               "mount for legacy allocation but remain TOPOLOGY_INCOMPLETE "
+               "and be excluded from PT views";
+    } else {
+        LOG(INFO) << "Segment host_id resolved as '" << segment.host_id << "'";
+    }
     segment.rack_id = rack_id;
+    if (!segment.rack_id.empty()) {
+        LOG(INFO) << "Segment rack_id resolved as '" << segment.rack_id
+                  << "' (PT rack failure domain)";
+    }
     auto mount_result = master_client_.MountNoFSegment(segment);
     if (!mount_result) {
         LOG(ERROR) << "mount_segment_to_master_failed ";

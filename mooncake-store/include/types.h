@@ -520,7 +520,9 @@ struct NoFSegment {
     size_t size{0};
     // TE p2p endpoint (ip:port) for transport-only addressing
     std::string te_endpoint{};
+    // Stable host ID; falls back to the transport IP when omitted.
     std::string host_id{};
+    // Optional rack or power-domain ID; empty falls back to host_id.
     std::string rack_id{};
     NoFSegment() = default;
 };

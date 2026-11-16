@@ -8,6 +8,18 @@ from mooncake import mooncake_ssd_create_and_register as create
 from mooncake.mooncake_ssd_tool_common import SPDKTgtCreator
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        "pci:0000:01:00.0 host_id:host-a rack_id:rack-a",
+        "host_id:host-a rack_id:rack-a pci:0000:01:00.0",
+    ],
+)
+def test_target_creation_does_not_treat_topology_as_pci(description):
+    creator = SPDKTgtCreator([f"ip:127.0.0.1 path:/spdk {description}"])
+    assert creator.target_configs[0]["pci_devices"] == ["0000:01:00.0"]
+
+
 def test_parse_arguments_accepts_ssh_port():
     with patch.object(
         sys,

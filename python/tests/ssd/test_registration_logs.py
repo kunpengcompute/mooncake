@@ -61,3 +61,19 @@ def test_registration_logs_namespace_identity_and_outcome_counts(caplog):
     assert "Already registered namespaces (skipped): 1" in caplog.text
     assert "Failed namespaces: 1" in caplog.text
     assert native.MooncakeDistributedNoFRegister.call_count == 3
+
+
+def test_registration_passes_topology_to_native_client():
+    native = ModuleType("mooncake.store")
+    native.MooncakeDistributedNoFRegister = Mock()
+    client = native.MooncakeDistributedNoFRegister.return_value
+    client.real_register.return_value = 0
+    register = MooncakeNoFRegister.__new__(MooncakeNoFRegister)
+    cfg = config(1)
+    cfg.update(host_id="host-a", rack_id="rack-a")
+    register.config_list = [cfg]
+    with patch.dict(sys.modules, {"mooncake.store": native}):
+        assert register.start_ssd_service()
+    client.real_register.assert_called_once_with(
+        "nqn.test", 1, "127.0.0.1", 4420, 0, 4096, "master:50051", "host-a", "rack-a"
+    )

@@ -103,6 +103,14 @@ def test_discovery_without_pci_keeps_all_namespaces(register):
     ]
 
 
+def test_discovery_preserves_target_topology(register):
+    prepare_discovery(register, "ip:127.0.0.1 path:/spdk host_id:host-a rack_id:rack-a")
+    configs = register._get_remote_ssd_info("master:50051")
+    assert len(configs) == 2
+    assert all(cfg["host_id"] == "host-a" for cfg in configs)
+    assert all(cfg["rack_id"] == "rack-a" for cfg in configs)
+
+
 def test_unmatched_pci_does_not_fall_back_to_registering_all_namespaces(register):
     prepare_discovery(register, "ip:127.0.0.1 path:/spdk pci:0000:03:00.0")
     with pytest.raises(RuntimeError, match="No SSD information"):

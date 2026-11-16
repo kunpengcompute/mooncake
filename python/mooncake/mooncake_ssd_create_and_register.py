@@ -68,7 +68,8 @@ Notes:
         required=True,
         help=(
             "SPDK target information, for example "
-            '"ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0,0000:02:00.0". '
+            '"ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0,0000:02:00.0 '
+            'host_id:host1 rack_id:rack1". '
             "The same target list is used for create and register phases."
         ),
     )

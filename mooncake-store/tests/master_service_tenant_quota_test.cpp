@@ -111,7 +111,8 @@ class MasterServiceTenantQuotaTest : public ::testing::Test {
         const std::map<TenantId, uint64_t>& tenant_quotas) {
         TenantQuotaPolicySnapshot snapshot;
         for (const auto& [tenant_id, quota] : tenant_quotas) {
-            snapshot.tenant_quotas.emplace(tenant_id.value(), quota);
+            snapshot.tenant_quotas.emplace(tenant_id.value(),
+                                           TenantQuotaLimits{quota, 0});
         }
         auto path =
             std::filesystem::temp_directory_path() /
@@ -404,6 +405,79 @@ class MasterServiceTenantQuotaTest : public ::testing::Test {
         MasterServiceTestPeer(service).RecomputeTenantEffectiveQuotas();
     }
 
+#ifdef USE_NOF
+    // Two-tier policy file: unlike WritePolicyFile, memory and NoF quotas are
+    // both carried, so the NoF tier has an explicit policy and gates admission.
+    std::string WriteNoFPolicyFile(
+        const std::map<TenantId, TenantQuotaLimits>& tenant_quotas) {
+        TenantQuotaPolicySnapshot snapshot;
+        for (const auto& [tenant_id, limits] : tenant_quotas) {
+            snapshot.tenant_quotas.emplace(tenant_id.value(), limits);
+        }
+        auto path =
+            std::filesystem::temp_directory_path() /
+            ("mooncake_tenant_quota_test_" + std::to_string(::getpid()) + "_" +
+             std::to_string(next_policy_file_++) + ".yaml");
+        std::ofstream out(path);
+        out << FormatTenantQuotaPolicyYaml(snapshot);
+        out.close();
+        policy_files_.push_back(path.string());
+        return path.string();
+    }
+
+    // NoF counterpart of MakeTenantWatermarkConfig. default_kv_lease_ttl(0) and
+    // both pool-wide watermarks pinned to 1.0 keep every other evictor out of
+    // the way, so a green assertion can only come from the NoF tenant pass.
+    MasterServiceConfig MakeNoFQuotaConfig(
+        const std::map<TenantId, TenantQuotaLimits>& tenant_quotas,
+        std::optional<double> nof_tenant_high_watermark_ratio = std::nullopt,
+        double nof_eviction_ratio = 0.05) {
+        auto builder = MasterServiceConfig::builder()
+                           .set_enable_multi_tenants(true)
+                           .set_tenant_quota_connector_type("file")
+                           .set_tenant_quota_connector_uri(
+                               WriteNoFPolicyFile(tenant_quotas))
+                           .set_default_kv_lease_ttl(0)
+                           .set_eviction_high_watermark_ratio(1.0)
+                           .set_nof_eviction_ratio(nof_eviction_ratio)
+                           .set_nof_eviction_high_watermark_ratio(1.0);
+        if (nof_tenant_high_watermark_ratio.has_value()) {
+            builder.set_nof_tenant_eviction_high_watermark_ratio(
+                *nof_tenant_high_watermark_ratio);
+        }
+        return builder.build();
+    }
+
+    ReplicateConfig NoFConfig() {
+        ReplicateConfig config;
+        config.replica_num = 0;
+        config.nof_replica_num = 1;
+        return config;
+    }
+
+    void PutNoFComplete(MasterService& service, const UUID& client_id,
+                        const std::string& key, const TenantId& tenant_id,
+                        uint64_t size) {
+        auto start =
+            service.PutStart(client_id, key, tenant_id, size, NoFConfig());
+        ASSERT_TRUE(start.has_value()) << toString(start.error());
+        auto end =
+            service.PutEnd(client_id, key, tenant_id, ReplicaType::NOF_SSD);
+        ASSERT_TRUE(end.has_value()) << toString(end.error());
+    }
+
+    TenantQuotaSnapshot NoFSnapshot(MasterService& service,
+                                    const TenantId& tenant_id) {
+        auto snapshot = service.GetNoFTenantQuotaSnapshot(tenant_id);
+        EXPECT_TRUE(snapshot.has_value());
+        return *snapshot;
+    }
+
+    void RunNoFTenantEvictionPass(MasterService& service) {
+        MasterServiceTestPeer(service).RunNoFTenantEvictForTesting();
+    }
+#endif
+
     bool WaitForTenantQuotaPolicyMutexContention(MasterService& service) {
         for (int i = 0; i < 500; ++i) {
             if (!MasterServiceTestPeer::TenantQuotaPolicyMutex(service)
@@ -467,7 +541,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     EXPECT_FALSE(TenantId(control_tenant).IsValid());
 
     auto register_default =
-        service.UpsertTenantQuotaPolicy(TenantId::Default(), 100);
+        service.UpsertTenantQuotaPolicy(TenantId::Default(), 100, 1);
     ASSERT_TRUE(register_default.has_value())
         << toString(register_default.error());
     PutComplete(service, client_id, "registered-default", TenantId::Default(),
@@ -573,7 +647,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     {
         std::ofstream out(initial_policy);
         TenantQuotaPolicySnapshot replacement;
-        replacement.tenant_quotas = {{"tenant-a", 1000}};
+        replacement.tenant_quotas = {{"tenant-a", {1000, 0}}};
         out << FormatTenantQuotaPolicyYaml(replacement);
     }
     ReloadTenantQuotaPolicyFromStore(service);
@@ -605,7 +679,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     {
         std::ofstream out(initial_policy);
         TenantQuotaPolicySnapshot replacement;
-        replacement.tenant_quotas = {{"tenant-a", 1000}};
+        replacement.tenant_quotas = {{"tenant-a", {1000, 0}}};
         out << FormatTenantQuotaPolicyYaml(replacement);
     }
     ReloadTenantQuotaPolicyFromStore(service);
@@ -648,7 +722,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     {
         std::ofstream out(initial_policy);
         TenantQuotaPolicySnapshot replacement;
-        replacement.tenant_quotas = {{"tenant-a", 1000}};
+        replacement.tenant_quotas = {{"tenant-a", {1000, 0}}};
         out << FormatTenantQuotaPolicyYaml(replacement);
     }
     ReloadTenantQuotaPolicyFromStore(service);
@@ -1021,7 +1095,7 @@ TEST_F(MasterServiceTenantQuotaTest, DeletePolicyRequiresTenantWithoutObjects) {
     ASSERT_FALSE(delete_non_empty.has_value());
     EXPECT_EQ(delete_non_empty.error(), ErrorCode::TENANT_NOT_EMPTY);
 
-    auto upsert = service.UpsertTenantQuotaPolicy(TenantId("tenant-b"), 100);
+    auto upsert = service.UpsertTenantQuotaPolicy(TenantId("tenant-b"), 100, 1);
     ASSERT_TRUE(upsert.has_value()) << toString(upsert.error());
     auto delete_empty = service.DeleteTenantQuotaPolicy(TenantId("tenant-b"));
     ASSERT_TRUE(delete_empty.has_value()) << toString(delete_empty.error());
@@ -1034,7 +1108,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     MountSegment(service);
 
     TenantQuotaPolicySnapshot current_policy;
-    current_policy.tenant_quotas = {{"tenant-a", 1000}};
+    current_policy.tenant_quotas = {{"tenant-a", {1000, 0}}};
     auto blocking_store =
         std::make_unique<BlockingTenantQuotaPolicyStore>(current_policy);
     auto* blocking_store_ptr = blocking_store.get();
@@ -1081,7 +1155,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     UUID client_id = MountSegment(service);
 
     TenantQuotaPolicySnapshot current_policy;
-    current_policy.tenant_quotas = {{"tenant-a", 1000}};
+    current_policy.tenant_quotas = {{"tenant-a", {1000, 0}}};
     auto blocking_store =
         std::make_unique<BlockingTenantQuotaPolicyStore>(current_policy);
     auto* blocking_store_ptr = blocking_store.get();
@@ -1253,7 +1327,7 @@ TEST_F(MasterServiceTenantQuotaTest,
     {
         std::ofstream out(initial_policy);
         TenantQuotaPolicySnapshot replacement;
-        replacement.tenant_quotas = {{"tenant-a", 1000}};
+        replacement.tenant_quotas = {{"tenant-a", {1000, 0}}};
         out << FormatTenantQuotaPolicyYaml(replacement);
     }
     ReloadTenantQuotaPolicyFromStore(service);
@@ -1396,5 +1470,160 @@ TEST_F(MasterServiceTenantQuotaTest,
     EXPECT_EQ(Snapshot(service, cold).charged_bytes, 400u)
         << "a tenant under its own watermark must not pay for a noisy one";
 }
+
+#ifdef USE_NOF
+// ---------------------------------------------------------------------------
+// NoF tier quota: charge isolation from the memory tier, admission rejection
+// with rollback, tracking-only admission, and the NoF tenant watermark pass.
+// ---------------------------------------------------------------------------
+
+TEST_F(MasterServiceTenantQuotaTest,
+       NoFQuotaChargesIndependentlyFromMemoryTier) {
+    const TenantId tenant("tenant-a");
+    MasterService service(MakeNoFQuotaConfig({{tenant, {1000, 1000}}}));
+    UUID client_id = MountNoFSegment(service, /*size=*/4096);
+    RecomputeTenantEffectiveQuotasForTest(service);
+
+    ASSERT_EQ(NoFSnapshot(service, tenant).effective_quota_bytes, 1000u);
+
+    PutNoFComplete(service, client_id, "nof-1", tenant, 200);
+
+    EXPECT_EQ(NoFSnapshot(service, tenant).charged_bytes, 200u);
+    EXPECT_FALSE(NoFSnapshot(service, tenant).over_quota);
+    // A NoF-only write must not surface in the memory tier.
+    EXPECT_EQ(Snapshot(service, tenant).charged_bytes, 0u);
+
+    // Rebuilding from metadata must reproduce the same per-tier split.
+    MasterServiceTestPeer(service).RebuildTenantQuotaUsageFromMetadata();
+    EXPECT_EQ(NoFSnapshot(service, tenant).charged_bytes, 200u);
+    EXPECT_EQ(Snapshot(service, tenant).charged_bytes, 0u);
+}
+
+TEST_F(MasterServiceTenantQuotaTest,
+       NoFQuotaRejectionRollsBackTheMemoryPrecharge) {
+    const TenantId tenant("tenant-a");
+    MasterService service(MakeNoFQuotaConfig({{tenant, {100000, 300}}}));
+    UUID client_id = MountSegment(service, /*size=*/4096);
+    MountNoFSegment(service, /*size=*/4096);
+    RecomputeTenantEffectiveQuotasForTest(service);
+
+    ASSERT_EQ(NoFSnapshot(service, tenant).effective_quota_bytes, 300u);
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.nof_replica_num = 1;
+
+    // 200 bytes x (1 memory + 1 NoF replica) -> 200 charged in each tier.
+    auto first = service.PutStart(client_id, "both-1", tenant, 200, config);
+    ASSERT_TRUE(first.has_value()) << toString(first.error());
+    ASSERT_TRUE(service.PutEnd(client_id, "both-1", tenant, ReplicaType::MEMORY)
+                    .has_value());
+    ASSERT_TRUE(
+        service.PutEnd(client_id, "both-1", tenant, ReplicaType::NOF_SSD)
+            .has_value());
+    EXPECT_EQ(Snapshot(service, tenant).charged_bytes, 200u);
+    EXPECT_EQ(NoFSnapshot(service, tenant).charged_bytes, 200u);
+
+    // 200 more would push the NoF tier to 400 > 300. The write has to be
+    // rejected before allocation, and the memory pre-charge charged ahead of
+    // the NoF pre-charge must be rolled back.
+    auto second = service.PutStart(client_id, "both-2", tenant, 200, config);
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error(), ErrorCode::TENANT_QUOTA_EXCEEDED);
+    EXPECT_EQ(Snapshot(service, tenant).charged_bytes, 200u)
+        << "the memory pre-charge from the rejected PutStart leaked";
+    EXPECT_EQ(NoFSnapshot(service, tenant).charged_bytes, 200u);
+}
+
+TEST_F(MasterServiceTenantQuotaTest,
+       NoFQuotaExpansionLeavesTheMemoryTierUntouched) {
+    const TenantId tenant("tenant-a");
+    MasterService service(MakeNoFQuotaConfig({{tenant, {1000, 1000}}}));
+    MountSegment(service, /*size=*/4096);
+    MountNoFSegment(service, /*size=*/4096);
+    RecomputeTenantEffectiveQuotasForTest(service);
+
+    ASSERT_EQ(Snapshot(service, tenant).effective_quota_bytes, 1000u);
+    ASSERT_EQ(NoFSnapshot(service, tenant).effective_quota_bytes, 1000u);
+
+    auto raised = service.UpsertTenantQuotaPolicy(tenant, 1000, 2000);
+    ASSERT_TRUE(raised.has_value()) << toString(raised.error());
+    RecomputeTenantEffectiveQuotasForTest(service);
+
+    EXPECT_EQ(Snapshot(service, tenant).effective_quota_bytes, 1000u);
+    EXPECT_EQ(NoFSnapshot(service, tenant).effective_quota_bytes, 2000u);
+}
+
+TEST_F(MasterServiceTenantQuotaTest,
+       NoFTenantWatermarkEvictsOnlyTheOverWatermarkTenant) {
+    const TenantId hot("tenant-hot");
+    const TenantId cold("tenant-cold");
+    MasterService service(
+        MakeNoFQuotaConfig({{hot, {1000, 1000}}, {cold, {1000, 1000}}},
+                           /*nof_tenant_high_watermark_ratio=*/0.9));
+    UUID client_id = MountNoFSegment(service, /*size=*/8192);
+    RecomputeTenantEffectiveQuotasForTest(service);
+
+    ASSERT_EQ(NoFSnapshot(service, hot).effective_quota_bytes, 1000u);
+    ASSERT_EQ(NoFSnapshot(service, cold).effective_quota_bytes, 1000u);
+
+    for (int i = 0; i < 4; ++i) {
+        PutNoFComplete(service, client_id, "hot-" + std::to_string(i), hot,
+                       240);
+        PutNoFComplete(service, client_id, "cold-" + std::to_string(i), cold,
+                       100);
+    }
+    ASSERT_EQ(NoFSnapshot(service, hot).charged_bytes, 960u);   // 0.96
+    ASSERT_EQ(NoFSnapshot(service, cold).charged_bytes, 400u);  // 0.40
+
+    RunNoFTenantEvictionPass(service);
+
+    EXPECT_LE(NoFSnapshot(service, hot).charged_bytes, 850u)
+        << "the NoF pass must evict a tenant above its own watermark";
+    EXPECT_EQ(NoFSnapshot(service, cold).charged_bytes, 400u)
+        << "a tenant under its NoF watermark must not pay for a noisy one";
+    // The memory tier must not have been touched by a NoF-only reclaim.
+    EXPECT_EQ(Snapshot(service, hot).charged_bytes, 0u);
+    EXPECT_EQ(Snapshot(service, cold).charged_bytes, 0u);
+}
+
+TEST_F(MasterServiceTenantQuotaTest, NoFTenantWatermarkOfZeroDisablesThePass) {
+    const TenantId tenant("tenant-a");
+    MasterService service(MakeNoFQuotaConfig(
+        {{tenant, {1000, 1000}}}, /*nof_tenant_high_watermark_ratio=*/0.0));
+    UUID client_id = MountNoFSegment(service, /*size=*/4096);
+    RecomputeTenantEffectiveQuotasForTest(service);
+
+    for (int i = 0; i < 4; ++i) {
+        PutNoFComplete(service, client_id, "key-" + std::to_string(i), tenant,
+                       240);
+    }
+    ASSERT_EQ(NoFSnapshot(service, tenant).charged_bytes, 960u);
+
+    RunNoFTenantEvictionPass(service);
+
+    EXPECT_EQ(NoFSnapshot(service, tenant).charged_bytes, 960u)
+        << "a NoF watermark of 0 must disable the NoF tenant pass";
+}
+
+TEST_F(MasterServiceTenantQuotaTest,
+       NoFTierIsTrackingOnlyUntilANoFQuotaIsConfigured) {
+    const TenantId tenant("tenant-a");
+    // nof_quota_bytes == 0: NoF writes are admitted and only accounted.
+    MasterService service(MakeNoFQuotaConfig({{tenant, {400, 0}}}));
+    UUID client_id = MountNoFSegment(service, /*size=*/4096);
+    RecomputeTenantEffectiveQuotasForTest(service);
+
+    PutNoFComplete(service, client_id, "nof-1", tenant, 300);
+    PutNoFComplete(service, client_id, "nof-2", tenant, 300);
+
+    auto snapshot = NoFSnapshot(service, tenant);
+    EXPECT_FALSE(snapshot.has_explicit_policy);
+    EXPECT_FALSE(snapshot.admission_closed);
+    EXPECT_FALSE(snapshot.over_quota)
+        << "tracking-only NoF usage is not over quota";
+    EXPECT_EQ(snapshot.charged_bytes, 600u) << "usage must still be tracked";
+}
+#endif
 
 }  // namespace mooncake::test

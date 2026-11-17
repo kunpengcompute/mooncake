@@ -187,7 +187,7 @@ struct HttpSegmentsDetailResponse {
 YLT_REFL(HttpSegmentsDetailResponse, total_segments);
 
 std::string WriteTenantQuotaPolicyForTest(
-    const std::map<std::string, uint64_t>& tenant_quotas) {
+    const std::map<std::string, TenantQuotaLimits>& tenant_quotas) {
     TenantQuotaPolicySnapshot snapshot;
     snapshot.tenant_quotas = tenant_quotas;
     auto path = std::filesystem::temp_directory_path() /
@@ -793,7 +793,8 @@ TEST_F(MasterAdminServerTest, TenantQuotaAdminLifecycleEndpoints) {
     admin.SetServiceAvailable(true);
 
     auto upsert = HttpPutJson(port, "/api/v1/tenant_quotas?tenant_id=tenant-a",
-                              "{\"requested_quota_bytes\":800}");
+                              "{\"requested_quota_bytes\":800,"
+                              "\"nof_quota_bytes\":800}");
     EXPECT_EQ(upsert.http_status, 200);
     EXPECT_NE(upsert.body.find("\"tenant_id\":\"tenant-a\""),
               std::string::npos);

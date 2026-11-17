@@ -99,8 +99,10 @@ std::optional<TenantQuotaSnapshot> TenantQuotaPolicy::GetSnapshot(
 }
 
 tl::expected<TenantQuotaSnapshot, ErrorCode> TenantQuotaPolicy::UpsertPolicy(
-    const TenantId& tenant_id, uint64_t requested_quota_bytes) {
-    return manager_.UpsertPolicy(tenant_id, requested_quota_bytes);
+    const TenantId& tenant_id, uint64_t requested_quota_bytes,
+    uint64_t nof_quota_bytes) {
+    return manager_.UpsertPolicy(tenant_id, requested_quota_bytes,
+                                 nof_quota_bytes);
 }
 
 tl::expected<std::optional<TenantQuotaSnapshot>, ErrorCode>

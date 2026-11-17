@@ -143,11 +143,16 @@ class MasterService {
     std::vector<TenantQuotaSnapshot> ListTenantQuotaSnapshots() const;
     std::optional<TenantQuotaSnapshot> GetTenantQuotaSnapshot(
         const TenantId& tenant_id) const;
+    std::vector<TenantQuotaSnapshot> ListNoFTenantQuotaSnapshots() const;
+    std::optional<TenantQuotaSnapshot> GetNoFTenantQuotaSnapshot(
+        const TenantId& tenant_id) const;
     tl::expected<TenantQuotaSnapshot, ErrorCode> UpsertTenantQuotaPolicy(
-        const TenantId& tenant_id, uint64_t requested_quota_bytes);
+        const TenantId& tenant_id, uint64_t requested_quota_bytes,
+        uint64_t nof_quota_bytes);
     tl::expected<std::optional<TenantQuotaSnapshot>, ErrorCode>
     DeleteTenantQuotaPolicy(const TenantId& tenant_id);
     uint64_t GetTenantQuotaAllocatableCapacityBytes();
+    uint64_t GetTenantNoFQuotaAllocatableCapacityBytes();
 
     WeightMetadataStore::Result<WeightRevisionLease> AcquireWeightRevisionLease(
         const AcquireWeightRevisionLeaseRequest& request);
@@ -1088,12 +1093,17 @@ class MasterService {
     };
     TenantQuotaEvictionResult EvictTenantMemoryForQuota(
         const TenantId& tenant_id, uint64_t target_bytes);
+    TenantQuotaEvictionResult EvictTenantNoFForQuota(const TenantId& tenant_id,
+                                                     uint64_t target_bytes);
 
     // Background pass: evict any tenant that is over its own watermark down to
     // (watermark - eviction_ratio) of its effective quota. Called from
     // EvictionThreadFunc, and a no-op unless multi-tenancy and
     // tenant_eviction_high_watermark_ratio are both enabled.
     void EvictTenantsOverWatermark();
+    // NoF tier twin of EvictTenantsOverWatermark. NoF replicas can only exist
+    // when USE_NOF is compiled in, so its call site is gated by USE_NOF.
+    void EvictNoFTenantsOverWatermark();
 
     std::shared_ptr<ClientLivenessRecord> FindClientRecord(
         const UUID& client_id) const;
@@ -1167,6 +1177,7 @@ class MasterService {
 
     struct TenantState {
         TenantQuotaHandle quota_account{nullptr};
+        TenantQuotaHandle nof_quota_account{nullptr};
         ObjectMap metadata;
 
         bool Empty() const { return metadata.empty(); }
@@ -1488,13 +1499,19 @@ class MasterService {
                                       const TenantId& tenant_id,
                                       QuotaEraseMode quota_mode);
     tl::expected<void, ErrorCode> SettlePrimaryWriteQuotaIfReady(
-        TenantQuotaHandle quota_account, ObjectMetadata& metadata);
+        TenantQuotaHandle quota_account, TenantQuotaHandle nof_quota_account,
+        ObjectMetadata& metadata);
     uint64_t CompletedMemoryQuotaCharge(const ObjectMetadata& metadata) const;
     uint64_t RequestedMemoryQuotaCharge(uint64_t value_length,
                                         const ReplicateConfig& config) const;
+    uint64_t CompletedNoFQuotaCharge(const ObjectMetadata& metadata) const;
+    uint64_t RequestedNoFQuotaCharge(uint64_t value_length,
+                                     const ReplicateConfig& config) const;
     TenantState& GetOrCreateTenantState(MetadataShard& shard,
                                         const TenantId& tenant_id);
     TenantQuotaHandle GetBoundTenantQuotaHandle(
+        const TenantState& tenant_state) const;
+    TenantQuotaHandle GetBoundTenantNoFQuotaHandle(
         const TenantState& tenant_state) const;
     tl::expected<void, ErrorCode> ChargeTenantQuota(TenantQuotaHandle account,
                                                     uint64_t bytes);
@@ -1625,6 +1642,7 @@ class MasterService {
                         const ResolvedSoftPinRequest& soft_pin_request,
                         std::vector<Replica>&& replicas,
                         uint64_t pending_quota_charge,
+                        uint64_t pending_nof_quota_charge,
                         std::optional<CommittedSoftPinState>
                             committed_soft_pin_state = std::nullopt)
         -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode>;
@@ -1828,6 +1846,10 @@ class MasterService {
     const double tenant_eviction_high_watermark_ratio_;  // in range [0.0, 1.0]
     const double nof_eviction_ratio_;                    // in range [0.0, 1.0]
     const double nof_eviction_high_watermark_ratio_;     // in range [0.0, 1.0]
+    // Per-tenant NoF watermark as a fraction of each tenant's OWN NoF
+    // effective quota. 0.0 disables the NoF pass. See
+    // EvictTenantsOverWatermark.
+    const double nof_tenant_eviction_high_watermark_ratio_;  // [0.0, 1.0]
 
     // Eviction thread related members
     std::thread eviction_thread_;
@@ -1943,6 +1965,11 @@ class MasterService {
         // only while the tenant exists, which it does while a key is held.
         TenantQuotaHandle QuotaAccount() const {
             return service_->GetBoundTenantQuotaHandle(*tenant_state_);
+        }
+
+        // The tenant's NoF quota account, the NoF twin of QuotaAccount().
+        TenantQuotaHandle NoFQuotaAccount() const {
+            return service_->GetBoundTenantNoFQuotaHandle(*tenant_state_);
         }
 
         // Get metadata (only call when IsPublished() is true)
@@ -2448,7 +2475,8 @@ class MasterService {
     const uint64_t quota_bytes_;
     const bool enable_multi_tenants_;
     TenantQuotaManager tenant_quota_manager_{
-        [this] { return GetTenantQuotaAllocatableCapacityBytes(); }};
+        [this] { return GetTenantQuotaAllocatableCapacityBytes(); },
+        [this] { return GetTenantNoFQuotaAllocatableCapacityBytes(); }};
 
     // HTTP metadata server pointer for cleanup on client timeout
     // nullptr means cleanup is disabled

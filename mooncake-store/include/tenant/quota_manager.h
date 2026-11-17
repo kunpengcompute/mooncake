@@ -41,7 +41,11 @@ class TenantQuotaManager {
     // The bytes every tenant's effective quota is carved from.
     using CapacityFn = std::function<uint64_t()>;
 
-    explicit TenantQuotaManager(CapacityFn allocatable_capacity);
+    // `allocatable_nof_capacity` defaults to zero, which keeps the NoF tier
+    // inert for callers that only manage the memory tier.
+    explicit TenantQuotaManager(
+        CapacityFn allocatable_capacity,
+        CapacityFn allocatable_nof_capacity = [] { return uint64_t{0}; });
 
     TenantQuotaManager(const TenantQuotaManager&) = delete;
     TenantQuotaManager& operator=(const TenantQuotaManager&) = delete;
@@ -56,6 +60,9 @@ class TenantQuotaManager {
 
     // The stable account of one tenant, created closed on first use.
     TenantQuotaAccount& AccountFor(const TenantId& tenant_id);
+    // The stable NoF-tier account of one tenant, created tracking-only on first
+    // use: NoF writes are admitted until a NoF quota is configured.
+    TenantQuotaAccount& NofAccountFor(const TenantId& tenant_id);
 
     // Whether writes to the tenant are admitted.
     bool IsTenantRegistered(const TenantId& tenant_id) const;
@@ -68,9 +75,13 @@ class TenantQuotaManager {
     std::vector<TenantQuotaSnapshot> ListSnapshots() const;
     std::optional<TenantQuotaSnapshot> GetSnapshot(
         const TenantId& tenant_id) const;
+    std::vector<TenantQuotaSnapshot> ListNoFSnapshots() const;
+    std::optional<TenantQuotaSnapshot> GetNoFSnapshot(
+        const TenantId& tenant_id) const;
 
     tl::expected<TenantQuotaSnapshot, ErrorCode> UpsertPolicy(
-        const TenantId& tenant_id, uint64_t requested_quota_bytes);
+        const TenantId& tenant_id, uint64_t requested_quota_bytes,
+        uint64_t nof_quota_bytes);
     // TENANT_NOT_EMPTY while the tenant still charges anything or, by
     // `tenant_has_objects`, still holds an object.
     tl::expected<std::optional<TenantQuotaSnapshot>, ErrorCode> DeletePolicy(
@@ -83,6 +94,8 @@ class TenantQuotaManager {
     // Overwrites every account's charged bytes with `usage`. Only while no
     // charge or release is in flight; throws when the table rejects it.
     void RebuildUsageOrThrow(const TenantQuotaUsageMap& usage);
+    // NoF-tier twin of RebuildUsageOrThrow, against the NoF accounts.
+    void RebuildNoFUsageOrThrow(const TenantQuotaUsageMap& usage);
 
    private:
     friend class test::MasterServiceTestPeer;
@@ -92,6 +105,7 @@ class TenantQuotaManager {
     void ApplyPolicies(const TenantQuotaPolicySnapshot& snapshot);
 
     const CapacityFn allocatable_capacity_;
+    const CapacityFn allocatable_nof_capacity_;
     std::unique_ptr<TenantQuotaPolicyStore> policy_store_;
     mutable std::mutex policy_mutex_;
     // Serializes a capacity snapshot with the table update derived from it.

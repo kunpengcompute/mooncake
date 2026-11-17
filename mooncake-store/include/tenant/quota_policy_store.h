@@ -8,10 +8,12 @@
 
 #include <ylt/util/tl/expected.hpp>
 
+#include "tenant/quota.h"
+
 namespace mooncake {
 
 struct TenantQuotaPolicySnapshot {
-    std::map<std::string, uint64_t> tenant_quotas;
+    std::map<std::string, TenantQuotaLimits> tenant_quotas;
 };
 
 tl::expected<uint64_t, std::string> ParseTenantQuotaBytes(

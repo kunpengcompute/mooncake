@@ -171,7 +171,7 @@ class PromotionOnHitTest : public ::testing::Test {
     static constexpr size_t kDefaultSegmentBase = 0x300000000;
 
     std::string WriteTenantQuotaPolicyFile(
-        const std::map<std::string, uint64_t>& tenant_quotas) {
+        const std::map<std::string, TenantQuotaLimits>& tenant_quotas) {
         TenantQuotaPolicySnapshot snapshot;
         snapshot.tenant_quotas = tenant_quotas;
         auto path =
@@ -1157,7 +1157,7 @@ TEST_F(PromotionOnHitTest, ReaperPopsStagedMemoryReplicaOnExpiry) {
     config.enable_multi_tenants = true;
     config.tenant_quota_connector_type = "file";
     config.tenant_quota_connector_uri =
-        WriteTenantQuotaPolicyFile({{TenantId::Default().value(), 4096}});
+        WriteTenantQuotaPolicyFile({{TenantId::Default().value(), {4096, 0}}});
     config.promotion_on_hit = true;
     config.promotion_admission_threshold = 1;
     config.default_kv_lease_ttl = 2000;
@@ -1482,7 +1482,7 @@ TEST_F(PromotionOnHitTest, TenantQuotaChargesAtAllocStartAndSettlesLifecycle) {
     config.enable_multi_tenants = true;
     config.tenant_quota_connector_type = "file";
     config.tenant_quota_connector_uri =
-        WriteTenantQuotaPolicyFile({{tenant_id.value(), 4096}});
+        WriteTenantQuotaPolicyFile({{tenant_id.value(), {4096, 0}}});
     config.promotion_on_hit = true;
     config.promotion_admission_threshold = 1;
     config.default_kv_lease_ttl = 2000;
@@ -1524,7 +1524,7 @@ TEST_F(PromotionOnHitTest, UpsertStartRejectsActivePromotionTask) {
     config.enable_multi_tenants = true;
     config.tenant_quota_connector_type = "file";
     config.tenant_quota_connector_uri =
-        WriteTenantQuotaPolicyFile({{tenant_id.value(), 4096}});
+        WriteTenantQuotaPolicyFile({{tenant_id.value(), {4096, 0}}});
     config.promotion_on_hit = true;
     config.promotion_admission_threshold = 1;
     config.default_kv_lease_ttl = 2000;
@@ -2747,8 +2747,8 @@ TEST_F(PromotionOnHitTest, AdmissionFrequencyIsTenantScoped) {
     const TenantId tenant_a("tenant_promotion_a");
     const TenantId tenant_b("tenant_promotion_b");
     config.tenant_quota_connector_uri =
-        WriteTenantQuotaPolicyFile({{tenant_a.value(), 64 * 1024 * 1024},
-                                    {tenant_b.value(), 64 * 1024 * 1024}});
+        WriteTenantQuotaPolicyFile({{tenant_a.value(), {64 * 1024 * 1024, 0}},
+                                    {tenant_b.value(), {64 * 1024 * 1024, 0}}});
     auto service = std::make_unique<MasterService>(config);
 
     constexpr size_t seg_size = 1024 * 1024 * 16;

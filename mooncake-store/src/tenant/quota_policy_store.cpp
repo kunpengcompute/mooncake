@@ -243,7 +243,7 @@ tl::expected<TenantQuotaPolicySnapshot, std::string> ParseTenantQuotaPolicyYaml(
     } catch (const YAML::Exception& e) {
         return tl::make_unexpected(std::string("invalid version: ") + e.what());
     }
-    if (version != 1) {
+    if (version != 1 && version != 2) {
         return tl::make_unexpected("unsupported tenant quota policy version: " +
                                    std::to_string(version));
     }
@@ -289,12 +289,36 @@ tl::expected<TenantQuotaPolicySnapshot, std::string> ParseTenantQuotaPolicyYaml(
             return tl::make_unexpected("duplicate tenant name '" + name + "'");
         }
 
+        TenantQuotaLimits policy;
         auto quota_bytes = ParseTenantQuotaBytes(quota);
         if (!quota_bytes) {
             return tl::make_unexpected("invalid quota for tenant '" + name +
                                        "': " + quota_bytes.error());
         }
-        snapshot.tenant_quotas.emplace(std::move(name), quota_bytes.value());
+        policy.memory_quota_bytes = quota_bytes.value();
+
+        const auto nof_quota_node = entry["nof_quota"];
+        if (nof_quota_node) {
+            if (!nof_quota_node.IsScalar()) {
+                return tl::make_unexpected("tenant nof_quota must be a scalar");
+            }
+            std::string nof_quota;
+            try {
+                nof_quota = nof_quota_node.as<std::string>();
+            } catch (const YAML::Exception& e) {
+                return tl::make_unexpected(
+                    std::string("invalid tenant entry: ") + e.what());
+            }
+            auto nof_quota_bytes = ParseTenantQuotaBytes(nof_quota);
+            if (!nof_quota_bytes) {
+                return tl::make_unexpected("invalid nof_quota for tenant '" +
+                                           name +
+                                           "': " + nof_quota_bytes.error());
+            }
+            policy.nof_quota_bytes = nof_quota_bytes.value();
+        }
+
+        snapshot.tenant_quotas.emplace(std::move(name), policy);
     }
 
     return snapshot;
@@ -303,15 +327,18 @@ tl::expected<TenantQuotaPolicySnapshot, std::string> ParseTenantQuotaPolicyYaml(
 std::string FormatTenantQuotaPolicyYaml(
     const TenantQuotaPolicySnapshot& snapshot) {
     std::ostringstream out;
-    out << "version: 1\n\n";
+    out << "version: 2\n\n";
     if (snapshot.tenant_quotas.empty()) {
         out << "tenants: []\n";
         return out.str();
     }
     out << "tenants:\n";
-    for (const auto& [tenant_id, quota] : snapshot.tenant_quotas) {
+    for (const auto& [tenant_id, policy] : snapshot.tenant_quotas) {
         out << "  - name: " << QuoteYamlDoubleQuotedScalar(tenant_id) << "\n";
-        out << "    quota: " << quota << "\n";
+        out << "    quota: " << policy.memory_quota_bytes << "\n";
+        if (policy.nof_quota_bytes > 0) {
+            out << "    nof_quota: " << policy.nof_quota_bytes << "\n";
+        }
     }
     return out.str();
 }

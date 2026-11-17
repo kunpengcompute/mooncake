@@ -397,7 +397,7 @@ class MasterServiceHATest : public ::testing::Test {
     }
 
     std::string WriteTenantPolicyFile(
-        const std::map<std::string, uint64_t>& tenant_quotas) {
+        const std::map<std::string, TenantQuotaLimits>& tenant_quotas) {
         TenantQuotaPolicySnapshot snapshot;
         snapshot.tenant_quotas = tenant_quotas;
         auto path =
@@ -414,9 +414,10 @@ class MasterServiceHATest : public ::testing::Test {
     MasterServiceConfig MakeStrictHAConfig(
         const std::vector<std::string>& tenants = {
             std::string(kDefaultTenant.value()), "tenant_a"}) {
-        std::map<std::string, uint64_t> tenant_quotas;
+        std::map<std::string, TenantQuotaLimits> tenant_quotas;
         for (const auto& tenant : tenants) {
-            tenant_quotas.emplace(tenant, kStrictTenantQuotaBytes);
+            tenant_quotas.emplace(
+                tenant, TenantQuotaLimits{kStrictTenantQuotaBytes, 0});
         }
         return MasterServiceConfig::builder()
             .set_default_kv_lease_ttl(50)
@@ -2116,7 +2117,7 @@ TEST_F(MasterServiceHATest, RestoreFromStandbyRebuildsTenantQuotaAccounting) {
                       .set_enable_multi_tenants(true)
                       .set_tenant_quota_connector_type("file")
                       .set_tenant_quota_connector_uri(WriteTenantPolicyFile(
-                          {{tenant_id.value(), object_size}}))
+                          {{tenant_id.value(), {object_size, 0}}}))
                       .build();
     MasterService service(config);
 
@@ -2144,7 +2145,7 @@ TEST_F(MasterServiceHATest, UnreadableRestoredMemoryReplicaIsNotEvictable) {
                       .set_enable_multi_tenants(true)
                       .set_tenant_quota_connector_type("file")
                       .set_tenant_quota_connector_uri(WriteTenantPolicyFile(
-                          {{kDefaultTenant.value(), object_size}}))
+                          {{kDefaultTenant.value(), {object_size, 0}}}))
                       .build();
     MasterService service(config);
     const std::string key = "unreadable_restored_evict_key";
@@ -5171,7 +5172,7 @@ TEST_F(MasterServiceBatchRecordE2ETest,
             .set_enable_multi_tenants(true)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {1024, 0}}}))
             .build();
     MasterService service(service_config);
     auto* writer = InstallGatedWriter(service, backend);
@@ -5229,7 +5230,7 @@ TEST_F(MasterServiceBatchRecordE2ETest,
             .set_enable_multi_tenants(true)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {1024, 0}}}))
             .build();
     MasterService service(service_config);
     ASSERT_EQ(
@@ -5298,7 +5299,7 @@ TEST_F(MasterServiceBatchRecordE2ETest,
             .set_tenant_eviction_high_watermark_ratio(0.0)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {1024, 0}}}))
             .build();
     MasterService service(service_config);
     ASSERT_EQ(
@@ -5366,7 +5367,7 @@ TEST_F(MasterServiceBatchRecordE2ETest,
             .set_enable_multi_tenants(true)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {1024, 0}}}))
             .build();
     MasterService service(service_config);
     ASSERT_EQ(
@@ -5960,7 +5961,7 @@ TEST_F(MasterServiceHATest,
             .set_enable_multi_tenants(true)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(WriteTenantPolicyFile(
-                {{kDefaultTenant.value(), 2 * object_size}}))
+                {{kDefaultTenant.value(), {2 * object_size, 0}}}))
             .build();
     MasterService service(service_config);
     ASSERT_EQ(
@@ -6374,7 +6375,7 @@ TEST_F(MasterServiceHATest, RemoveHidesBeforeDurableAndReleasesAfterFinalize) {
             .set_enable_multi_tenants(true)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {1024, 0}}}))
             .build();
     MasterService service(service_config);
     auto* writer = InstallGatedWriter(service, backend);
@@ -6464,7 +6465,7 @@ TEST_F(MasterServiceHATest, BatchRemoveFinalizesEachObjectAfterDurable) {
             .set_enable_multi_tenants(true)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {1024, 0}}}))
             .build();
     MasterService service(service_config);
     auto* writer = InstallGatedWriter(service, backend);
@@ -6556,7 +6557,7 @@ TEST_F(MasterServiceHATest, RemoveAllFinalizesAfterDurable) {
             .set_tenant_eviction_high_watermark_ratio(0.0)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {1024, 0}}}))
             .build();
     MasterService service(service_config);
     auto* writer = InstallGatedWriter(service, backend);
@@ -6698,7 +6699,7 @@ TEST_F(MasterServiceHATest, BatchReplicaClearAllReleasesAfterDurable) {
             .set_enable_multi_tenants(true)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 1024}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {1024, 0}}}))
             .build();
     MasterService service(service_config);
     auto* writer = InstallGatedWriter(service, backend);
@@ -6754,7 +6755,7 @@ TEST_F(MasterServiceHATest, BatchReplicaClearSegmentReleasesAfterDurable) {
             .set_enable_multi_tenants(true)
             .set_tenant_quota_connector_type("file")
             .set_tenant_quota_connector_uri(
-                WriteTenantPolicyFile({{kDefaultTenant.value(), 2048}}))
+                WriteTenantPolicyFile({{kDefaultTenant.value(), {2048, 0}}}))
             .build();
     MasterService service(service_config);
     auto* writer = InstallGatedWriter(service, backend);

@@ -71,7 +71,8 @@ class TenantQuotaPolicy final : public NamespacePolicy {
     std::optional<TenantQuotaSnapshot> GetSnapshot(
         const TenantId& tenant_id) const;
     tl::expected<TenantQuotaSnapshot, ErrorCode> UpsertPolicy(
-        const TenantId& tenant_id, uint64_t requested_quota_bytes);
+        const TenantId& tenant_id, uint64_t requested_quota_bytes,
+        uint64_t nof_quota_bytes);
     // TENANT_NOT_EMPTY while the tenant still charges anything or holds an
     // object.
     tl::expected<std::optional<TenantQuotaSnapshot>, ErrorCode> DeletePolicy(

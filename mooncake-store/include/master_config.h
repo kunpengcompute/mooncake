@@ -113,6 +113,7 @@ struct MasterConfig {
     double tenant_eviction_high_watermark_ratio;
     double nof_eviction_ratio;
     double nof_eviction_high_watermark_ratio;
+    double nof_tenant_eviction_high_watermark_ratio;
     int64_t client_active_ttl_sec;
     int64_t client_suspicion_ttl_sec;
     int64_t nof_heartbeat_interval_sec;
@@ -259,6 +260,8 @@ class MasterServiceSupervisorConfig {
     // Parameters with default values (optional parameters)
     double tenant_eviction_high_watermark_ratio =
         DEFAULT_TENANT_EVICTION_HIGH_WATERMARK_RATIO;
+    double nof_tenant_eviction_high_watermark_ratio =
+        DEFAULT_NOF_TENANT_EVICTION_HIGH_WATERMARK_RATIO;
     uint64_t max_kv_soft_pin_ttl = DEFAULT_MAX_KV_SOFT_PIN_TTL_MS;
     bool enable_soft_pin_ttl_reclaim = false;
     bool enable_nof_soft_pin_access_renewal = false;
@@ -374,6 +377,8 @@ class MasterServiceSupervisorConfig {
         nof_eviction_ratio = config.nof_eviction_ratio;
         nof_eviction_high_watermark_ratio =
             config.nof_eviction_high_watermark_ratio;
+        nof_tenant_eviction_high_watermark_ratio =
+            config.nof_tenant_eviction_high_watermark_ratio;
         client_active_ttl_sec = config.client_active_ttl_sec;
         client_suspicion_ttl_sec = config.client_suspicion_ttl_sec;
         nof_heartbeat_interval_sec = config.nof_heartbeat_interval_sec;
@@ -575,6 +580,8 @@ class WrappedMasterServiceConfig {
         DEFAULT_EVICTION_HIGH_WATERMARK_RATIO;
     double tenant_eviction_high_watermark_ratio =
         DEFAULT_TENANT_EVICTION_HIGH_WATERMARK_RATIO;
+    double nof_tenant_eviction_high_watermark_ratio =
+        DEFAULT_NOF_TENANT_EVICTION_HIGH_WATERMARK_RATIO;
     double nof_eviction_ratio = DEFAULT_NOF_EVICTION_RATIO;
     double nof_eviction_high_watermark_ratio =
         DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO;
@@ -682,6 +689,8 @@ class WrappedMasterServiceConfig {
         nof_eviction_ratio = config.nof_eviction_ratio;
         nof_eviction_high_watermark_ratio =
             config.nof_eviction_high_watermark_ratio;
+        nof_tenant_eviction_high_watermark_ratio =
+            config.nof_tenant_eviction_high_watermark_ratio;
         view_version = view_version_param;
         client_active_ttl_sec = config.client_active_ttl_sec;
         client_suspicion_ttl_sec = config.client_suspicion_ttl_sec;
@@ -817,6 +826,8 @@ class WrappedMasterServiceConfig {
         nof_eviction_ratio = config.nof_eviction_ratio;
         nof_eviction_high_watermark_ratio =
             config.nof_eviction_high_watermark_ratio;
+        nof_tenant_eviction_high_watermark_ratio =
+            config.nof_tenant_eviction_high_watermark_ratio;
         view_version = view_version_param;
         client_active_ttl_sec = config.client_active_ttl_sec;
         client_suspicion_ttl_sec = config.client_suspicion_ttl_sec;
@@ -922,6 +933,8 @@ class MasterServiceConfigBuilder {
     double nof_eviction_ratio_ = DEFAULT_NOF_EVICTION_RATIO;
     double nof_eviction_high_watermark_ratio_ =
         DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO;
+    double nof_tenant_eviction_high_watermark_ratio_ =
+        DEFAULT_NOF_TENANT_EVICTION_HIGH_WATERMARK_RATIO;
     ViewVersionId view_version_ = 0;
     int64_t client_active_ttl_sec_ = DEFAULT_CLIENT_LIVE_TTL_SEC;
     bool client_active_ttl_explicitly_set_ = false;
@@ -1030,6 +1043,12 @@ class MasterServiceConfigBuilder {
     MasterServiceConfigBuilder& set_nof_eviction_high_watermark_ratio(
         double ratio) {
         nof_eviction_high_watermark_ratio_ = ratio;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_nof_tenant_eviction_high_watermark_ratio(
+        double ratio) {
+        nof_tenant_eviction_high_watermark_ratio_ = ratio;
         return *this;
     }
 
@@ -1280,6 +1299,8 @@ class MasterServiceConfig {
     double nof_eviction_ratio = DEFAULT_NOF_EVICTION_RATIO;
     double nof_eviction_high_watermark_ratio =
         DEFAULT_NOF_EVICTION_HIGH_WATERMARK_RATIO;
+    double nof_tenant_eviction_high_watermark_ratio =
+        DEFAULT_NOF_TENANT_EVICTION_HIGH_WATERMARK_RATIO;
     // Zero denotes a directly constructed, supervisor-unmanaged service;
     // HA supervisor serving paths always inject the acquired non-zero view.
     ViewVersionId view_version = 0;
@@ -1384,6 +1405,8 @@ class MasterServiceConfig {
         nof_eviction_ratio = config.nof_eviction_ratio;
         nof_eviction_high_watermark_ratio =
             config.nof_eviction_high_watermark_ratio;
+        nof_tenant_eviction_high_watermark_ratio =
+            config.nof_tenant_eviction_high_watermark_ratio;
         view_version = config.view_version;
         client_active_ttl_sec = config.client_active_ttl_sec;
         client_suspicion_ttl_sec = config.client_suspicion_ttl_sec;
@@ -1498,6 +1521,8 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.nof_eviction_ratio = nof_eviction_ratio_;
     config.nof_eviction_high_watermark_ratio =
         nof_eviction_high_watermark_ratio_;
+    config.nof_tenant_eviction_high_watermark_ratio =
+        nof_tenant_eviction_high_watermark_ratio_;
     config.view_version = view_version_;
     config.client_active_ttl_sec = client_active_ttl_sec_;
     config.client_suspicion_ttl_sec = suspicion_ttl;

@@ -416,6 +416,10 @@ extra_config:
   LMCache Mooncake connector does not currently parse or forward such a
   setting, so enabling the NoF pool for LMCache writes needs a connector
   change or a direct store client.
+- Per-tenant NoF quotas and background per-tenant NoF reclaim are configured on
+  the master, not the client: run it with `--enable_multi_tenants=true` plus a
+  tenant quota connector, and give each tenant a `nof_quota`. See
+  [Multi-Tenant Deployment](../multi-tenancy.md).
 - `global_segment_size: 0` means the inference process does not contribute a
   memory segment to the Mooncake cluster.
 - Keep `local_buffer_size` non-zero because the client still needs local

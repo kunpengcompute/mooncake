@@ -183,7 +183,8 @@ struct ObjectMetadata {
     const bool hard_pinned{false};  // immutable, set at creation
     bool memory_cache_total_accounted{false};
     bool disk_cache_total_accounted{false};
-    TenantQuotaLedger quota_ledger;
+    TenantQuotaLedger memory_ledger;
+    TenantQuotaLedger nof_ledger;
 
     struct DynamicReplicaRecord {
         std::chrono::system_clock::time_point created_at;

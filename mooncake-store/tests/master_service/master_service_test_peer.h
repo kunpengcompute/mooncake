@@ -61,6 +61,9 @@ class MasterServiceTestPeer {
     // Drive one tenant watermark eviction pass without the periodic worker.
     void RunTenantEvictForTesting();
 
+    // Drive one NoF tenant watermark eviction pass without the periodic worker.
+    void RunNoFTenantEvictForTesting();
+
     // Drive one soft-pin TTL reclaim round synchronously (drains the queue
     // populated by CleanupExpiredSoftPins), without the periodic eviction
     // worker.

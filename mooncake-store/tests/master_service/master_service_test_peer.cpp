@@ -45,6 +45,10 @@ void MasterServiceTestPeer::RunTenantEvictForTesting() {
     service_.EvictTenantsOverWatermark();
 }
 
+void MasterServiceTestPeer::RunNoFTenantEvictForTesting() {
+    service_.EvictNoFTenantsOverWatermark();
+}
+
 void MasterServiceTestPeer::RunSoftPinTtlEvictionForTesting(
     const std::chrono::system_clock::time_point& now) {
     service_.EvictSoftPinExpired(now);

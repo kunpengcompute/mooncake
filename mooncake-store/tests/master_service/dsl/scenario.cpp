@@ -2149,7 +2149,8 @@ bool MasterScenario::EnsureService() {
     if (!tenants_.empty()) {
         TenantQuotaPolicySnapshot snapshot;
         for (const auto& tenant : tenants_) {
-            snapshot.tenant_quotas.emplace(tenant.name, tenant.quota_bytes);
+            snapshot.tenant_quotas.emplace(
+                tenant.name, TenantQuotaLimits{tenant.quota_bytes, 0});
         }
         tenant_policy_path_ =
             (std::filesystem::temp_directory_path() /

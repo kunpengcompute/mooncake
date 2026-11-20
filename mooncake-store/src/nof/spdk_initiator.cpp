@@ -418,6 +418,7 @@ class NofSegmentHandle {
     uint32_t block_size{0};
     uint64_t capacity{0};
     int64_t last_poll_error{0};
+    bool is_rdma{false};
     spdk_memory_domain* rdma_domain{nullptr};
 #ifdef USE_SPDK_NPU_UB
     std::shared_ptr<ibv_pd> pd_lease;
@@ -678,6 +679,7 @@ class SpdkInitiator::Impl {
             new_seg->ns = ns;
             new_seg->block_size = block_size;
             new_seg->capacity = capacity;
+            new_seg->is_rdma = tr.trid.trtype == SPDK_NVME_TRANSPORT_RDMA;
 #if defined(USE_ASCEND_NDR) || defined(USE_ASCEND_STAGING)
             auto& route = AscendStorageConfig::GetInstance();
             if (route.HasRoute()) {
@@ -768,6 +770,22 @@ class SpdkInitiator::Impl {
                 << ", buffer=" << buffer << ", ssd_offset=" << byte_offset
                 << ", bytes=" << byte_length;
         }
+        // SPDK's contiguous RDMA command carries one rkey. When a host
+        // payload spans registration pages, submit an SGL so each page can
+        // use its own rkey without splitting the NVMe block range.
+        const size_t page_remaining = NofBytesToRegistrationPageEnd(buffer);
+        if (handle->is_rdma && byte_length > page_remaining) {
+            if (NoFDebugConfig::IsEnabledAtFirstUse()) {
+                LOG_FIRST_N(INFO, 1)
+                    << "NoF host RDMA request spans registration pages: qpair="
+                    << handle->qpair.load() << ", buffer=" << buffer
+                    << ", bytes=" << byte_length
+                    << ", first_segment_bytes=" << page_remaining;
+            }
+            return SubmitIOV(handle,
+                             {{buffer, static_cast<size_t>(byte_length)}},
+                             byte_offset, byte_length, op, adaptor, 0);
+        }
         const int rc =
             op == NofIOOp::kRead
                 ? spdk_nvme_ns_cmd_read(handle->ns, handle->qpair, buffer, lba,
@@ -796,6 +814,7 @@ class SpdkInitiator::Impl {
             return -EINVAL;
         const uint64_t lba = byte_offset / block_size;
         const auto blocks = static_cast<uint32_t>(byte_length / block_size);
+        adaptor->split_at_registration_page = handle->is_rdma;
         if (op == NofIOOp::kRead) {
             return spdk_nvme_ns_cmd_readv(handle->ns, handle->qpair, lba,
                                           blocks, SglCompleteTrampoline,
@@ -1044,7 +1063,7 @@ class SpdkInitiator::Impl {
         // A non-aligned ptr is floored to its 2MB page, which assumes the
         // whole containing page is mapped and hugepage-backed — warn loudly
         // rather than fail silently later inside SPDK.
-        if (reinterpret_cast<uintptr_t>(ptr) & ((2ULL << 20) - 1)) {
+        if (reinterpret_cast<uintptr_t>(ptr) % kNofRegistrationPageSize != 0) {
             LOG(WARNING) << "RegisterMemory: ptr " << ptr
                          << " is not 2MB-aligned; registering the whole "
                             "containing 2MB pages, which must be mapped "
@@ -1131,6 +1150,7 @@ class SpdkInitiator::Impl {
         io->buffers = buffers;
         io->start = buffer_offset;
         io->length = byte_length;
+        io->split_at_registration_page = handle->is_rdma && host;
         io->adaptor = *adaptor;
         io->opts.size = sizeof(io->opts);
 #ifdef USE_SPDK_NPU_UB

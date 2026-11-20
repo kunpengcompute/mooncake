@@ -9,7 +9,7 @@
 namespace mooncake {
 
 namespace {
-constexpr uintptr_t kPageMask = (2ULL << 20) - 1;
+constexpr uintptr_t kPageMask = kNofRegistrationPageSize - 1;
 uintptr_t AlignUpToPage(uintptr_t v) { return (v + kPageMask) & ~kPageMask; }
 }  // namespace
 

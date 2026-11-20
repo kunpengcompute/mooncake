@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 
+#include "nof/io_buffer.h"
 #include "types.h"  // ErrorCode
 
 namespace mooncake {
@@ -59,7 +60,7 @@ class NofPageRegistry {
     ErrorCode UnregisterAll(uint64_t owner);
 
    private:
-    static constexpr uintptr_t kPageSize = 2ULL << 20;  // 2MB hugepage
+    static constexpr uintptr_t kPageSize = kNofRegistrationPageSize;
 
     struct PageReg {
         uint32_t count = 0;

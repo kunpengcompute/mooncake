@@ -309,6 +309,43 @@ TEST(NofSglCursorTest, ResetAndBoundedRangeCrossBufferBoundary) {
     EXPECT_EQ(length, 6u);
 }
 
+TEST(NofSglCursorTest, HostRdmaEntriesStayInsideRegistrationPages) {
+    constexpr size_t kIoBytes = 128 * 1024;
+    constexpr size_t kPageTail = 32 * 1024;
+    constexpr uint32_t kResumeOffset = 4096;
+    std::vector<uint8_t> backing(kNofRegistrationPageSize + kIoBytes);
+    void* boundary = backing.data() + kPageTail;
+    size_t available = backing.size() - kPageTail;
+    ASSERT_NE(std::align(kNofRegistrationPageSize, kIoBytes - kPageTail,
+                         boundary, available),
+              nullptr);
+    auto* start = static_cast<uint8_t*>(boundary) - kPageTail;
+
+    NofSglCursor cursor;
+    cursor.buffers = {{start, kIoBytes}};
+    cursor.length = kIoBytes;
+    cursor.split_at_registration_page = true;
+    cursor.Reset(0);
+
+    void* address = nullptr;
+    uint32_t length = 0;
+    ASSERT_EQ(cursor.Next(&address, &length), 0);
+    EXPECT_EQ(address, start);
+    EXPECT_EQ(length, kPageTail);
+    ASSERT_EQ(cursor.Next(&address, &length), 0);
+    EXPECT_EQ(address, boundary);
+    EXPECT_EQ(length, kIoBytes - kPageTail);
+    EXPECT_EQ(cursor.Next(&address, &length), -EINVAL);
+
+    cursor.Reset(kResumeOffset);
+    ASSERT_EQ(cursor.Next(&address, &length), 0);
+    EXPECT_EQ(address, start + kResumeOffset);
+    EXPECT_EQ(length, kPageTail - kResumeOffset);
+    ASSERT_EQ(cursor.Next(&address, &length), 0);
+    EXPECT_EQ(address, boundary);
+    EXPECT_EQ(length, kIoBytes - kPageTail);
+}
+
 TEST(NofWorkerPoolTest, SubmitAndComplete) {
     auto mock = std::make_shared<MockInitiator>();
     NofWorkerPool pool(mock, 0);

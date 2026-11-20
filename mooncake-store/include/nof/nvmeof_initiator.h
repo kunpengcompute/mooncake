@@ -55,6 +55,7 @@ struct NofIOAdaptor {
 struct NofSglIOAdaptor : NofIOAdaptor {
     void (*reset)(void* ctx, uint32_t offset);
     int (*next)(void* ctx, void** address, uint32_t* length);
+    bool split_at_registration_page{false};
 };
 
 struct NofCapabilities {
@@ -219,7 +220,6 @@ class NVMeoFInitiator {
 // implementation (reported via the RegisterMemory return code — see its
 // three-outcome contract for the cleanup/NOF_REGISTRATION_STUCK semantics).
 inline bool NofRangeIsRegistrable(const void* ptr, size_t size) {
-    constexpr uintptr_t kNofRegistrationPageSize = 2ULL << 20;  // 2MB
     // spdk_mem_register() also rejects addresses outside the 256TB window it
     // can represent (MASK_256TB) before marking anything (memory.c:339-348).
     constexpr uintptr_t kNofAddressMask = (1ULL << 48) - 1;  // MASK_256TB

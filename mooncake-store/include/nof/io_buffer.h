@@ -6,6 +6,15 @@
 #include <vector>
 
 namespace mooncake {
+
+// External host buffers are registered with SPDK one page at a time.
+inline constexpr uintptr_t kNofRegistrationPageSize = 2ULL << 20;
+
+inline size_t NofBytesToRegistrationPageEnd(const void *address) {
+    return kNofRegistrationPageSize -
+           reinterpret_cast<uintptr_t>(address) % kNofRegistrationPageSize;
+}
+
 struct NofBuffer {
     void *data;
     size_t size;
@@ -15,6 +24,7 @@ struct NofBuffer {
 struct NofSglCursor {
     std::vector<NofBuffer> buffers;
     size_t start{0}, offset{0}, length{0}, position{0};
+    bool split_at_registration_page{false};
     void Reset(uint32_t value) {
         offset = start + value;
         position = value;
@@ -30,6 +40,9 @@ struct NofSglCursor {
             size_t take = std::min({v.size - skip, length - position,
                                     static_cast<size_t>(UINT32_MAX)});
             *address = static_cast<char *>(v.data) + skip;
+            if (split_at_registration_page) {
+                take = std::min(take, NofBytesToRegistrationPageEnd(*address));
+            }
             *size = static_cast<uint32_t>(take);
             offset += take;
             position += take;

@@ -122,7 +122,6 @@ set(MOONCAKE_STORE_CLIENT_SOURCES
     nvme_kv/key_conflict_policy.cpp
     nvme_kv/object_layout.cpp
     transfer_task.cpp
-    config/nof_debug_config.cpp
     config/fileread_worker_pool_config.cpp
     config/nof_worker_pool_config.cpp
     posix_file.cpp
@@ -348,12 +347,13 @@ if(STORE_USE_K8S_LEASE)
 endif()
 
 # NoF support code that is SPDK-free (page-registration bookkeeping,
-# probe-context pooling, and controller env parsing). Built in every
+# probe-context pooling, and NoF env parsing). Built in every
 # configuration so unit tests can exercise it without SPDK; both mooncake_store
 # and mooncake_nof_spdk link it (the latter cannot link mooncake_store — that
 # would be a cycle).
 add_library(
   mooncake_nof_core STATIC nof/page_registry.cpp nof/probe_context_pool.cpp
+                           config/nof_debug_config.cpp
                            config/spdk_controller_config.cpp)
 target_include_directories(mooncake_nof_core
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../include)

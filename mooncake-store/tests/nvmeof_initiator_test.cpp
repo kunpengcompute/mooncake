@@ -80,7 +80,7 @@ class MockInitiator : public NVMeoFInitiator {
             adaptor->cb(adaptor->ctx, c);
             ++n;
         }
-        return n;
+        return poll_error_ == 0 ? n : poll_error_;
     }
 
     bool AbortSegment(NofSegmentHandle*) override {
@@ -108,6 +108,7 @@ class MockInitiator : public NVMeoFInitiator {
     std::atomic<int> aborts_{0};
     bool fail_io_ = false;
     bool probe_ok_ = true;
+    int poll_error_ = 0;
     std::deque<NofIOAdaptor*> pending_;
     std::map<std::string, NofSegmentHandle*> handles_;
     std::array<uint64_t, 16> sentinels_{};
@@ -333,6 +334,29 @@ TEST(NofWorkerPoolTest, FailurePropagatesErrorDetail) {
     pool.submitTask(std::move(task));
     state->wait_for_completion();
     EXPECT_TRUE(state->is_completed());
+    EXPECT_EQ(state->get_result(), ErrorCode::TRANSFER_FAIL);
+    EXPECT_EQ(state->error_detail(), "mock_io_error");
+}
+
+TEST(NofWorkerPoolTest, DisconnectCompletesPartiallySubmittedWriteOnce) {
+    auto mock = std::make_shared<MockInitiator>();
+    mock->fail_io_ = true;
+    mock->poll_error_ = -ENXIO;
+    const NofQos qos(mock->block_size_);
+    // The first poll aborts every submitted sub-I/O while the last block is
+    // still waiting in the QoS queue.
+    const size_t size =
+        (static_cast<size_t>(qos.inflight_blocks_limit) + 1) * qos.block_size;
+    std::vector<uint8_t> buffer(size);
+    auto* seg = mock->OpenSegment("disconnected-write");
+    auto state = std::make_shared<NofOperationState>();
+    {
+        NofWorkerPool pool(mock, 0);
+        pool.submitTask(NofTask(seg, buffer.data(), 0, buffer.size(),
+                                NofIOOp::kWrite, state));
+        state->wait_for_completion();
+    }
+    // Joining the worker also exercises removal from the QoS queue.
     EXPECT_EQ(state->get_result(), ErrorCode::TRANSFER_FAIL);
     EXPECT_EQ(state->error_detail(), "mock_io_error");
 }

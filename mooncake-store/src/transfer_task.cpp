@@ -135,16 +135,17 @@ static int CountNofQueuedTasks(const mooncake::NofTask* head) {
 }
 
 static inline void NofTaskCompletion(mooncake::NofTask* task) {
-    if (task->remaining_bytes == 0 && task->outstanding_sub_io == 0) {
-        task->padding_owner.reset();
-        task->state->set_completed(task->failed
-                                       ? mooncake::ErrorCode::TRANSFER_FAIL
-                                       : mooncake::ErrorCode::OK,
-                                   std::move(task->error_detail));
-        if (!task->on_chain) {
-            delete task;
-        }
+    // An error callback can zero remaining_bytes while the task is still in
+    // the QoS queue. Let the worker unlink it before publishing completion.
+    if (task->on_chain || task->remaining_bytes != 0 ||
+        task->outstanding_sub_io != 0) {
+        return;
     }
+    task->padding_owner.reset();
+    task->state->set_completed(task->failed ? mooncake::ErrorCode::TRANSFER_FAIL
+                                            : mooncake::ErrorCode::OK,
+                               std::move(task->error_detail));
+    delete task;
 }
 
 static void nvmf_reset_sgl(void* ctx, uint32_t offset) {

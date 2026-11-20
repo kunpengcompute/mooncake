@@ -35,6 +35,7 @@
 #endif
 #include <spdk/nvme.h>
 
+#include "config/nof_debug_config.h"
 #include "config/spdk_controller_config.h"
 #include "environ.h"
 #include "nof/page_registry.h"
@@ -416,6 +417,7 @@ class NofSegmentHandle {
     uint32_t nsid{0};
     uint32_t block_size{0};
     uint64_t capacity{0};
+    int64_t last_poll_error{0};
     spdk_memory_domain* rdma_domain{nullptr};
 #ifdef USE_SPDK_NPU_UB
     std::shared_ptr<ibv_pd> pd_lease;
@@ -713,9 +715,15 @@ class SpdkInitiator::Impl {
                     return nullptr;
                 }
             }
- #endif
+#endif
             seg_handle = new_seg.get();
             ns_seg[tr.ns] = std::move(new_seg);
+            if (NoFDebugConfig::IsEnabledAtFirstUse()) {
+                LOG(INFO) << "NoF I/O qpair opened: qpair=" << qpair
+                          << ", ctrlr_key=" << tr.ctrlr_key
+                          << ", nsid=" << tr.ns
+                          << ", src_addr=" << info->src_addr;
+            }
         }
         return seg_handle;
     }
@@ -753,17 +761,26 @@ class SpdkInitiator::Impl {
         const uint64_t lba = byte_offset / block_size;
         const uint32_t lba_count =
             static_cast<uint32_t>(byte_length / block_size);
-        if (op == NofIOOp::kRead) {
-            return spdk_nvme_ns_cmd_read(handle->ns, handle->qpair, buffer, lba,
+        if (op != NofIOOp::kRead && op != NofIOOp::kWrite) return -EINVAL;
+        if (op == NofIOOp::kWrite && NoFDebugConfig::IsEnabledAtFirstUse()) {
+            LOG_FIRST_N(INFO, 1)
+                << "NoF first host write: qpair=" << handle->qpair.load()
+                << ", buffer=" << buffer << ", ssd_offset=" << byte_offset
+                << ", bytes=" << byte_length;
+        }
+        const int rc =
+            op == NofIOOp::kRead
+                ? spdk_nvme_ns_cmd_read(handle->ns, handle->qpair, buffer, lba,
+                                        lba_count, IOCompleteTrampoline,
+                                        adaptor, 0)
+                : spdk_nvme_ns_cmd_write(handle->ns, handle->qpair, buffer, lba,
                                          lba_count, IOCompleteTrampoline,
                                          adaptor, 0);
+        if (rc != 0) {
+            LogSubmitError(handle, op, "host", buffer, byte_offset,
+                           byte_length, rc);
         }
-        if (op == NofIOOp::kWrite) {
-            return spdk_nvme_ns_cmd_write(handle->ns, handle->qpair, buffer,
-                                          lba, lba_count, IOCompleteTrampoline,
-                                          adaptor, 0);
-        }
-        return -EINVAL;
+        return rc;
     }
 
     int SubmitIOV(NofSegmentHandle* handle, uint64_t byte_offset,
@@ -806,6 +823,14 @@ class SpdkInitiator::Impl {
         // explicit interface contract).
         const int64_t rc =
             spdk_nvme_qpair_process_completions(handle->qpair, max_completions);
+        if (rc < 0 && rc != handle->last_poll_error) {
+            LOG(ERROR) << "NoF SPDK qpair poll failed: qpair="
+                       << handle->qpair.load()
+                       << ", rc=" << rc << ", failure_reason="
+                       << spdk_nvme_qpair_get_failure_reason(handle->qpair)
+                       << ", tracked_vector_ios=" << handle->vector_ios.size();
+        }
+        handle->last_poll_error = rc < 0 ? rc : 0;
         // Even synchronous -EFAULT completions are delivered only after the
         // worker has accounted for the successfully submitted I/O.
         DrainVectorCompletions(handle);
@@ -1026,8 +1051,18 @@ class SpdkInitiator::Impl {
                             "and hugepage-backed";
         }
         // Registrations are charged per initiator instance via owner_token_.
-        return GetNofRegistryBundle().registry.Register(owner_token_, ptr,
-                                                        size);
+        const auto rc =
+            GetNofRegistryBundle().registry.Register(owner_token_, ptr, size);
+        if (rc != ErrorCode::OK) {
+            LOG(ERROR)
+                << "NoF SPDK host registration failed: buffer=" << ptr
+                << ", bytes=" << size << ", result=" << toString(rc);
+        } else if (NoFDebugConfig::IsEnabledAtFirstUse()) {
+            LOG(INFO)
+                << "NoF SPDK host registration succeeded: buffer=" << ptr
+                << ", bytes=" << size;
+        }
+        return rc;
 #else
         LOG(WARNING) << "SPDK build lacks spdk_mem_register; NoF over RDMA "
                         "will fail for unregistered user buffers (#3131)";
@@ -1121,6 +1156,10 @@ class SpdkInitiator::Impl {
                 : spdk_nvme_ns_cmd_writev_ext(
                       handle->ns, handle->qpair, lba, count, VectorComplete,
                       request, ResetVector, NextVector, &request->opts);
+        if (rc != 0) {
+            LogSubmitError(handle, op, device ? "hbm-sgl" : "host-sgl",
+                           buffers.front().data, byte_offset, byte_length, rc);
+        }
         if (rc == -EFAULT) return 0;
         if (rc != 0) handle->vector_ios.erase(entry);
         return rc;
@@ -1306,6 +1345,18 @@ class SpdkInitiator::Impl {
     }
 
    private:
+    static void LogSubmitError(NofSegmentHandle* handle, NofIOOp op,
+                               const char* memory_type, const void* buffer,
+                               uint64_t byte_offset, uint64_t byte_length,
+                               int rc) {
+        LOG_EVERY_N(ERROR, 128)
+            << "NoF SPDK submit failed: qpair=" << handle->qpair.load()
+            << ", op=" << (op == NofIOOp::kWrite ? "write" : "read")
+            << ", memory=" << memory_type << ", buffer=" << buffer
+            << ", ssd_offset=" << byte_offset << ", bytes=" << byte_length
+            << ", rc=" << rc;
+    }
+
     bool EnsureEnv() {
         // Locked check-then-set: an unlocked read of a shared_ptr member is
         // a torn-read UB. Cold path, one mutex acquisition is negligible.

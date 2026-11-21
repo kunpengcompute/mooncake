@@ -87,6 +87,7 @@ struct VectorIo : NofSglCursor {
     spdk_nvme_ns_cmd_ext_io_opts opts{};
     spdk_nvme_cpl completion{};
     bool completed{false};
+    bool reads_into_hbm{false};
 };
 void ResetVector(void* arg, uint32_t offset) {
     static_cast<VectorIo*>(arg)->Reset(offset);
@@ -865,6 +866,13 @@ class SpdkInitiator::Impl {
             }
             auto io = std::move(*it);
             it = handle->vector_ios.erase(it);
+            if (io->reads_into_hbm &&
+                !spdk_nvme_cpl_is_error(&io->completion) &&
+                NoFDebugConfig::IsEnabledAtFirstUse()) {
+                LOG_FIRST_N(INFO, 4)
+                    << "NoF HBM read completed: qpair=" << handle->qpair
+                    << ", bytes=" << io->length;
+            }
             IOCompleteTrampoline(&io->adaptor, &io->completion);
         }
     }
@@ -1157,6 +1165,7 @@ class SpdkInitiator::Impl {
         if (device) {
             if (!handle->rdma_domain || !npu_domain_) return -ENOTSUP;
             io->opts.memory_domain = npu_domain_;
+            io->reads_into_hbm = op == NofIOOp::kRead;
             if (op == NofIOOp::kWrite) {
                 const int rc = ConfigureNpuWriteCapsule(io->opts);
                 if (rc != 0) return rc;

@@ -50,6 +50,7 @@ class SpdkInitiator : public NVMeoFInitiator {
     int64_t PollCompletion(NofSegmentHandle* handle,
                            uint32_t max_completions) override;
     ErrorCode RegisterMemory(void* ptr, size_t size) override;
+    ErrorCode RegisterHostPool(void* ptr, size_t size) override;
     ErrorCode UnregisterMemory(void* ptr) override;
     NofCapabilities GetCapabilities() const override;
 

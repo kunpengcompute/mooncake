@@ -1296,7 +1296,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
         }
         if ((ascend_data_staging_ || ascend_parameter_direct_) &&
             nof_runtime_.initiator) {
-            const auto rc = nof_runtime_.initiator->RegisterMemory(
+            const auto rc = nof_runtime_.initiator->RegisterHostPool(
                 client_buffer_allocator_->getBase(), local_buffer_size);
             local_buffer_nof_registered_ =
                 rc == ErrorCode::OK || rc == ErrorCode::NOF_REGISTRATION_STUCK;
@@ -4723,7 +4723,7 @@ std::vector<std::shared_ptr<BufferHandle>> RealClient::batch_get_buffer(
 }
 
 tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
-    void *buffer, size_t size) {
+    void *buffer, size_t size, bool host_pool) {
     if (!client_) {
         LOG(ERROR) << "Client is not initialized";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
@@ -4734,12 +4734,14 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
             size > SIZE_MAX - reinterpret_cast<uintptr_t>(buffer))
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         std::unique_lock<std::shared_mutex> lock(registered_buffer_mutex_);
-        if (closed_.load(std::memory_order_acquire))
+        if (closed_.load(std::memory_order_acquire) ||
+            (host_pool && !nof_runtime_.initiator))
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         auto existing = registered_buffer_sizes_.find(buffer);
         if (existing != registered_buffer_sizes_.end()) {
             if (existing->second.size != size ||
-                existing->second.cleanup_pending)
+                existing->second.cleanup_pending ||
+                (host_pool && ascend_device_buffers_.count(buffer)))
                 return tl::unexpected(ErrorCode::INVALID_PARAMS);
             ++ascend_registration_refs_[buffer];
             return {};
@@ -4753,7 +4755,7 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
         auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
         device::PointerInfo info;
         auto *accelerator = runtime.FindDeviceForPointer(buffer, &info);
-        if (ascend_nof_host_buffers_ && accelerator)
+        if ((ascend_nof_host_buffers_ || host_pool) && accelerator)
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         const bool npu = accelerator && accelerator->Vendor() ==
                                             device::AcceleratorVendor::kAscend;
@@ -4793,12 +4795,17 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
         registered_buffer_sizes_[buffer] = {size, te_registered, false};
         ascend_registration_refs_[buffer] = 1;
         if (nof_runtime_.initiator && !staged_device) {
-            const auto rc =
-                npu ? nof_runtime_.initiator->RegisterDeviceMemory(buffer, size)
-                    : nof_runtime_.initiator->RegisterMemory(buffer,
-                                                             registration_size);
+            auto &initiator = *nof_runtime_.initiator;
+            ErrorCode rc;
+            if (npu) {
+                rc = initiator.RegisterDeviceMemory(buffer, size);
+            } else if (host_pool) {
+                rc = initiator.RegisterHostPool(buffer, registration_size);
+            } else {
+                rc = initiator.RegisterMemory(buffer, registration_size);
+            }
             if (rc != ErrorCode::OK &&
-                (ascend_nof_host_buffers_ || npu ||
+                (ascend_nof_host_buffers_ || host_pool || npu ||
                  rc == ErrorCode::NOF_REGISTRATION_STUCK)) {
                 registered_buffer_sizes_[buffer].cleanup_pending = true;
                 // Keep the record if either backend cannot confirm cleanup.
@@ -4811,6 +4818,8 @@ tl::expected<void, ErrorCode> RealClient::register_buffer_internal(
         }
         return {};
     }
+
+    if (host_pool) return tl::unexpected(ErrorCode::INVALID_PARAMS);
 
     // Only a HugeTLB segment's base address is widened to the physical
     // segment. ShmHelper::allocate rounds the mapping up to hugepage
@@ -4922,6 +4931,10 @@ bool RealClient::ValidateAscendBufferRangesLocked(
 
 int RealClient::register_buffer(void *buffer, size_t size) {
     return to_py_ret(register_buffer_internal(buffer, size));
+}
+
+int RealClient::register_host_pool(void *buffer, size_t size) {
+    return to_py_ret(register_buffer_internal(buffer, size, true));
 }
 
 tl::expected<void, ErrorCode> RealClient::unregister_buffer_internal(

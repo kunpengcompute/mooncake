@@ -1060,7 +1060,7 @@ class SpdkInitiator::Impl {
         return true;
     }
 
-    ErrorCode RegisterMemory(void* ptr, size_t size) {
+    ErrorCode RegisterMemory(void* ptr, size_t size, bool host_pool) {
         if (!ptr || size == 0) {
             return ErrorCode::INVALID_PARAMS;
         }
@@ -1078,19 +1078,39 @@ class SpdkInitiator::Impl {
                             "and hugepage-backed";
         }
         // Registrations are charged per initiator instance via owner_token_.
+        auto& registry = GetNofRegistryBundle().registry;
+        size_t span = kNofRegistrationPageSize;
+        if (host_pool) {
+            constexpr size_t mib = 1ULL << 20;
+            static const auto span_mib = Environ::Process().GetTypedOr(
+                EnvironmentVariable<size_t>{"MC_NOF_HOST_MR_SIZE_MB"},
+                NofPageRegistry::kDefaultPoolSpan / mib);
+            if (span_mib < 2 || span_mib > 256 || span_mib % 2) {
+                LOG(ERROR) << "MC_NOF_HOST_MR_SIZE_MB must be an even number "
+                              "from 2 through 256";
+                return ErrorCode::INVALID_PARAMS;
+            }
+            span = span_mib * mib;
+        }
+        size_t new_spans = 0;
         const auto rc =
-            GetNofRegistryBundle().registry.Register(owner_token_, ptr, size);
+            registry.RegisterPool(owner_token_, ptr, size, span, &new_spans);
         if (rc != ErrorCode::OK) {
             LOG(ERROR)
                 << "NoF SPDK host registration failed: buffer=" << ptr
                 << ", bytes=" << size << ", result=" << toString(rc);
         } else if (NoFDebugConfig::IsEnabledAtFirstUse()) {
-            LOG(INFO)
-                << "NoF SPDK host registration succeeded: buffer=" << ptr
-                << ", bytes=" << size;
+            LOG(INFO) << "NoF SPDK host registration succeeded: buffer=" << ptr
+                      << ", bytes=" << size
+                      << ", max_registration_bytes=" << span
+                      << ", new_spdk_spans=" << new_spans;
         }
         return rc;
 #else
+        if (host_pool) {
+            LOG(ERROR) << "NoF host pool requires spdk_mem_register";
+            return ErrorCode::INVALID_PARAMS;
+        }
         LOG(WARNING) << "SPDK build lacks spdk_mem_register; NoF over RDMA "
                         "will fail for unregistered user buffers (#3131)";
         return ErrorCode::OK;
@@ -1735,7 +1755,11 @@ int64_t SpdkInitiator::PollCompletion(NofSegmentHandle* handle,
 }
 
 ErrorCode SpdkInitiator::RegisterMemory(void* ptr, size_t size) {
-    return impl_->RegisterMemory(ptr, size);
+    return impl_->RegisterMemory(ptr, size, false);
+}
+
+ErrorCode SpdkInitiator::RegisterHostPool(void* ptr, size_t size) {
+    return impl_->RegisterMemory(ptr, size, true);
 }
 
 ErrorCode SpdkInitiator::UnregisterMemory(void* ptr) {

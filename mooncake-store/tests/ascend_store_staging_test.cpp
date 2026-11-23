@@ -80,6 +80,7 @@ class FakeAscend final : public device::AcceleratorDevice {
 class RegistrationProbe : public NVMeoFInitiator {
    public:
     int host_registrations{0}, device_registrations{0}, unregisters{0};
+    int host_pool_registrations{0};
     bool fail_register{false}, fail_unregister{false};
     bool fail_host_register{false};
     NofSegmentHandle *OpenSegment(const std::string &) override {
@@ -101,6 +102,10 @@ class RegistrationProbe : public NVMeoFInitiator {
     ErrorCode RegisterDeviceMemory(void *, size_t) override {
         ++device_registrations;
         return fail_register ? ErrorCode::INVALID_PARAMS : ErrorCode::OK;
+    }
+    ErrorCode RegisterHostPool(void *ptr, size_t size) override {
+        ++host_pool_registrations;
+        return RegisterMemory(ptr, size);
     }
     ErrorCode UnregisterMemory(void *) override {
         ++unregisters;
@@ -252,6 +257,21 @@ TEST_F(AscendStoreStagingTest, FailedDeviceRegistrationCanBeRetried) {
     EXPECT_EQ(sender->unregister_buffer(source.data()), 0);
 }
 
+TEST_F(AscendStoreStagingTest, ParameterPlaneUsesPoolRegistrationOnlyForDdr) {
+    auto probe = std::make_shared<RegistrationProbe>();
+    AscendStoreTestPeer::EnableDirect(*sender, probe);
+    std::array<char, 4096> host{};
+    probe->fail_host_register = true;
+    EXPECT_NE(sender->register_host_pool(host.data(), host.size()), 0);
+    probe->fail_host_register = false;
+    ASSERT_EQ(sender->register_host_pool(host.data(), host.size()), 0);
+    ASSERT_EQ(sender->register_host_pool(host.data(), host.size()), 0);
+    EXPECT_EQ(probe->host_pool_registrations, 2);
+    EXPECT_NE(sender->register_host_pool(source.data(), source.size()), 0);
+    ASSERT_EQ(sender->unregister_buffer(host.data()), 0);
+    ASSERT_EQ(sender->unregister_buffer(host.data()), 0);
+}
+
 #ifdef USE_NOF
 class HostRoundTripInitiator final : public RegistrationProbe {
    public:
@@ -320,7 +340,8 @@ TEST(AscendNofHostBuffersTest, ReusesRegisteredBuffersWithoutStaging) {
     initiator->fail_host_register = true;
     ASSERT_NE(client->register_buffer(source.data(), source.size()), 0);
     initiator->fail_host_register = false;
-    ASSERT_EQ(client->register_buffer(source.data(), source.size()), 0);
+    ASSERT_EQ(client->register_host_pool(source.data(), source.size()), 0);
+    EXPECT_EQ(initiator->host_pool_registrations, 1);
     ASSERT_EQ(client->register_buffer(destination.data(), destination.size()), 0);
     EXPECT_NE(client->put_from("memory", source.data(), source.size(), {}), 0);
 

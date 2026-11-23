@@ -3050,6 +3050,19 @@ PYBIND11_MODULE(_store, m) {
             py::arg("buffer_ptr"), py::arg("size"),
             "Register a memory buffer for direct access operations")
         .def(
+            "register_host_pool",
+            [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr,
+               size_t size) {
+                void *buffer = reinterpret_cast<void *>(buffer_ptr);
+                py::gil_scoped_release release;
+                auto client = self.get_real_client();
+                if (!client) return to_py_ret(ErrorCode::INVALID_PARAMS);
+                return client->register_host_pool(buffer, size);
+            },
+            py::arg("buffer_ptr"), py::arg("size"),
+            "Register a whole host allocation. Use its slices directly for "
+            "I/O and unregister_buffer on the base at pool teardown.")
+        .def(
             "unregister_buffer",
             [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr) {
                 // Unregister memory buffer

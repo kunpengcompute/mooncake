@@ -208,6 +208,11 @@ class NVMeoFInitiator {
     // buffers sharing a page must neither double-register it nor unregister
     // it early.
     virtual ErrorCode RegisterMemory(void* ptr, size_t size) = 0;
+    // Caller owns the whole host allocation until UnregisterMemory(ptr).
+    // Suballocations borrow this registration for I/O.
+    virtual ErrorCode RegisterHostPool(void* ptr, size_t size) {
+        return RegisterMemory(ptr, size);
+    }
     virtual ErrorCode UnregisterMemory(void* ptr) = 0;
 
     virtual NofCapabilities GetCapabilities() const = 0;

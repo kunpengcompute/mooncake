@@ -125,6 +125,7 @@ class RealClient : public PyClient {
             const ReplicateConfig &config = ReplicateConfig{});
 
     int register_buffer(void *buffer, size_t size);
+    int register_host_pool(void *buffer, size_t size);
 
     int unregister_buffer(void *buffer);
 
@@ -673,8 +674,8 @@ class RealClient : public PyClient {
         const std::shared_ptr<ClientBufferAllocator> &client_buffer_allocator =
             nullptr);
 
-    tl::expected<void, ErrorCode> register_buffer_internal(void *buffer,
-                                                           size_t size);
+    tl::expected<void, ErrorCode> register_buffer_internal(
+        void *buffer, size_t size, bool host_pool = false);
 
     struct RangedReadMetadata {
         QueryResult query_result;

@@ -7,7 +7,7 @@
 
 namespace mooncake {
 
-// External host buffers are registered with SPDK one page at a time.
+// Keep host I/O inside a registration page even for coalesced pool MRs.
 inline constexpr uintptr_t kNofRegistrationPageSize = 2ULL << 20;
 
 inline size_t NofBytesToRegistrationPageEnd(const void *address) {

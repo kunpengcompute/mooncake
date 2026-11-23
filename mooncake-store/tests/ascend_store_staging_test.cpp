@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <future>
@@ -12,6 +13,10 @@ class AscendStoreTestPeer {
    public:
     static void EnableStaging(RealClient &client) {
         client.ascend_data_staging_ = true;
+    }
+    static void EnableNofHostBuffers(RealClient &client) {
+        EnableStaging(client);
+        client.ascend_nof_host_buffers_ = true;
     }
     static void EnableDirect(RealClient &client,
                              std::shared_ptr<NVMeoFInitiator> initiator) {
@@ -72,10 +77,11 @@ class FakeAscend final : public device::AcceleratorDevice {
     }
     PinnedHostBuffer AllocatePinnedHost(size_t) const override { return {}; }
 };
-class RegistrationProbe final : public NVMeoFInitiator {
+class RegistrationProbe : public NVMeoFInitiator {
    public:
     int host_registrations{0}, device_registrations{0}, unregisters{0};
     bool fail_register{false}, fail_unregister{false};
+    bool fail_host_register{false};
     NofSegmentHandle *OpenSegment(const std::string &) override {
         return nullptr;
     }
@@ -90,7 +96,7 @@ class RegistrationProbe final : public NVMeoFInitiator {
     int64_t PollCompletion(NofSegmentHandle *, uint32_t) override { return 0; }
     ErrorCode RegisterMemory(void *, size_t) override {
         ++host_registrations;
-        return ErrorCode::OK;
+        return fail_host_register ? ErrorCode::INVALID_PARAMS : ErrorCode::OK;
     }
     ErrorCode RegisterDeviceMemory(void *, size_t) override {
         ++device_registrations;
@@ -245,5 +251,100 @@ TEST_F(AscendStoreStagingTest, FailedDeviceRegistrationCanBeRetried) {
     EXPECT_EQ(probe->device_registrations, 2);
     EXPECT_EQ(sender->unregister_buffer(source.data()), 0);
 }
+
+#ifdef USE_NOF
+class HostRoundTripInitiator final : public RegistrationProbe {
+   public:
+    void *source{nullptr}, *destination{nullptr};
+    std::array<char, 4096> storage{};
+
+    NofSegmentHandle *OpenSegment(const std::string &) override {
+        return reinterpret_cast<NofSegmentHandle *>(&handle_);
+    }
+    int SubmitIO(NofSegmentHandle *, void *buffer, uint64_t, uint64_t bytes,
+                 NofIOOp op, NofIOAdaptor *adaptor) override {
+        if (bytes != storage.size() || pending_) return -EINVAL;
+        if (op == NofIOOp::kWrite && buffer == source) {
+            std::memcpy(storage.data(), buffer, bytes);
+        } else if (op == NofIOOp::kRead && buffer == destination) {
+            std::memcpy(buffer, storage.data(), bytes);
+        } else {
+            return -EINVAL;
+        }
+        pending_ = adaptor;
+        return 0;
+    }
+    int64_t PollCompletion(NofSegmentHandle *, uint32_t) override {
+        if (!pending_) return 0;
+        auto *adaptor = pending_;
+        pending_ = nullptr;
+        adaptor->cb(adaptor->ctx, NofIOCompletion{.success = true});
+        return 1;
+    }
+
+   private:
+    uint64_t handle_{0};
+    NofIOAdaptor *pending_{nullptr};
+};
+
+TEST(AscendNofHostBuffersTest, ReusesRegisteredBuffersWithoutStaging) {
+    testing::InProcMaster master;
+    ASSERT_TRUE(master.Start(InProcMasterConfigBuilder().build()));
+    NoFSegment segment;
+    segment.id = generate_uuid();
+    segment.name = "mock-ssd";
+    segment.base = 0;
+    segment.size = 16 << 20;
+    segment.te_endpoint = "mock-nof-endpoint";
+    ASSERT_TRUE(master.service()
+                    ->MountNoFSegment(segment, generate_uuid())
+                    .has_value());
+
+    alignas(4096) std::array<char, 4096> source{}, destination{};
+    source.fill('x');
+    auto initiator = std::make_shared<HostRoundTripInitiator>();
+    initiator->source = source.data();
+    initiator->destination = destination.data();
+    struct FactoryReset {
+        ~FactoryReset() { RealClient::SetNofRuntimeFactoryForTesting(nullptr); }
+    } factory_reset;
+    RealClient::SetNofRuntimeFactoryForTesting([initiator] {
+        return NofRuntime{initiator, std::make_shared<SystemDmaAllocator>()};
+    });
+    auto client = RealClient::create();
+    ASSERT_EQ(client->setup_real("127.0.0.1", "P2PHANDSHAKE", 0, 0, "tcp",
+                                 "", master.master_address()),
+              0);
+    AscendStoreTestPeer::EnableNofHostBuffers(*client);
+
+    initiator->fail_host_register = true;
+    ASSERT_NE(client->register_buffer(source.data(), source.size()), 0);
+    initiator->fail_host_register = false;
+    ASSERT_EQ(client->register_buffer(source.data(), source.size()), 0);
+    ASSERT_EQ(client->register_buffer(destination.data(), destination.size()), 0);
+    EXPECT_NE(client->put_from("memory", source.data(), source.size(), {}), 0);
+
+    ReplicateConfig config;
+    config.replica_num = 0;
+    config.nof_replica_num = 1;
+    config.replica_counts_explicit = true;
+    ASSERT_EQ(client->batch_put_from({"kv"}, {source.data()}, {source.size()},
+                                    config),
+              std::vector<int>{0});
+    ASSERT_EQ(client->batch_get_into({"kv"}, {destination.data()},
+                                     {destination.size()}),
+              std::vector<int64_t>{4096});
+    EXPECT_EQ(source, destination);
+    EXPECT_EQ(client->get_into("kv", destination.data(), destination.size()),
+              4096);
+    EXPECT_LT(client->get_into("kv", destination.data() + 1,
+                               destination.size()),
+              0);
+    ASSERT_EQ(client->unregister_buffer(destination.data()), 0);
+    EXPECT_LT(client->get_into("kv", destination.data(), destination.size()),
+              0);
+    EXPECT_EQ(client->tearDownAll(), 0);
+}
+#endif
 }  // namespace
 }  // namespace mooncake

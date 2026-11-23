@@ -1169,6 +1169,7 @@ class RealClient : public PyClient {
     tl::expected<void, ErrorCode> UnregisterAscendBufferLocked(void *buffer);
     std::unordered_map<void *, size_t> ascend_registration_refs_;
     bool ascend_data_staging_{false};
+    bool ascend_nof_host_buffers_{false};
     bool ascend_parameter_direct_{false};
     bool local_buffer_nof_registered_{false};
     bool local_buffer_cleanup_failed_{false};

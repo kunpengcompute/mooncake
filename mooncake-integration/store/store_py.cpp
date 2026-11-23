@@ -2445,6 +2445,11 @@ PYBIND11_MODULE(_store, m) {
 #else
             result["nof"] = false;
 #endif
+#if defined(USE_ASCEND_STAGING) && defined(USE_NOF)
+                 result["data_staging_nof_host_buffers"] = true;
+#else
+                 result["data_staging_nof_host_buffers"] = false;
+#endif
                  result["complete_object_only"] = true;
                  return result;
              })

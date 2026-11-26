@@ -134,13 +134,13 @@ NQN=nqn.2016-06.io.spdk:mooncake-staging
 
 ## Register the NoF SSD with the master from the inference node
 
-Enter the SSH login details and the absolute SPDK path on the **storage node**. The registration command queries SPDK over SSH and registers every NVMe namespace exported by that target, so export only the test namespace. Check that registration succeeded for one namespace and that `master_total_nof_capacity_bytes` is greater than zero.
+Enter the SSH login details and the absolute SPDK path on the **storage node**. The `--skip-create` option reuses the target created above. The registration command queries SPDK over SSH and registers every NVMe namespace exported by that target, so export only the test namespace. Check that registration succeeded for one namespace and that `master_total_nof_capacity_bytes` is greater than zero.
 
 ```bash
 read -r -p 'Storage node SSH address: ' TARGET_SSH_HOST
 read -r -p 'SSH user with access to the SPDK RPC socket: ' TARGET_SSH_USER
 read -r -p 'Absolute SPDK path on the storage node (no spaces): ' TARGET_SPDK_DIR
-MC_NOF_TRTYPE=RDMA python -m mooncake.mooncake_ssd_register \
+MC_NOF_TRTYPE=RDMA python -m mooncake.mooncake_ssd_create_and_register --skip-create \
   --master_server_address=127.0.0.1:50051 \
   --spdk_target_info="ip:$TARGET_SSH_HOST path:$TARGET_SPDK_DIR" \
   --username "$TARGET_SSH_USER"

@@ -99,6 +99,7 @@ sleep 2
   --rpc_port="$MASTER_PORT" \
   --enable_http_metadata_server=false \
   --logtostderr=true \
+  --vmodule=master_service=1 \
   --nof_heartbeat_interval_sec="$HEARTBEAT_INTERVAL" \
   --nof_heartbeat_probe_timeout_ms="$HEARTBEAT_TIMEOUT_MS" \
   --nof_heartbeat_failures_threshold="$HEARTBEAT_FAILURES" >"$LOG_DIR/master.log" 2>&1 &
@@ -115,10 +116,25 @@ ret = MooncakeDistributedNoFRegister().real_register(
     0,
     int("$NOF_SIZE"),
     "$MASTER_RPC",
+    block_size=4096,
 )
 print(f"register_ret {ret}", flush=True)
 raise SystemExit(0 if ret == 0 else 1)
 PY
+
+# The first successful probe establishes the master's controller subscription.
+# Mount a second 4 KiB namespace via discovery alone. An implicit 512-byte
+# block size would be rejected by the existing 4 KiB NoF pool.
+if ! wait_for_pattern "$LOG_DIR/master.log" 'action=nof_heartbeat_success' $((HEARTBEAT_INTERVAL + 20)); then
+  echo "master did not finish its first namespace probe"
+  exit 1
+fi
+python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" bdev_malloc_create -b Malloc1 4 4096 >/dev/null
+python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" nvmf_subsystem_add_ns "$TARGET_NQN" Malloc1 -n 2 >/dev/null
+if ! wait_for_pattern "$LOG_DIR/master.log" 'nsid=2, capacity=4194304, block_size=4096, action=nof_namespace_added' $((HEARTBEAT_INTERVAL + 20)); then
+  echo "master did not mount namespace 2 with its 4 KiB block size"
+  exit 1
+fi
 
 PYTHONPATH="$BUILD_DIR/mooncake-integration" python3 "$SCRIPT_DIR/store_client_e2e.py" \
   --local-hostname "127.0.0.1:50071" \

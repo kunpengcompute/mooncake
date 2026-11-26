@@ -14,6 +14,9 @@ struct SpdkControllerConfig {
     std::optional<uint64_t> fabrics_connect_timeout_us;
     std::optional<bool> header_digest;
     std::optional<bool> data_digest;
+    uint64_t nof_admin_poll_interval_ms = 100;
+    uint64_t nof_namespace_refresh_timeout_ms = 1000;
+    uint64_t nof_namespace_refresh_poll_interval_ms = 10;
 
     static SpdkControllerConfig FromEnvironment();
 };

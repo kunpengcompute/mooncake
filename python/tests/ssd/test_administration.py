@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from mooncake._administration import require_paramiko
-from mooncake.spdk_tgt_create import SPDKTgtCreator
+from mooncake.mooncake_ssd_tool_common import SPDKTgtCreator
 
 
 def test_missing_paramiko_reports_install_command():

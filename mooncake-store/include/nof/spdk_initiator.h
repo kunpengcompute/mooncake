@@ -22,6 +22,16 @@ class SpdkInitiator : public NVMeoFInitiator {
     NofSegmentHandle* OpenSegment(const std::string& transport_str) override;
     bool ProbeSegment(const std::string& transport_str, uint32_t timeout_ms,
                       std::string* error_reason) override;
+    std::string GetControllerKey(const std::string&) override;
+    std::vector<uint32_t> GetActiveNamespaces(const std::string&) override;
+    uint64_t GetNamespaceCapacityBytes(const NofSegmentHandle*) override;
+    std::vector<std::string> ConsumeNamespaceAttributeChangedControllers()
+        override;
+    void InvalidateController(const std::string&) override;
+    void InvalidateController(NofSegmentHandle*) override;
+    void CloseSegment(const std::string&) override;
+    int32_t PollAdminCompletions(NofSegmentHandle*) override;
+    bool AbortSegment(NofSegmentHandle*) override;
     uint32_t GetBlockSize(const NofSegmentHandle* handle) override;
     int SubmitIO(NofSegmentHandle* handle, void* buffer, uint64_t byte_offset,
                  uint64_t byte_length, NofIOOp op,

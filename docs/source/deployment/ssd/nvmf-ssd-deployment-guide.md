@@ -149,6 +149,21 @@ python3 -m mooncake.mooncake_ssd_create_and_register \
   --skip-create
 ```
 
+To register namespaces from two running SPDK targets on the same node, specify
+each target's RPC socket.
+
+```bash
+python3 -m mooncake.mooncake_ssd_create_and_register \
+  --master_server_address 192.168.65.81:50051 \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk sock:/var/tmp/target1.sock" \
+  --spdk_target_info "ip:192.168.65.56 path:/home/spdk sock:/var/tmp/target2.sock" \
+  --skip-create
+```
+
+Omit `sock` to use SPDK's default RPC socket. Relative socket paths resolve from
+the SPDK directory containing `scripts/rpc.py`. The `sock` field requires
+`--skip-create`.
+
 #### Add SSDs to a Running Target
 
 To add SSDs to a running SPDK target and register them with the Mooncake master, run the create/register tool again with the PCI addresses of the new drives:
@@ -166,7 +181,7 @@ The command reuses the running `nvmf_tgt`, transport, subsystem, and listener. I
 | Parameter | Required | Description |
 | --- | --- | --- |
 | `--master_server_address` | Conditional | Required unless `--skip-register` is set. For example, `192.168.65.81:50051`. |
-| `--spdk_target_info` | Yes | Target description. Repeat for multiple targets. Format: `ip:<target_ip> path:<spdk_path> [pci:<pci1>,<pci2>]`. |
+| `--spdk_target_info` | Yes | Target description. Repeat for multiple targets. Format: `ip:<target_ip> path:<spdk_path> [pci:<pci1>,<pci2>] [sock:<rpc_socket>]`. |
 | `--skip-create` | No | Skip target creation and only register namespaces. |
 | `--skip-register` | No | Create target resources without registering them with the master. |
 | `--dry-run` | No | Print the workflow without executing remote operations. |

@@ -453,7 +453,6 @@ struct ctrlr_info {
 // address, a monotonically increasing id is never recycled (a new Impl could
 // otherwise inherit a dead one's leftover registration records).
 std::atomic<uint64_t> g_nof_owner_token{1};
-std::atomic<uint64_t> g_nof_probe_id{1};
 
 }  // namespace
 
@@ -1267,26 +1266,9 @@ class SpdkInitiator::Impl {
         NofProbeContext* probe_ctx = probe_pool_.Acquire();
         probe_ctx->adaptor = {&ProbeReadComplete, probe_ctx};
         probe_ctx->seg = seg_handle;
-        probe_ctx->probe_id =
-            g_nof_probe_id.fetch_add(1, std::memory_order_relaxed);
-        probe_ctx->submitted_at = std::chrono::steady_clock::now();
-        probe_ctx->timeout = std::chrono::milliseconds(timeout_ms);
-        auto* qpair = seg_handle->qpair.load();
-        errno = 0;
         const int submit_rc = SubmitIO(seg_handle, buffer, 0, block_size,
                                        NofIOOp::kRead, &probe_ctx->adaptor);
-        const int submit_errno = errno;
         if (submit_rc != 0) {
-            LOG(WARNING)
-                << "NoF heartbeat read submission failed: endpoint=" << tr_str
-                << ", probe_id=" << probe_ctx->probe_id
-                << ", qid=" << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
-                << ", qpair=" << qpair << ", lba=0, bytes=" << block_size
-                << ", submit_rc=" << submit_rc
-                << ", submit_errno=" << submit_errno << ", connected="
-                << (qpair && spdk_nvme_qpair_is_connected(qpair))
-                << ", qpair_failure_reason="
-                << (qpair ? spdk_nvme_qpair_get_failure_reason(qpair) : 0);
             probe_pool_.Recycle(probe_ctx);
             if (error_reason) {
                 *error_reason =
@@ -1304,30 +1286,16 @@ class SpdkInitiator::Impl {
 
         auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(timeout_ms);
-        int64_t last_poll_rc = 0;
-        int64_t first_poll_error = 0;
-        int first_poll_errno = 0;
         int64_t connection_error = 0;
-        uint64_t poll_count = 0;
-        uint64_t completions_seen = 0;
         while (!probe_ctx->done.load(std::memory_order_acquire) &&
                std::chrono::steady_clock::now() < deadline) {
             const int admin_ret = PollAdminCompletions(seg_handle);
-            errno = 0;
-            last_poll_rc = PollCompletion(seg_handle, 0);
-            const int poll_errno = errno;
-            ++poll_count;
-            if (last_poll_rc > 0) {
-                completions_seen += static_cast<uint64_t>(last_poll_rc);
-            } else if (last_poll_rc < 0 && first_poll_error == 0) {
-                first_poll_error = last_poll_rc;
-                first_poll_errno = poll_errno;
-            }
+            const int64_t poll_ret = PollCompletion(seg_handle, 0);
             if (IsControllerConnectionError(admin_ret) ||
-                IsControllerConnectionError(last_poll_rc)) {
+                IsControllerConnectionError(poll_ret)) {
                 connection_error = IsControllerConnectionError(admin_ret)
                                        ? admin_ret
-                                       : last_poll_rc;
+                                       : poll_ret;
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1336,7 +1304,7 @@ class SpdkInitiator::Impl {
         const bool done = probe_ctx->done.load(std::memory_order_acquire);
         const bool ok = connection_error == 0 && done &&
                         probe_ctx->success.load(std::memory_order_acquire);
-        if (!ok) {
+        if (!ok && error_reason) {
             std::string reason =
                 done ? "completion_error" : "completion_timeout";
             if (connection_error != 0) {
@@ -1347,27 +1315,7 @@ class SpdkInitiator::Impl {
                     reason = probe_ctx->error_reason;
                 }
             }
-            if (error_reason) *error_reason = reason;
-            auto* ctrlr = spdk_nvme_ns_get_ctrlr(seg_handle->ns);
-            const auto* opts = spdk_nvme_ctrlr_get_opts(ctrlr);
-            LOG(WARNING)
-                << "NoF heartbeat read failed: endpoint=" << tr_str
-                << ", probe_id=" << probe_ctx->probe_id
-                << ", cntlid=" << spdk_nvme_ctrlr_get_id(ctrlr)
-                << ", qid=" << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
-                << ", hostnqn=" << opts->hostnqn << ", src_addr="
-                << (opts->src_addr[0] ? opts->src_addr : "auto")
-                << ", qpair=" << qpair << ", lba=0, bytes=" << block_size
-                << ", timeout_ms=" << timeout_ms << ", submit_rc=" << submit_rc
-                << ", poll_count=" << poll_count
-                << ", completions_seen=" << completions_seen
-                << ", first_poll_error=" << first_poll_error
-                << ", first_poll_errno=" << first_poll_errno
-                << ", last_poll_rc=" << last_poll_rc << ", connected="
-                << (qpair && spdk_nvme_qpair_is_connected(qpair))
-                << ", qpair_failure_reason="
-                << (qpair ? spdk_nvme_qpair_get_failure_reason(qpair) : 0)
-                << ", reason=" << reason;
+            *error_reason = reason;
         }
 
         if (connection_error != 0 || !done) {
@@ -1477,23 +1425,6 @@ class SpdkInitiator::Impl {
 
     static void ProbeReadComplete(void* ctx, const NofIOCompletion& c) {
         auto* probe_ctx = reinterpret_cast<NofProbeContext*>(ctx);
-        const auto elapsed =
-            std::chrono::steady_clock::now() - probe_ctx->submitted_at;
-        if (elapsed >= probe_ctx->timeout) {
-            auto* seg = probe_ctx->seg;
-            auto* ctrlr = spdk_nvme_ns_get_ctrlr(seg->ns);
-            LOG(WARNING)
-                << "NoF heartbeat read completed after timeout budget: "
-                << "probe_id=" << probe_ctx->probe_id
-                << ", cntlid=" << spdk_nvme_ctrlr_get_id(ctrlr)
-                << ", qid=" << spdk_nvme_qpair_get_id(seg->qpair)
-                << ", nsid=" << spdk_nvme_ns_get_id(seg->ns) << ", elapsed_ms="
-                << std::chrono::duration_cast<std::chrono::milliseconds>(
-                       elapsed)
-                       .count()
-                << ", success=" << c.success << ", sc=" << c.sc
-                << ", sct=" << c.sct << ", status=" << c.error_string;
-        }
         if (!c.success) {
             {
                 std::lock_guard<std::mutex> lock(probe_ctx->error_mutex);

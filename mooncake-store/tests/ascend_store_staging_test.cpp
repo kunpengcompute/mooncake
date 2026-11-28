@@ -332,8 +332,8 @@ TEST(AscendNofHostBuffersTest, ReusesRegisteredBuffersWithoutStaging) {
         return NofRuntime{initiator, std::make_shared<SystemDmaAllocator>()};
     });
     auto client = RealClient::create();
-    ASSERT_EQ(client->setup_real("127.0.0.1", "P2PHANDSHAKE", 0, 0, "tcp",
-                                 "", master.master_address()),
+    ASSERT_EQ(client->setup_real("127.0.0.1", "P2PHANDSHAKE", 0, 0, "tcp", "",
+                                 master.master_address()),
               0);
     AscendStoreTestPeer::EnableNofHostBuffers(*client);
 
@@ -342,7 +342,8 @@ TEST(AscendNofHostBuffersTest, ReusesRegisteredBuffersWithoutStaging) {
     initiator->fail_host_register = false;
     ASSERT_EQ(client->register_host_pool(source.data(), source.size()), 0);
     EXPECT_EQ(initiator->host_pool_registrations, 1);
-    ASSERT_EQ(client->register_buffer(destination.data(), destination.size()), 0);
+    ASSERT_EQ(client->register_buffer(destination.data(), destination.size()),
+              0);
     EXPECT_NE(client->put_from("memory", source.data(), source.size(), {}), 0);
 
     ReplicateConfig config;
@@ -350,7 +351,7 @@ TEST(AscendNofHostBuffersTest, ReusesRegisteredBuffersWithoutStaging) {
     config.nof_replica_num = 1;
     config.replica_counts_explicit = true;
     ASSERT_EQ(client->batch_put_from({"kv"}, {source.data()}, {source.size()},
-                                    config),
+                                     config),
               std::vector<int>{0});
     ASSERT_EQ(client->batch_get_into({"kv"}, {destination.data()},
                                      {destination.size()}),
@@ -358,9 +359,8 @@ TEST(AscendNofHostBuffersTest, ReusesRegisteredBuffersWithoutStaging) {
     EXPECT_EQ(source, destination);
     EXPECT_EQ(client->get_into("kv", destination.data(), destination.size()),
               4096);
-    EXPECT_LT(client->get_into("kv", destination.data() + 1,
-                               destination.size()),
-              0);
+    EXPECT_LT(
+        client->get_into("kv", destination.data() + 1, destination.size()), 0);
     ASSERT_EQ(client->unregister_buffer(destination.data()), 0);
     EXPECT_LT(client->get_into("kv", destination.data(), destination.size()),
               0);

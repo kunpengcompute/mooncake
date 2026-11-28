@@ -1090,7 +1090,8 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
             return tl::unexpected(ErrorCode::INVALID_PARAMS);
         ascend_data_staging_ =
             storage_config.Mode() == AscendTransferMode::DataStaging;
-        ascend_nof_host_buffers_ = ascend_data_staging_ && local_buffer_size == 0;
+        ascend_nof_host_buffers_ =
+            ascend_data_staging_ && local_buffer_size == 0;
         ascend_parameter_direct_ =
             storage_config.Mode() == AscendTransferMode::ParameterDirect;
         if (storage_config.HasRoute()) {
@@ -1145,7 +1146,7 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
     nof_runtime_ = nof_factory ? nof_factory() : CreateNofRuntime();
     if (ascend_nof_host_buffers_ &&
         (!nof_runtime_.initiator || !nof_runtime_.initiator->GetCapabilities()
-                                        .requires_memory_registration)) {
+                                         .requires_memory_registration)) {
         LOG(ERROR) << "NoF host-buffer mode requires SPDK Host MR support";
         return tl::unexpected(ErrorCode::INVALID_PARAMS);
     }
@@ -8841,7 +8842,8 @@ RealClient::batch_get_into_multi_buffers_internal(
             }
             char *cursor = static_cast<char *>(ascend_staging->ptr());
             for (const auto &slice : key_slices) {
-                if (slice.size) ascend_io_slices.emplace_back(cursor, slice.size);
+                if (slice.size)
+                    ascend_io_slices.emplace_back(cursor, slice.size);
                 cursor += slice.size;
             }
         }

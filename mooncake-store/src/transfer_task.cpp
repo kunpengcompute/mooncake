@@ -185,8 +185,9 @@ static int nvmf_next_sge(void* ctx, void** address, uint32_t* length) {
                                           std::numeric_limits<uint32_t>::max());
         *address = static_cast<char*>(slice.ptr) + sub_task->sgl_offset;
         if (sub_task->adaptor.split_at_registration_page) {
-            segment_length = std::min(
-                segment_length, mooncake::NofBytesToRegistrationPageEnd(*address));
+            segment_length =
+                std::min(segment_length,
+                         mooncake::NofBytesToRegistrationPageEnd(*address));
         }
         *length = static_cast<uint32_t>(segment_length);
 
@@ -767,10 +768,9 @@ void NofWorkerPool::workerThread(int work_idx) {
 #endif
                             LOG(ERROR) << "work " << work_idx << ", seg "
                                        << task->seg_handle << " submit io fail"
-                                       << ", rc=" << ret
-                                       << ", op="
+                                       << ", rc=" << ret << ", op="
                                        << (task->op == NofIOOp::kWrite ? "write"
-                                                                        : "read")
+                                                                       : "read")
                                        << ", ssd_offset=" << submit_off
                                        << ", bytes=" << submit_bytes
                                        << ", block_size=" << block_size

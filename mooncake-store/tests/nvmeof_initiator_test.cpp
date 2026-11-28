@@ -125,10 +125,9 @@ class VectorMockInitiator : public MockInitiator {
         cursor.start = buffer_offset;
         cursor.length = byte_length;
         cursor.Reset(0);
-        return SubmitVector(handle, byte_offset, byte_length, op, adaptor,
-                            [&](void** addr, uint32_t* len) {
-                                return cursor.Next(addr, len);
-                            });
+        return SubmitVector(
+            handle, byte_offset, byte_length, op, adaptor,
+            [&](void** addr, uint32_t* len) { return cursor.Next(addr, len); });
     }
 
     int SubmitIOV(NofSegmentHandle* handle, uint64_t byte_offset,
@@ -191,14 +190,15 @@ TEST(NofClientTest, BatchPutAndGetWithDiscontiguousSlices) {
     segment.base = 0;
     segment.size = 16 * 1024 * 1024;
     segment.te_endpoint = "mock-nof-endpoint";
-    ASSERT_TRUE(
-        master.service()->MountNoFSegment(segment, generate_uuid()).has_value());
+    ASSERT_TRUE(master.service()
+                    ->MountNoFSegment(segment, generate_uuid())
+                    .has_value());
 
     auto initiator = std::make_shared<VectorMockInitiator>();
     initiator->received.resize(segment.size);
     auto client = Client::Create("127.0.0.1", "P2PHANDSHAKE", "tcp",
-                                 std::nullopt, master.master_address(),
-                                 nullptr, {}, "default", initiator);
+                                 std::nullopt, master.master_address(), nullptr,
+                                 {}, "default", initiator);
     ASSERT_TRUE(client.has_value());
 
     // An object spans two buffers, with an untouched gap in the middle.
@@ -219,8 +219,9 @@ TEST(NofClientTest, BatchPutAndGetWithDiscontiguousSlices) {
     ASSERT_TRUE(put.front().has_value());
 
     std::unordered_map<std::string, std::vector<Slice>> get_slices{
-        {keys.front(), {{destination.data(), block},
-                        {destination.data() + 2 * block, block}}}};
+        {keys.front(),
+         {{destination.data(), block},
+          {destination.data() + 2 * block, block}}}};
     auto get = (*client)->BatchGet(keys, get_slices);
     ASSERT_EQ(get.size(), 1u);
     ASSERT_TRUE(get.front().has_value());

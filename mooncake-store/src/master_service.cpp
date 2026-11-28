@@ -64,15 +64,16 @@ namespace mooncake {
 namespace {
 
 const std::string& NoFHeartbeatSourceIp() {
-    static const std::string source_ip(TrimAsciiWhitespace(
-        Environ::Process().GetTypedOr(
+    static const std::string source_ip(
+        TrimAsciiWhitespace(Environ::Process().GetTypedOr(
             NoFHeartbeatEnvironmentVariables::MC_NOF_HEARTBEAT_SRC_IP,
             std::string{})));
     return source_ip;
 }
 
 std::shared_ptr<NVMeoFInitiator> MasterNofInitiator() {
-    static const auto initiator = CreateNofRuntime(NoFHeartbeatSourceIp()).initiator;
+    static const auto initiator =
+        CreateNofRuntime(NoFHeartbeatSourceIp()).initiator;
     return initiator;
 }
 
@@ -375,8 +376,9 @@ MasterService::MasterService(const MasterServiceConfig& config)
                 "MC_NOF_HEARTBEAT_SRC_IP must be a numeric IP address");
         }
         if (nof_heartbeat_interval_sec_.count() <= 0) {
-            LOG(ERROR) << "nof_heartbeat_interval_sec must be positive, current "
-                       << nof_heartbeat_interval_sec_.count();
+            LOG(ERROR)
+                << "nof_heartbeat_interval_sec must be positive, current "
+                << nof_heartbeat_interval_sec_.count();
             throw std::invalid_argument("Invalid nof heartbeat interval");
         }
         if (nof_heartbeat_probe_timeout_ms_.count() <= 0) {

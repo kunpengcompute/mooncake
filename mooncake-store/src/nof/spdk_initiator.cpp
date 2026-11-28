@@ -787,17 +787,16 @@ class SpdkInitiator::Impl {
                              {{buffer, static_cast<size_t>(byte_length)}},
                              byte_offset, byte_length, op, adaptor, 0);
         }
-        const int rc =
-            op == NofIOOp::kRead
-                ? spdk_nvme_ns_cmd_read(handle->ns, handle->qpair, buffer, lba,
-                                        lba_count, IOCompleteTrampoline,
-                                        adaptor, 0)
-                : spdk_nvme_ns_cmd_write(handle->ns, handle->qpair, buffer, lba,
-                                         lba_count, IOCompleteTrampoline,
-                                         adaptor, 0);
+        const int rc = op == NofIOOp::kRead
+                           ? spdk_nvme_ns_cmd_read(
+                                 handle->ns, handle->qpair, buffer, lba,
+                                 lba_count, IOCompleteTrampoline, adaptor, 0)
+                           : spdk_nvme_ns_cmd_write(
+                                 handle->ns, handle->qpair, buffer, lba,
+                                 lba_count, IOCompleteTrampoline, adaptor, 0);
         if (rc != 0) {
-            LogSubmitError(handle, op, "host", buffer, byte_offset,
-                           byte_length, rc);
+            LogSubmitError(handle, op, "host", buffer, byte_offset, byte_length,
+                           rc);
         }
         return rc;
     }
@@ -845,8 +844,8 @@ class SpdkInitiator::Impl {
             spdk_nvme_qpair_process_completions(handle->qpair, max_completions);
         if (rc < 0 && rc != handle->last_poll_error) {
             LOG(ERROR) << "NoF SPDK qpair poll failed: qpair="
-                       << handle->qpair.load()
-                       << ", rc=" << rc << ", failure_reason="
+                       << handle->qpair.load() << ", rc=" << rc
+                       << ", failure_reason="
                        << spdk_nvme_qpair_get_failure_reason(handle->qpair)
                        << ", tracked_vector_ios=" << handle->vector_ios.size();
         }
@@ -1096,9 +1095,8 @@ class SpdkInitiator::Impl {
         const auto rc =
             registry.RegisterPool(owner_token_, ptr, size, span, &new_spans);
         if (rc != ErrorCode::OK) {
-            LOG(ERROR)
-                << "NoF SPDK host registration failed: buffer=" << ptr
-                << ", bytes=" << size << ", result=" << toString(rc);
+            LOG(ERROR) << "NoF SPDK host registration failed: buffer=" << ptr
+                       << ", bytes=" << size << ", result=" << toString(rc);
         } else if (NoFDebugConfig::IsEnabledAtFirstUse()) {
             LOG(INFO) << "NoF SPDK host registration succeeded: buffer=" << ptr
                       << ", bytes=" << size
@@ -1279,24 +1277,22 @@ class SpdkInitiator::Impl {
                                        NofIOOp::kRead, &probe_ctx->adaptor);
         const int submit_errno = errno;
         if (submit_rc != 0) {
-            LOG(WARNING) << "NoF heartbeat read submission failed: endpoint="
-                         << tr_str << ", probe_id=" << probe_ctx->probe_id
-                         << ", qid="
-                         << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
-                         << ", qpair=" << qpair << ", lba=0, bytes="
-                         << block_size << ", submit_rc=" << submit_rc
-                         << ", submit_errno=" << submit_errno
-                         << ", connected="
-                         << (qpair && spdk_nvme_qpair_is_connected(qpair))
-                         << ", qpair_failure_reason="
-                         << (qpair ? spdk_nvme_qpair_get_failure_reason(qpair)
-                                   : 0);
+            LOG(WARNING)
+                << "NoF heartbeat read submission failed: endpoint=" << tr_str
+                << ", probe_id=" << probe_ctx->probe_id
+                << ", qid=" << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
+                << ", qpair=" << qpair << ", lba=0, bytes=" << block_size
+                << ", submit_rc=" << submit_rc
+                << ", submit_errno=" << submit_errno << ", connected="
+                << (qpair && spdk_nvme_qpair_is_connected(qpair))
+                << ", qpair_failure_reason="
+                << (qpair ? spdk_nvme_qpair_get_failure_reason(qpair) : 0);
             probe_pool_.Recycle(probe_ctx);
             if (error_reason) {
-                *error_reason = IsControllerConnectionError(submit_rc)
-                                    ? "controller_error:" +
-                                          std::to_string(submit_rc)
-                                    : "submit_fail";
+                *error_reason =
+                    IsControllerConnectionError(submit_rc)
+                        ? "controller_error:" + std::to_string(submit_rc)
+                        : "submit_fail";
             }
             if (IsControllerConnectionError(submit_rc)) {
                 InvalidateController(seg_handle);
@@ -1341,7 +1337,8 @@ class SpdkInitiator::Impl {
         const bool ok = connection_error == 0 && done &&
                         probe_ctx->success.load(std::memory_order_acquire);
         if (!ok) {
-            std::string reason = done ? "completion_error" : "completion_timeout";
+            std::string reason =
+                done ? "completion_error" : "completion_timeout";
             if (connection_error != 0) {
                 reason = "controller_error:" + std::to_string(connection_error);
             } else if (done) {
@@ -1353,28 +1350,24 @@ class SpdkInitiator::Impl {
             if (error_reason) *error_reason = reason;
             auto* ctrlr = spdk_nvme_ns_get_ctrlr(seg_handle->ns);
             const auto* opts = spdk_nvme_ctrlr_get_opts(ctrlr);
-            LOG(WARNING) << "NoF heartbeat read failed: endpoint=" << tr_str
-                         << ", probe_id=" << probe_ctx->probe_id
-                         << ", cntlid=" << spdk_nvme_ctrlr_get_id(ctrlr)
-                         << ", qid="
-                         << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
-                         << ", hostnqn=" << opts->hostnqn
-                         << ", src_addr="
-                         << (opts->src_addr[0] ? opts->src_addr : "auto")
-                         << ", qpair=" << qpair << ", lba=0, bytes="
-                         << block_size << ", timeout_ms=" << timeout_ms
-                         << ", submit_rc=" << submit_rc
-                         << ", poll_count=" << poll_count
-                         << ", completions_seen=" << completions_seen
-                         << ", first_poll_error=" << first_poll_error
-                         << ", first_poll_errno=" << first_poll_errno
-                         << ", last_poll_rc=" << last_poll_rc
-                         << ", connected="
-                         << (qpair && spdk_nvme_qpair_is_connected(qpair))
-                         << ", qpair_failure_reason="
-                         << (qpair ? spdk_nvme_qpair_get_failure_reason(qpair)
-                                   : 0)
-                         << ", reason=" << reason;
+            LOG(WARNING)
+                << "NoF heartbeat read failed: endpoint=" << tr_str
+                << ", probe_id=" << probe_ctx->probe_id
+                << ", cntlid=" << spdk_nvme_ctrlr_get_id(ctrlr)
+                << ", qid=" << (qpair ? spdk_nvme_qpair_get_id(qpair) : 0)
+                << ", hostnqn=" << opts->hostnqn << ", src_addr="
+                << (opts->src_addr[0] ? opts->src_addr : "auto")
+                << ", qpair=" << qpair << ", lba=0, bytes=" << block_size
+                << ", timeout_ms=" << timeout_ms << ", submit_rc=" << submit_rc
+                << ", poll_count=" << poll_count
+                << ", completions_seen=" << completions_seen
+                << ", first_poll_error=" << first_poll_error
+                << ", first_poll_errno=" << first_poll_errno
+                << ", last_poll_rc=" << last_poll_rc << ", connected="
+                << (qpair && spdk_nvme_qpair_is_connected(qpair))
+                << ", qpair_failure_reason="
+                << (qpair ? spdk_nvme_qpair_get_failure_reason(qpair) : 0)
+                << ", reason=" << reason;
         }
 
         if (connection_error != 0 || !done) {
@@ -1489,16 +1482,17 @@ class SpdkInitiator::Impl {
         if (elapsed >= probe_ctx->timeout) {
             auto* seg = probe_ctx->seg;
             auto* ctrlr = spdk_nvme_ns_get_ctrlr(seg->ns);
-            LOG(WARNING) << "NoF heartbeat read completed after timeout budget: "
-                         << "probe_id=" << probe_ctx->probe_id
-                         << ", cntlid=" << spdk_nvme_ctrlr_get_id(ctrlr)
-                         << ", qid=" << spdk_nvme_qpair_get_id(seg->qpair)
-                         << ", nsid=" << spdk_nvme_ns_get_id(seg->ns)
-                         << ", elapsed_ms="
-                         << std::chrono::duration_cast<std::chrono::milliseconds>(
-                                elapsed).count()
-                         << ", success=" << c.success << ", sc=" << c.sc
-                         << ", sct=" << c.sct << ", status=" << c.error_string;
+            LOG(WARNING)
+                << "NoF heartbeat read completed after timeout budget: "
+                << "probe_id=" << probe_ctx->probe_id
+                << ", cntlid=" << spdk_nvme_ctrlr_get_id(ctrlr)
+                << ", qid=" << spdk_nvme_qpair_get_id(seg->qpair)
+                << ", nsid=" << spdk_nvme_ns_get_id(seg->ns) << ", elapsed_ms="
+                << std::chrono::duration_cast<std::chrono::milliseconds>(
+                       elapsed)
+                       .count()
+                << ", success=" << c.success << ", sc=" << c.sc
+                << ", sct=" << c.sct << ", status=" << c.error_string;
         }
         if (!c.success) {
             {

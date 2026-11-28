@@ -1095,7 +1095,8 @@ class SpdkInitiator::Impl {
             registry.RegisterPool(owner_token_, ptr, size, span, &new_spans);
         if (rc != ErrorCode::OK) {
             LOG(ERROR) << "NoF SPDK host registration failed: buffer=" << ptr
-                       << ", bytes=" << size << ", result=" << toString(rc);
+                       << ", bytes=" << size
+                       << ", error_code=" << static_cast<int32_t>(rc);
         } else if (NoFDebugConfig::IsEnabledAtFirstUse()) {
             LOG(INFO) << "NoF SPDK host registration succeeded: buffer=" << ptr
                       << ", bytes=" << size

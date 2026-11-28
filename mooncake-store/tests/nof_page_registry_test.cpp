@@ -19,10 +19,12 @@ constexpr uintptr_t kPage = 2ULL << 20;
 // -EIO on register AFTER marking the page (partial state, mirroring
 // spdk_mem_register's mark-then-notify ordering), or -EIO on unregister.
 struct FakeTranslationTable {
-    int RegisterPage(uintptr_t page) {
+    int RegisterPage(uintptr_t page, size_t len) {
         ++register_calls;
-        if (busy_pages.count(page)) return -EBUSY;
+        auto busy = busy_pages.lower_bound(page);
+        if (busy != busy_pages.end() && *busy < page + len) return -EBUSY;
         if (fail_pages.count(page)) return -EIO;
+        EXPECT_TRUE(active_lengths.emplace(page, len).second);
         ++registered[page];
         // mark_fail_pages stay registered in the fake table despite the
         // failure — the partial state the registry must clean up.
@@ -30,11 +32,13 @@ struct FakeTranslationTable {
         return 0;
     }
 
-    int UnregisterPage(uintptr_t page) {
+    int UnregisterPage(uintptr_t page, size_t len) {
         ++unregister_calls;
         if (fail_unregister_pages.count(page)) return -EIO;
         auto it = registered.find(page);
         if (it == registered.end() || it->second == 0) return -EINVAL;
+        if (active_lengths.at(page) != len) return -ERANGE;
+        active_lengths.erase(page);
         --it->second;
         return 0;
     }
@@ -47,6 +51,7 @@ struct FakeTranslationTable {
     int register_calls = 0;
     int unregister_calls = 0;
     std::map<uintptr_t, int> registered;
+    std::map<uintptr_t, size_t> active_lengths;
     std::set<uintptr_t> busy_pages;
     std::set<uintptr_t> fail_pages;
     std::set<uintptr_t> mark_fail_pages;
@@ -56,13 +61,11 @@ struct FakeTranslationTable {
 FakeTranslationTable* g_fake = nullptr;
 
 int FakeRegister(void* addr, size_t len) {
-    EXPECT_EQ(len, kPage);
-    return g_fake->RegisterPage(reinterpret_cast<uintptr_t>(addr));
+    return g_fake->RegisterPage(reinterpret_cast<uintptr_t>(addr), len);
 }
 
 int FakeUnregister(void* addr, size_t len) {
-    EXPECT_EQ(len, kPage);
-    return g_fake->UnregisterPage(reinterpret_cast<uintptr_t>(addr));
+    return g_fake->UnregisterPage(reinterpret_cast<uintptr_t>(addr), len);
 }
 
 // Fake 2MB-aligned addresses; never dereferenced, used only as map keys.
@@ -94,6 +97,88 @@ TEST_F(NofPageRegistryTest, SameOwnerSameRangeIsIdempotent) {
     ASSERT_EQ(registry_.Register(owner_a_, ptr, 4096), ErrorCode::OK);
     EXPECT_EQ(fake_.register_calls, 1);
     EXPECT_EQ(fake_.Depth(reinterpret_cast<uintptr_t>(ptr)), 1);
+}
+
+TEST_F(NofPageRegistryTest, TwentyGiBPoolUsesEightyRegistrationsPerWorker) {
+    constexpr size_t bytes = 20ULL << 30;
+    void* pool = PageAddr(0);
+    size_t new_spans = 0;
+    ASSERT_EQ(
+        registry_.RegisterPool(owner_a_, pool, bytes,
+                               NofPageRegistry::kDefaultPoolSpan, &new_spans),
+        ErrorCode::OK);
+    EXPECT_EQ(new_spans, 80u);
+    ASSERT_EQ(fake_.active_lengths.size(), 80u);
+    EXPECT_EQ(fake_.register_calls, 80);
+    for (const auto& [base, length] : fake_.active_lengths)
+        EXPECT_EQ(length, 256ULL << 20);
+    ASSERT_EQ(
+        registry_.RegisterPool(owner_b_, pool, bytes,
+                               NofPageRegistry::kDefaultPoolSpan, &new_spans),
+        ErrorCode::OK);
+    EXPECT_EQ(new_spans, 0u);
+    EXPECT_EQ(fake_.register_calls, 80);
+    ASSERT_EQ(registry_.UnregisterAll(owner_a_), ErrorCode::OK);
+    EXPECT_EQ(fake_.unregister_calls, 0);
+    ASSERT_EQ(registry_.UnregisterAll(owner_b_), ErrorCode::OK);
+    EXPECT_EQ(fake_.unregister_calls, 80);
+    EXPECT_TRUE(fake_.active_lengths.empty());
+}
+
+TEST_F(NofPageRegistryTest, UnalignedPoolEdgesAndPreexistingPage) {
+    auto base = reinterpret_cast<uintptr_t>(PageAddr(0));
+    ASSERT_EQ(registry_.Register(owner_b_, PageAddr(3), kPage), ErrorCode::OK);
+    ASSERT_EQ(registry_.RegisterPool(owner_a_, PageAddr(0, 4096), 8 * kPage),
+              ErrorCode::OK);
+    std::map<uintptr_t, size_t> expected{{base, kPage},
+                                         {base + kPage, 2 * kPage},
+                                         {base + 3 * kPage, kPage},
+                                         {base + 4 * kPage, 4 * kPage},
+                                         {base + 8 * kPage, kPage}};
+    EXPECT_EQ(fake_.active_lengths, expected);
+    // Independent deregistration of the middle of a live SPDK span would
+    // leave stale DMA translations after the original pool was released.
+    EXPECT_EQ(registry_.Register(owner_b_, PageAddr(5), kPage),
+              ErrorCode::INVALID_PARAMS);
+    ASSERT_EQ(registry_.UnregisterAll(owner_a_), ErrorCode::OK);
+    EXPECT_EQ(fake_.active_lengths.size(), 1u);
+    EXPECT_EQ(fake_.Depth(base + 3 * kPage), 1);
+    ASSERT_EQ(registry_.UnregisterAll(owner_b_), ErrorCode::OK);
+    EXPECT_TRUE(fake_.active_lengths.empty());
+}
+
+TEST_F(NofPageRegistryTest, BusyPoolSpanOnlyBorrowsActuallyBusyPages) {
+    auto base = reinterpret_cast<uintptr_t>(PageAddr(0));
+    fake_.busy_pages.insert(base + kPage);
+    ASSERT_EQ(
+        registry_.RegisterPool(owner_a_, PageAddr(0), 6 * kPage, 4 * kPage),
+        ErrorCode::OK);
+    EXPECT_EQ(fake_.active_lengths.count(base + kPage), 0u);
+    EXPECT_EQ(fake_.active_lengths.at(base), kPage);
+    EXPECT_EQ(fake_.active_lengths.at(base + 2 * kPage), 2 * kPage);
+    EXPECT_EQ(fake_.active_lengths.at(base + 4 * kPage), 2 * kPage);
+    ASSERT_EQ(registry_.UnregisterAll(owner_a_), ErrorCode::OK);
+    EXPECT_EQ(fake_.unregister_calls, 3);
+    EXPECT_TRUE(fake_.active_lengths.empty());
+}
+
+TEST_F(NofPageRegistryTest, PoolFailureRollsBackOrQuarantinesExactSpans) {
+    auto base = reinterpret_cast<uintptr_t>(PageAddr(0));
+    fake_.mark_fail_pages.insert(base + 4 * kPage);
+    EXPECT_EQ(
+        registry_.RegisterPool(owner_a_, PageAddr(0), 6 * kPage, 4 * kPage),
+        ErrorCode::INTERNAL_ERROR);
+    EXPECT_TRUE(fake_.active_lengths.empty());
+    fake_.fail_unregister_pages.insert(base + 4 * kPage);
+    EXPECT_EQ(
+        registry_.RegisterPool(owner_a_, PageAddr(0), 6 * kPage, 4 * kPage),
+        ErrorCode::NOF_REGISTRATION_STUCK);
+    EXPECT_EQ(registry_.UnregisterAll(owner_a_), ErrorCode::INTERNAL_ERROR);
+    ASSERT_EQ(fake_.active_lengths.size(), 1u);
+    EXPECT_EQ(fake_.active_lengths.at(base + 4 * kPage), 2 * kPage);
+    EXPECT_EQ(registry_.Register(owner_b_, PageAddr(5), kPage),
+              ErrorCode::NOF_REGISTRATION_STUCK);
+    EXPECT_EQ(registry_.UnregisterAll(owner_b_), ErrorCode::INTERNAL_ERROR);
 }
 
 TEST_F(NofPageRegistryTest, AdjacentBuffersShareOnePage) {

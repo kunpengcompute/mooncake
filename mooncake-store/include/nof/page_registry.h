@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <set>
 
+#include "nof/io_buffer.h"
 #include "types.h"  // ErrorCode
 
 namespace mooncake {
@@ -23,7 +25,7 @@ namespace mooncake {
 //     marked" and "partially translated" — the two cannot be told apart.
 //
 // Ownership: registrations are charged to an owner token (a unique,
-// never-recycled id per initiator instance). Per-page refcounts are
+// never-recycled id per initiator instance). Registration refcounts are
 // process-wide, so one owner's Unregister never unmaps pages another owner
 // still relies on.
 //
@@ -35,15 +37,6 @@ namespace mooncake {
 // registration whose range contains one reports NOF_REGISTRATION_STUCK, and
 // teardown fails to release it, keeping the mapping pinned.
 //
-// Each owner record is {size, charged_from}: the covered range is
-// [charged_from ?: first_page, page_align(begin + size)). Charges are
-// contiguous up to the first quarantined page, and a failed unregister
-// shrinks charged_from to the first unreleasable page, so a retry
-// immediately hits it again and can never touch pages whose remaining
-// references belong to other owners. In the deepest cascade (a redo of a
-// shrunk record failing again before the retained suffix), charges may form
-// two blocks; the gap is skipped safely on teardown, and pages past a
-// quarantine point stay registered — leaked but pinned, by design.
 class NofPageRegistry {
    public:
     using MemRegisterFn = int (*)(void* addr, size_t len);
@@ -55,41 +48,40 @@ class NofPageRegistry {
     NofPageRegistry& operator=(const NofPageRegistry&) = delete;
 
     ErrorCode Register(uint64_t owner, void* ptr, size_t size);
+    // Whole-pool registration. Suballocations use the pool registration for
+    // I/O. Independently registered borrowers must cover whole backend spans.
+    // Ordinary Register keeps page-level sharing for general user buffers.
+    static constexpr size_t kDefaultPoolSpan = 256ULL << 20;
+    ErrorCode RegisterPool(uint64_t owner, void* ptr, size_t size,
+                           size_t max_span = kDefaultPoolSpan,
+                           size_t* new_spans = nullptr);
     ErrorCode Unregister(uint64_t owner, void* ptr);
     ErrorCode UnregisterAll(uint64_t owner);
 
    private:
-    static constexpr uintptr_t kPageSize = 2ULL << 20;  // 2MB hugepage
+    static constexpr uintptr_t kPageSize = kNofRegistrationPageSize;
 
-    struct PageReg {
-        uint32_t count = 0;
-        // Registered by the DPDK memseg walk (-EBUSY): never unregister.
+    struct Span {
+        size_t length;
+        size_t references = 0;
         bool external = false;
-        // Cleanup unconfirmed: terminally pinned, never unregistered.
         bool quarantined = false;
     };
 
     struct OwnerRange {
-        // Requested range size; coverage ends at page_align(begin + size).
-        size_t size = 0;
-        // First page still charged (0 = the whole prefix is charged). Set
-        // to the first unreleasable page when an unregister fails.
-        uintptr_t charged_from = 0;
-        // The covered range includes a quarantined page: the range is not
-        // usable DMA coverage and Register must report STUCK for it.
-        bool has_quarantined = false;
+        uintptr_t end = 0;
+        bool complete = false;
+        std::set<uintptr_t> spans;
     };
 
-    // Releases this registration's charged pages starting at charged_from,
-    // stopping at the first unreleasable page and shrinking charged_from to
-    // it. Returns true only when nothing remains charged.
-    // Caller must hold mutex_.
-    bool ReleaseRangeLocked(void* ptr, OwnerRange& rec);
+    bool ReleaseSpanLocked(uintptr_t base);
+    bool ReleaseRangeLocked(OwnerRange& range);
+    using SpanMap = std::map<uintptr_t, Span>;
+    SpanMap::iterator SpanInteriorLocked(uintptr_t address);
 
     MemRegisterFn register_fn_;
     MemUnregisterFn unregister_fn_;
-    std::map<uint64_t, PageReg> page_regs_;  // key: 2MB-aligned page base
-    // owner token -> (user ptr -> registration record)
+    SpanMap spans_;
     std::map<uint64_t, std::map<void*, OwnerRange>> owner_regs_;
     std::mutex mutex_;
 };

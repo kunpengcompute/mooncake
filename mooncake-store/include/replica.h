@@ -208,6 +208,14 @@ struct ReplicateConfig {
         }
     }
 
+    // Compatibility flag for Store integrations; never part of Master RPCs.
+    bool replica_counts_explicit{false};
+    YLT_REFL(ReplicateConfig, replica_num, nof_replica_num, dfs_replica_num,
+             soft_pin_action, soft_pin_ttl_ms, with_hard_pin,
+             preferred_segments, preferred_segment, preferred_nof_segments,
+             prefer_alloc_in_same_node, data_type, host_id, group_ids,
+             session_ids, preferred_hca_names, per_key_preferred_hca_names);
+
     ReplicateConfig ForSingleKey(size_t key_index) const {
         ReplicateConfig key_config = *this;
         key_config.SetKeyIds(*this, key_index);

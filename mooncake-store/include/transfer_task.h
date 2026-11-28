@@ -282,11 +282,13 @@ class FilereadOperationState : public OperationState {
 class TransferEngineOperationState : public OperationState {
    public:
     TransferEngineOperationState(TransferEngine& engine, BatchID batch_id,
-                                 size_t batch_size)
+                                 size_t batch_size,
+                                 bool drain_before_release = false)
         : engine_(engine),
           tent_engine_(engine.getTentEngine().get()),
           batch_id_(batch_id),
           batch_size_(batch_size),
+          drain_before_release_(drain_before_release),
           start_ts_(getCurrentTimeInMilli()) {}
 
     ~TransferEngineOperationState();
@@ -308,11 +310,13 @@ class TransferEngineOperationState : public OperationState {
     void check_task_status();
 
     void set_result_internal(ErrorCode error_code);
+    void Drain();
 
     TransferEngine& engine_;
     mooncake::tent::TransferEngine* tent_engine_;
     BatchID batch_id_;
     size_t batch_size_;
+    bool drain_before_release_;
     const int64_t start_ts_;
 };
 
@@ -460,6 +464,7 @@ struct NofMetric;
  * @brief NoF operation descriptor (byte-oriented, opaque handle)
  */
 struct NofTask {
+    std::vector<NofBuffer> buffers;
     NofSegmentHandle* seg_handle;
     void* ptr;
     std::vector<Slice> slices;
@@ -780,7 +785,8 @@ class TransferSubmitter {
 
     std::optional<TransferFuture> submitNofOperation(
         const AllocatedBuffer::Descriptor& handle, void* ptr, size_t size,
-        const TransferRequest::OpCode op_code);
+        const TransferRequest::OpCode op_code,
+        const std::vector<Slice>* slices = nullptr);
 
     /**
      * @brief Submit transfer engine operation asynchronously

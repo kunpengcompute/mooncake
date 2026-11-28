@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import re
 import sys
 
 from mooncake.mooncake_ssd_tool_common import MooncakeNoFRegister, SPDKTgtCreator
@@ -69,7 +70,7 @@ Notes:
         help=(
             "SPDK target information, for example "
             '"ip:192.168.65.56 path:/home/spdk pci:0000:01:00.0,0000:02:00.0". '
-            "The same target list is used for create and register phases."
+            "With --skip-create, add sock:<path> to select a custom RPC socket."
         ),
     )
     parser.add_argument(
@@ -117,6 +118,10 @@ Notes:
         parser.error(
             "--master_server_address is required unless --skip-register is set"
         )
+    if not args.skip_create and any(
+        re.search(r"(?:^|\s)sock:", target) for target in args.spdk_target_info
+    ):
+        parser.error("sock: requires --skip-create when registering an existing target")
     return args
 
 

@@ -122,7 +122,6 @@ set(MOONCAKE_STORE_CLIENT_SOURCES
     nvme_kv/key_conflict_policy.cpp
     nvme_kv/object_layout.cpp
     transfer_task.cpp
-    config/nof_debug_config.cpp
     config/fileread_worker_pool_config.cpp
     config/nof_worker_pool_config.cpp
     posix_file.cpp
@@ -348,13 +347,14 @@ if(STORE_USE_K8S_LEASE)
 endif()
 
 # NoF support code that is SPDK-free (page-registration bookkeeping,
-# probe-context pooling, and controller env parsing). Built in every
-# configuration so unit tests can exercise it without SPDK; both mooncake_store
-# and mooncake_nof_spdk link it (the latter cannot link mooncake_store — that
-# would be a cycle).
+# probe-context pooling, and NoF env parsing). Built in every configuration so
+# unit tests can exercise it without SPDK; both mooncake_store and
+# mooncake_nof_spdk link it (the latter cannot link mooncake_store — that would
+# be a cycle).
 add_library(
-  mooncake_nof_core STATIC nof/page_registry.cpp nof/probe_context_pool.cpp
-                           config/spdk_controller_config.cpp)
+  mooncake_nof_core STATIC
+  nof/page_registry.cpp nof/probe_context_pool.cpp config/nof_debug_config.cpp
+  config/spdk_controller_config.cpp)
 target_include_directories(mooncake_nof_core
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_link_libraries(
@@ -362,88 +362,11 @@ target_link_libraries(
                            cachelib_memory_allocator mooncake_common)
 
 if(USE_NOF)
-  set(SPDK_INCLUDE_DIR
-      "/usr/local/include"
-      CACHE PATH "SPDK include directory")
-  set(DPDK_INCLUDE_DIR
-      "/usr/local/include"
-      CACHE PATH "DPDK include directory")
-  set(SPDK_LIB_DIR
-      "/usr/local/lib"
-      CACHE PATH "SPDK static library directory")
-  set(DPDK_LIB_DIR
-      "/usr/local/lib"
-      CACHE PATH "DPDK static library directory")
-
-  set(SPDK_ISA_L_LIB_DIR
-      "${CMAKE_SOURCE_DIR}/extern/spdk/isa-l/.libs"
-      CACHE PATH "isa-l static library directory")
-  if(NOT EXISTS "${SPDK_ISA_L_LIB_DIR}/libisal.a")
-    message(
-      FATAL_ERROR
-        "isa-l not found at ${SPDK_ISA_L_LIB_DIR}/libisal.a. Run "
-        "`sudo bash dependencies.sh --with-spdk`, or set -DSPDK_ISA_L_LIB_DIR.")
-  endif()
-
-  set(SPDK_STATIC_LIBS
-      -Wl,--whole-archive
-      ${SPDK_LIB_DIR}/libspdk_event.a
-      ${SPDK_LIB_DIR}/libspdk_rdma.a
-      ${SPDK_LIB_DIR}/libspdk_nvme.a
-      ${SPDK_LIB_DIR}/libspdk_sock_posix.a
-      -Wl,--no-whole-archive
-      ${SPDK_LIB_DIR}/libspdk_vfio_user.a
-      ${SPDK_LIB_DIR}/libspdk_dma.a
-      ${SPDK_LIB_DIR}/libspdk_init.a
-      ${SPDK_LIB_DIR}/libspdk_env_dpdk.a
-      ${SPDK_LIB_DIR}/libspdk_log.a
-      ${SPDK_LIB_DIR}/libspdk_util.a
-      ${SPDK_LIB_DIR}/libspdk_blob.a
-      ${SPDK_LIB_DIR}/libspdk_blobfs.a
-      ${SPDK_LIB_DIR}/libspdk_bdev.a
-      ${SPDK_LIB_DIR}/libspdk_conf.a
-      ${SPDK_LIB_DIR}/libspdk_json.a
-      ${SPDK_LIB_DIR}/libspdk_jsonrpc.a
-      ${SPDK_LIB_DIR}/libspdk_sock.a
-      ${SPDK_LIB_DIR}/libspdk_thread.a
-      ${SPDK_LIB_DIR}/libspdk_trace.a
-      ${SPDK_LIB_DIR}/libspdk_vmd.a
-      ${SPDK_LIB_DIR}/libspdk_rpc.a
-      ${DPDK_LIB_DIR}/librte_eal.a
-      ${DPDK_LIB_DIR}/librte_mempool.a
-      ${DPDK_LIB_DIR}/librte_ring.a
-      ${DPDK_LIB_DIR}/librte_bus_pci.a
-      ${DPDK_LIB_DIR}/librte_pci.a
-      ${DPDK_LIB_DIR}/librte_timer.a
-      ${DPDK_LIB_DIR}/librte_telemetry.a
-      ${DPDK_LIB_DIR}/librte_kvargs.a
-      ${DPDK_LIB_DIR}/librte_mbuf.a
-      -Wl,--whole-archive
-      ${DPDK_LIB_DIR}/librte_mempool_ring.a
-      -Wl,--no-whole-archive
-      ${DPDK_LIB_DIR}/librte_power.a
-      ${DPDK_LIB_DIR}/librte_ethdev.a
-      ${DPDK_LIB_DIR}/librte_net.a
-      ${DPDK_LIB_DIR}/librte_vhost.a
-      ${DPDK_LIB_DIR}/librte_cryptodev.a
-      ${DPDK_LIB_DIR}/librte_hash.a
-      ${DPDK_LIB_DIR}/librte_rcu.a
-      pthread
-      dl
-      numa
-      rt
-      m
-      uuid
-      crypto
-      aio
-      z
-      -L${SPDK_ISA_L_LIB_DIR}
-      isal
-      elf
-      ibverbs
-      rdmacm
-      ssl
-      bsd)
+  include(${CMAKE_SOURCE_DIR}/cmake/Spdk.cmake)
+  mooncake_configure_spdk()
+  set(SPDK_STATIC_LIBS Mooncake::spdk)
+  get_target_property(SPDK_INCLUDE_DIR Mooncake::spdk
+                      INTERFACE_INCLUDE_DIRECTORIES)
 
   # ---------------------------------------------------------------------------
   # SPDK-backed NoF initiator implementation, linked PRIVATE so SPDK/DPDK static
@@ -457,6 +380,11 @@ if(USE_NOF)
   target_link_libraries(
     mooncake_nof_spdk PRIVATE ${SPDK_STATIC_LIBS} glog::glog mooncake_nof_core
                               yalantinglibs::yalantinglibs)
+
+  if(USE_ASCEND_NDR OR USE_ASCEND_STAGING)
+    target_link_libraries(mooncake_nof_spdk PRIVATE transfer_engine
+                                                    JsonCpp::JsonCpp)
+  endif()
 
   # spdk_mem_register (SPDK >= 22.05) compile-time probe.
   # CMAKE_TRY_COMPILE_TARGET_TYPE was added in CMake 3.6 (project requires
@@ -643,7 +571,9 @@ elseif(USE_XPU)
 endif()
 if(USE_ASCEND
    OR USE_ASCEND_DIRECT
-   OR USE_UBSHMEM)
+   OR USE_UBSHMEM
+   OR USE_ASCEND_NDR
+   OR USE_ASCEND_STAGING)
   target_include_directories(mooncake_store_client_objects
                              PRIVATE $ENV{ASCEND_PATH}/include)
 endif()
@@ -735,7 +665,9 @@ elseif(USE_HIP)
 endif()
 if(USE_ASCEND
    OR USE_ASCEND_DIRECT
-   OR USE_UBSHMEM)
+   OR USE_UBSHMEM
+   OR USE_ASCEND_NDR
+   OR USE_ASCEND_STAGING)
   target_link_libraries(mooncake_store PRIVATE ascendcl)
 endif()
 if(USE_SUNRISE)
@@ -803,7 +735,9 @@ elseif(USE_HIP)
 endif()
 if(USE_ASCEND
    OR USE_ASCEND_DIRECT
-   OR USE_UBSHMEM)
+   OR USE_UBSHMEM
+   OR USE_ASCEND_NDR
+   OR USE_ASCEND_STAGING)
   target_include_directories(mooncake_client PRIVATE $ENV{ASCEND_PATH}/include)
   target_link_libraries(mooncake_client PRIVATE ascendcl)
 endif()

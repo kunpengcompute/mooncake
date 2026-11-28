@@ -128,24 +128,15 @@ int TransferEngineImpl::init(const std::string& metadata_conn_string,
     }
 #endif
 
-#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
-    // The only difference in initializing the Ascend Transport is that the
-    // `local_server_name` must include the physical NPU card ID. The format
-    // changes from `ip:port` to `ip:port:npu_x`, e.g., `"0.0.0.0:12345:npu_2"`.
-    // While the desc_name stored in the metadata remains in the format of
-    // ip:port.
-    int devicePhyId = -1;
-    auto [host_name, port] =
-        parseHostNameWithPortAscend(local_server_name, &devicePhyId);
-    LOG(INFO) << "Transfer Engine parseHostNameWithPortAscend. server_name: "
-              << host_name << " port: " << port
-              << " devicePhyId: " << devicePhyId;
-    local_server_name_ = host_name + ":" + std::to_string(port);
-#else
     auto [host_name, port] = parseHostNameWithPort(local_server_name);
-    LOG(INFO) << "Transfer Engine parseHostNameWithPort. server_name: "
-              << host_name << " port: " << port;
     local_server_name_ = local_server_name;
+#if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)
+    int devicePhyId = -1;
+    if (shouldInstallAscendTransport(auto_discover_config_.protocol)) {
+        std::tie(host_name, port) =
+            parseHostNameWithPortAscend(local_server_name, &devicePhyId);
+        local_server_name_ = host_name + ":" + std::to_string(port);
+    }
 #endif
 
     if (getenv("MC_LEGACY_RPC_PORT_BINDING") ||
@@ -221,15 +212,13 @@ int TransferEngineImpl::init(const std::string& metadata_conn_string,
               << "";
 
     metadata_ = std::make_shared<TransferMetadata>(metadata_conn_string);
+    std::string transport_name = local_server_name_;
 #ifdef USE_ASCEND
-    std::string mutable_server_name =
-        local_server_name_ + ":npu_" + std::to_string(devicePhyId);
-    multi_transports_ =
-        std::make_shared<MultiTransport>(metadata_, mutable_server_name);
-#else
-    multi_transports_ =
-        std::make_shared<MultiTransport>(metadata_, local_server_name_);
+    if (shouldInstallAscendTransport(auto_discover_config_.protocol))
+        transport_name += ":npu_" + std::to_string(devicePhyId);
 #endif
+    multi_transports_ =
+        std::make_shared<MultiTransport>(metadata_, transport_name);
     int ret = metadata_->addRpcMetaEntry(local_server_name_, desc);
     if (ret) return ret;
 

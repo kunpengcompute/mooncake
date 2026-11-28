@@ -765,10 +765,10 @@ class MooncakeNoFRegister:
 
     def _parse_spdk_target_info(self, target_info: str) -> Dict[str, str]:
         """
-        Parse spdk target info string like "ip:192.168.65.56 path:/home"
+        Parse the target's SSH host, SPDK path, PCI devices, and RPC socket.
         """
         result = {}
-        parts = re.findall(r"(\w+):([^\s]+)", target_info)
+        parts = re.findall(r"(?:^|\s)(\w+):(\S*)", target_info)
         for key, value in parts:
             result[key] = value
         return result
@@ -863,13 +863,18 @@ class MooncakeNoFRegister:
             target = self._parse_spdk_target_info(target_info)
             ip = target.get("ip")
             path = target.get("path")
+            sock = target.get("sock")
             selected_pci_devices = self._parse_selected_pci_devices(target)
 
-            if not ip or not path:
+            if not ip or not path or sock == "":
                 logging.error(f"Invalid target info: {target_info}")
                 continue
 
-            logging.info(f"Getting SSD info from target: {ip} (path: {path})")
+            rpc_command = "./scripts/rpc.py"
+            if sock:
+                rpc_command += f" -s {shlex.quote(sock)}"
+            target_description = f"{ip} (path: {path}, RPC socket: {sock or 'default'})"
+            logging.info("Getting SSD info from target: %s", target_description)
             if selected_pci_devices:
                 logging.info(
                     "Only namespaces backed by selected PCI devices will be registered: %s",
@@ -878,7 +883,7 @@ class MooncakeNoFRegister:
 
             try:
                 # Get subsystems info
-                subsystems_cmd = "./scripts/rpc.py nvmf_get_subsystems"
+                subsystems_cmd = f"{rpc_command} nvmf_get_subsystems"
                 subsystems_output = self._execute_ssh_command(ip, subsystems_cmd, path)
                 subsystems = json.loads(subsystems_output)
 
@@ -910,7 +915,9 @@ class MooncakeNoFRegister:
                             continue
 
                         # Get bdev info to calculate size
-                        bdev_cmd = f"./scripts/rpc.py bdev_get_bdevs -b {shlex.quote(bdev_name)}"
+                        bdev_cmd = (
+                            f"{rpc_command} bdev_get_bdevs -b {shlex.quote(bdev_name)}"
+                        )
                         bdev_output = self._execute_ssh_command(ip, bdev_cmd, path)
                         bdevs = json.loads(bdev_output)
 
@@ -950,7 +957,9 @@ class MooncakeNoFRegister:
                         )
 
             except Exception as e:
-                logging.error(f"Failed to get SSD info from {ip}: {e}")
+                logging.error(
+                    "Failed to get SSD info from %s: %s", target_description, e
+                )
                 continue
 
         if not ssd_configs:

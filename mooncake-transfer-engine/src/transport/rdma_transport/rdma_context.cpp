@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "transport/rdma_transport/rdma_context.h"
+#include "transport/rdma_transport/ascend_parameter_plane.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -455,7 +456,7 @@ int RdmaContext::deconstruct() {
     notify_endpoints_.clear();
 
     for (auto &[_, entry] : memory_region_map_) {
-        if (!entry.mr) continue;  // skipped on a non-paired Data Direct NIC
+        if (!entry.mr || entry.externally_managed) continue;
         int ret = ibv_dereg_mr(entry.mr);
         if (ret) {
             LOG(ERROR) << "Failed to unregister memory region: "
@@ -493,6 +494,7 @@ int RdmaContext::deconstruct() {
     }
 
     if (pd_) {
+        AscendParameterPlane::GetInstance().InvalidatePd(pd_);
         int ret = ibv_dealloc_pd(pd_);
         if (ret)
             LOG(ERROR) << "Failed to deallocate protection domain: "
@@ -776,6 +778,13 @@ int RdmaContext::registerMemoryRegionInternal(void *addr, size_t length,
     }
     mrMeta.addr = addr;
     mrMeta.length = length;
+    auto &plane = AscendParameterPlane::GetInstance();
+    if (plane.IsEnabled() && plane.Contains(addr, length)) {
+        int rc = plane.GetOrCreateMr(pd_, addr, length, access, &mrMeta.mr);
+        if (rc != 0) return ERR_CONTEXT;
+        mrMeta.externally_managed = true;
+        return 0;
+    }
 #if defined(USE_MLU) || defined(USE_MACA) || defined(USE_CUDA) || \
     defined(USE_HIP_DMABUF) || defined(USE_SUPA)
     if (exp.method == DmabufExport::Method::kDmabufReg) {
@@ -896,7 +905,7 @@ int RdmaContext::unregisterMemoryRegion(void *addr) {
     if (iter == memory_region_map_.end()) {
         return 0;
     }
-    if (!iter->second.mr) {  // skipped on a non-paired Data Direct NIC
+    if (!iter->second.mr || iter->second.externally_managed) {
         memory_region_map_.erase(iter);
         return 0;
     }

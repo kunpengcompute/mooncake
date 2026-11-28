@@ -2149,6 +2149,8 @@ PYBIND11_MODULE(_store, m) {
         .def(py::init<>())
         .def_readwrite("replica_num", &ReplicateConfig::replica_num)
         .def_readwrite("nof_replica_num", &ReplicateConfig::nof_replica_num)
+        .def_readwrite("replica_counts_explicit",
+                       &ReplicateConfig::replica_counts_explicit)
         .def_readwrite("dfs_replica_num", &ReplicateConfig::dfs_replica_num)
         .def_readwrite("soft_pin_action", &ReplicateConfig::soft_pin_action)
         .def_readwrite("soft_pin_ttl_ms", &ReplicateConfig::soft_pin_ttl_ms)
@@ -2424,6 +2426,33 @@ PYBIND11_MODULE(_store, m) {
 
     py::class_<MooncakeStorePyWrapper>(m, "MooncakeDistributedStore")
         .def(py::init<>())
+        .def("get_ascend_transfer_capabilities",
+             [](MooncakeStorePyWrapper &) {
+                 py::dict result;
+                 result["api_version"] = 1;
+#ifdef USE_ASCEND_STAGING
+                 result["data_staging"] = true;
+#else
+            result["data_staging"] = false;
+#endif
+#ifdef USE_ASCEND_NDR
+                 result["parameter_direct"] = true;
+#else
+            result["parameter_direct"] = false;
+#endif
+#ifdef USE_NOF
+                 result["nof"] = true;
+#else
+            result["nof"] = false;
+#endif
+#if defined(USE_ASCEND_STAGING) && defined(USE_NOF)
+                 result["data_staging_nof_host_buffers"] = true;
+#else
+                 result["data_staging_nof_host_buffers"] = false;
+#endif
+                 result["complete_object_only"] = true;
+                 return result;
+             })
         .def(
             "begin_weight_snapshot",
             [](MooncakeStorePyWrapper &self, py::object snapshot,
@@ -3020,6 +3049,19 @@ PYBIND11_MODULE(_store, m) {
             },
             py::arg("buffer_ptr"), py::arg("size"),
             "Register a memory buffer for direct access operations")
+        .def(
+            "register_host_pool",
+            [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr,
+               size_t size) {
+                void *buffer = reinterpret_cast<void *>(buffer_ptr);
+                py::gil_scoped_release release;
+                auto client = self.get_real_client();
+                if (!client) return to_py_ret(ErrorCode::INVALID_PARAMS);
+                return client->register_host_pool(buffer, size);
+            },
+            py::arg("buffer_ptr"), py::arg("size"),
+            "Register a whole host allocation. Use its slices directly for "
+            "I/O and unregister_buffer on the base at pool teardown.")
         .def(
             "unregister_buffer",
             [](MooncakeStorePyWrapper &self, uintptr_t buffer_ptr) {

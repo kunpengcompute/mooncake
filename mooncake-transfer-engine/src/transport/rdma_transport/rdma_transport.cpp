@@ -41,6 +41,7 @@
 #include "transport/batch_registration.h"
 #include "transport/rdma_transport/rdma_batch_cache.h"
 #include "transport/rdma_transport/rdma_context.h"
+#include "transport/rdma_transport/ascend_parameter_plane.h"
 #include "transport/rdma_transport/rdma_endpoint.h"
 
 namespace mooncake {
@@ -214,14 +215,24 @@ int RdmaTransport::install(std::string &local_server_name,
     local_server_name_ = local_server_name;
     local_topology_ = topo;
 
+    auto &plane = AscendParameterPlane::GetInstance();
+    if (plane.InitializeFromEnvironment() != 0) return ERR_INVALID_ARGUMENT;
+    auto &storage = AscendStorageConfig::GetInstance();
+    if (storage.HasRoute()) {
+        if (local_topology_->discover({storage.Device().rdma_device}) != 0)
+            return ERR_DEVICE_NOT_FOUND;
+    }
     // In dual-NIC environments (e.g. separate TCP and RDMA interfaces),
     // MC_RDMA_BIND_ADDRESS allows NIC paths to use an RDMA-reachable IP
     // while local_server_name_ keeps the TCP-reachable address for P2P.
     const char *rdma_bind_addr = std::getenv("MC_RDMA_BIND_ADDRESS");
-    if (rdma_bind_addr && rdma_bind_addr[0] != '\0') {
+    const std::string bind_address =
+        storage.HasRoute() ? storage.Device().rdma_ip
+                           : (rdma_bind_addr ? rdma_bind_addr : "");
+    if (!bind_address.empty()) {
         auto [host_name, port] = parseHostNameWithPort(local_server_name);
         rdma_server_name_ =
-            std::string(rdma_bind_addr) + ":" + std::to_string(port);
+            maybeWrapIpV6(bind_address) + ":" + std::to_string(port);
         LOG(INFO) << "RdmaTransport: using RDMA bind address "
                   << rdma_server_name_
                   << " (TCP address: " << local_server_name_ << ")";
@@ -350,6 +361,21 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
     }
 
     std::string resolved_name = name;
+    auto &plane = AscendParameterPlane::GetInstance();
+    const bool ascend_ub = plane.IsEnabled() && plane.IsDeviceMemory(addr);
+    if (ascend_ub && plane.RegisterRegion(addr, length) != 0)
+        return ERR_CONTEXT;
+    struct UbRegistrationGuard {
+        AscendParameterPlane &plane;
+        void *addr;
+        bool rollback;
+        ~UbRegistrationGuard() {
+            if (rollback) (void)plane.UnregisterRegion(addr);
+        }
+    } ub_guard{plane, addr, ascend_ub};
+    if (ascend_ub)
+        resolved_name =
+            "npu:" + std::to_string(plane.Device().physical_device_id);
 
     // Export a single dma_buf fd for the whole buffer and import it into every
     // NIC's PD during each chunk's registration below (one dma_buf object
@@ -359,7 +385,7 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
     // takes its own reference), so it is closed once, on any return path, by
     // the RAII guard below.
     DmabufExport dmabuf_exp;
-    if (!context_list_.empty()) {
+    if (!ascend_ub && !context_list_.empty()) {
         int eret = RdmaContext::exportDmabuf(addr, length, dmabuf_exp);
         if (eret != 0) {
             LOG(ERROR) << "Failed to export dma_buf for addr=" << addr;
@@ -507,7 +533,7 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
     // pre-touch thread only adds a DMA-BUF import (and a BAR1 mapping) of its
     // block, so skip it there.
     const bool do_pre_touch =
-        dmabuf_exp.method != DmabufExport::Method::kDmabufReg &&
+        !ascend_ub && dmabuf_exp.method != DmabufExport::Method::kDmabufReg &&
         context_list_.size() > 0 && std::thread::hardware_concurrency() >= 4 &&
         length >= (size_t)4 * 1024 * 1024 * 1024;
 
@@ -609,7 +635,7 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
         // Registration faults in untouched host pages. Resolve the original
         // buffer's first page only after it has been pinned, or NUMA discovery
         // can retain "*" and select NICs on unrelated NUMA nodes.
-        if (ci == 0 && name == kWildcardLocation) {
+        if (!ascend_ub && ci == 0 && name == kWildcardLocation) {
             const auto entries = getMemoryLocation(addr, length, true);
             resolved_name = entries[0].location;
         }
@@ -660,6 +686,7 @@ int RdmaTransport::registerLocalMemoryInternal(void *addr, size_t length,
         for (auto &c : chunks) chunk_addrs.push_back((uint64_t)c.first);
         chunk_map_[(uint64_t)addr] = std::move(chunk_addrs);
     }
+    ub_guard.rollback = false;
     return 0;
 }
 
@@ -670,6 +697,8 @@ int RdmaTransport::unregisterLocalMemory(void *addr, bool update_metadata) {
 int RdmaTransport::unregisterLocalMemoryInternal(void *addr,
                                                  bool update_metadata,
                                                  bool force_sequential) {
+    auto &plane = AscendParameterPlane::GetInstance();
+    const bool ascend_ub = plane.Contains(addr, 1);
     // Mooncake#2017: if this base buffer was split into chunks at registration,
     // unregister each chunk's MR + metadata entry (unregisterLocalMemory only
     // receives the base addr).
@@ -746,6 +775,7 @@ int RdmaTransport::unregisterLocalMemoryInternal(void *addr,
             int rc = metadata_->updateLocalSegmentDesc();
             if (rc && !first_err) first_err = rc;
         }
+        if (!first_err && ascend_ub) first_err = plane.UnregisterRegion(addr);
         if (!first_err) {
             std::lock_guard<std::mutex> lock(chunk_map_mutex_);
             chunk_map_.erase((uint64_t)addr);
@@ -820,19 +850,21 @@ int RdmaTransport::unregisterLocalMemoryInternal(void *addr,
         return dereg_err;
     }
 
-    // Confirmed cleanup: report success so the engine erases its region
-    // record and the same range can be registered again.
-    if (metadata_missing) {
-        if (update_metadata) {
-            // The earlier attempt removed the local metadata entry but may
-            // have failed to publish it (that failure is what seeded the
-            // pending record). Republish now so the remote metadata server
-            // drops the stale buffer advertisement. On publish failure the
-            // pending record is kept: a later retry re-runs this path (the
-            // MR cleanup above is then a no-op) and publishes again.
-            int pub_rc = metadata_->updateLocalSegmentDesc();
-            if (pub_rc) return pub_rc;
+    // Publish before releasing the UB reference: a failed publish must not
+    // release that reference a second time when deregistration is retried.
+    if (metadata_missing && update_metadata) {
+        int pub_rc = metadata_->updateLocalSegmentDesc();
+        if (pub_rc) return pub_rc;
+    }
+    if (ascend_ub) {
+        const int ub_rc = plane.UnregisterRegion(addr);
+        if (ub_rc) {
+            std::lock_guard<std::mutex> lock(pending_dereg_mutex_);
+            pending_dereg_.insert((uint64_t)addr);
+            return ub_rc;
         }
+    }
+    if (metadata_missing) {
         std::lock_guard<std::mutex> lock(pending_dereg_mutex_);
         pending_dereg_.erase((uint64_t)addr);
     }
@@ -1439,9 +1471,14 @@ int RdmaTransport::initializeRdmaResources() {
                       << " to match workers_per_ctx=" << config.workers_per_ctx
                       << " for worker-owned endpoint polling";
         }
+        auto &storage = AscendStorageConfig::GetInstance();
+        const auto port =
+            storage.HasRoute() ? storage.Device().rdma_port : config.port;
+        const auto gid =
+            storage.HasRoute() ? storage.Device().gid_index : config.gid_index;
         int ret = context->construct(
-            cq_per_ctx, config.num_comp_channels_per_ctx, config.port,
-            config.gid_index, config.max_cqe, config.max_ep_per_ctx);
+            cq_per_ctx, config.num_comp_channels_per_ctx, port, gid,
+            config.max_cqe, config.max_ep_per_ctx);
         if (ret) {
             local_topology_->disableDevice(device_name);
             LOG(WARNING) << "Disable device " << device_name;

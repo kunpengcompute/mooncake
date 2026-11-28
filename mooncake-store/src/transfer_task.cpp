@@ -1,3 +1,4 @@
+#include "transport/rdma_transport/ascend_storage_config.h"
 #include "transfer_task.h"
 
 #include <set>
@@ -9,6 +10,7 @@
 #include <cctype>
 #include <chrono>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <cstdlib>
 #include <limits>
@@ -39,7 +41,8 @@ bool BuildNofLogicalSlices(const std::vector<Slice>& input,
     output->reserve(input.size());
     uint64_t remaining = logical_size;
     for (const auto& slice : input) {
-        if (slice.ptr == nullptr || slice.size == 0) {
+        if (slice.ptr == nullptr || slice.size == 0 ||
+            slice.size > UINTPTR_MAX - reinterpret_cast<uintptr_t>(slice.ptr)) {
             return false;
         }
         const size_t used =
@@ -132,16 +135,17 @@ static int CountNofQueuedTasks(const mooncake::NofTask* head) {
 }
 
 static inline void NofTaskCompletion(mooncake::NofTask* task) {
-    if (task->remaining_bytes == 0 && task->outstanding_sub_io == 0) {
-        task->padding_owner.reset();
-        task->state->set_completed(task->failed
-                                       ? mooncake::ErrorCode::TRANSFER_FAIL
-                                       : mooncake::ErrorCode::OK,
-                                   std::move(task->error_detail));
-        if (!task->on_chain) {
-            delete task;
-        }
+    // An error callback can zero remaining_bytes while the task is still in
+    // the QoS queue. Let the worker unlink it before publishing completion.
+    if (task->on_chain || task->remaining_bytes != 0 ||
+        task->outstanding_sub_io != 0) {
+        return;
     }
+    task->padding_owner.reset();
+    task->state->set_completed(task->failed ? mooncake::ErrorCode::TRANSFER_FAIL
+                                            : mooncake::ErrorCode::OK,
+                               std::move(task->error_detail));
+    delete task;
 }
 
 static void nvmf_reset_sgl(void* ctx, uint32_t offset) {
@@ -180,6 +184,11 @@ static int nvmf_next_sge(void* ctx, void** address, uint32_t* length) {
         segment_length = std::min<size_t>(segment_length,
                                           std::numeric_limits<uint32_t>::max());
         *address = static_cast<char*>(slice.ptr) + sub_task->sgl_offset;
+        if (sub_task->adaptor.split_at_registration_page) {
+            segment_length =
+                std::min(segment_length,
+                         mooncake::NofBytesToRegistrationPageEnd(*address));
+        }
         *length = static_cast<uint32_t>(segment_length);
 
         sub_task->sgl_offset += segment_length;
@@ -712,9 +721,9 @@ void NofWorkerPool::workerThread(int work_idx) {
                         const uint64_t submit_off =
                             task->byte_offset + sent_bytes;
                         void* submit_ptr =
-                            task->ptr ? reinterpret_cast<char*>(task->ptr) +
-                                            sent_bytes
-                                      : nullptr;
+                            task->ptr
+                                ? static_cast<char*>(task->ptr) + sent_bytes
+                                : nullptr;
 
                         if (!CheckSubTaskPool(sub_task_pool, sub_task_chunks,
                                               work_idx)) {
@@ -732,15 +741,21 @@ void NofWorkerPool::workerThread(int work_idx) {
                         sub_task->payload_byte_offset = sent_bytes;
                         sub_task->payload_byte_length = submit_bytes;
 
-                        int ret = task->slices.empty()
-                                      ? initiator_->SubmitIO(
-                                            task->seg_handle, submit_ptr,
-                                            submit_off, submit_bytes, task->op,
-                                            &sub_task->adaptor)
-                                      : initiator_->SubmitIOV(
-                                            task->seg_handle, submit_off,
-                                            submit_bytes, task->op,
-                                            &sub_task->adaptor);
+                        int ret;
+                        if (!task->buffers.empty()) {
+                            ret = initiator_->SubmitIOV(
+                                task->seg_handle, task->buffers, submit_off,
+                                submit_bytes, task->op, &sub_task->adaptor,
+                                sent_bytes);
+                        } else if (!task->slices.empty()) {
+                            ret = initiator_->SubmitIOV(
+                                task->seg_handle, submit_off, submit_bytes,
+                                task->op, &sub_task->adaptor);
+                        } else {
+                            ret = initiator_->SubmitIO(
+                                task->seg_handle, submit_ptr, submit_off,
+                                submit_bytes, task->op, &sub_task->adaptor);
+                        }
                         if (ret != 0) {
 #ifdef USE_NOF
                             if (task->metric) {
@@ -752,7 +767,19 @@ void NofWorkerPool::workerThread(int work_idx) {
                             }
 #endif
                             LOG(ERROR) << "work " << work_idx << ", seg "
-                                       << task->seg_handle << " submit io fail";
+                                       << task->seg_handle << " submit io fail"
+                                       << ", rc=" << ret << ", op="
+                                       << (task->op == NofIOOp::kWrite ? "write"
+                                                                       : "read")
+                                       << ", ssd_offset=" << submit_off
+                                       << ", bytes=" << submit_bytes
+                                       << ", block_size=" << block_size
+                                       << ", slices=" << task->buffers.size();
+                            if (task->error_detail.empty()) {
+                                task->error_detail =
+                                    "NoF I/O submission failed, rc=" +
+                                    std::to_string(ret);
+                            }
                             // Return the pool slot: a sub-task taken out
                             // and then failing to submit must be returned,
                             // or repeated failures would exhaust the 4096
@@ -948,9 +975,9 @@ void MemcpyWorkerPool::workerThread() {
                             device_id = dst_info.device_id;
                             direction = device::CopyDirection::kHostToDevice;
                         }
-                        accelerator->SetContext(device_id);
-                        if (!accelerator->Copy(op.dest, op.src, op.size,
-                                               direction)) {
+                        if (!accelerator->CopyWithContext(op.dest, op.src,
+                                                          op.size, direction,
+                                                          device_id)) {
                             LOG(ERROR) << "GPU memcpy failed: src_dev="
                                        << src_info.device_id
                                        << " dst_dev=" << dst_info.device_id
@@ -980,7 +1007,31 @@ void MemcpyWorkerPool::workerThread() {
 // TransferEngineOperationState Implementation
 // ============================================================================
 
+void TransferEngineOperationState::Drain() {
+    if (!drain_before_release_ || tent_engine_) return;
+    auto& batch = Transport::toBatchDesc(batch_id_);
+    for (;;) {
+        bool done = true;
+        for (size_t i = 0; i < batch.task_list.size(); ++i) {
+            if (batch.task_list[i].slice_count == 0) continue;
+            TransferStatus status;
+            auto rc = engine_.getTransferStatus(batch_id_, i, status);
+            if (!rc.ok() || (status.s != TransferStatusEnum::COMPLETED &&
+                             status.s != TransferStatusEnum::FAILED &&
+                             status.s != TransferStatusEnum::CANCELED)) {
+                done = false;
+                break;
+            }
+        }
+        if (done && batch.active_completion_callbacks.load(
+                        std::memory_order_acquire) == 0)
+            return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 TransferEngineOperationState::~TransferEngineOperationState() {
+    Drain();
 #ifdef USE_TENT
     if (tent_engine_)
         tent_engine_->freeBatch(batch_id_);
@@ -1100,6 +1151,7 @@ void TransferEngineOperationState::set_result_internal(ErrorCode error_code) {
         return;  // Don't crash, just return early
     }
 
+    Drain();
     VLOG(1) << "Setting transfer result for batch " << batch_id_ << " to "
             << static_cast<int>(error_code);
     result_.emplace(error_code);
@@ -2019,13 +2071,19 @@ std::optional<TransferFuture> TransferSubmitter::submitTransfer(
         if (!s.ok()) {
             LOG(ERROR) << "Failed to submit all transfers, error code is "
                        << s.code();
-            engine_.freeBatchID(batch_id);
+            if (AscendStorageConfig::GetInstance().HasRoute()) {
+                TransferEngineOperationState drain(engine_, batch_id,
+                                                   batch_size, true);
+            } else {
+                engine_.freeBatchID(batch_id);
+            }
             return std::nullopt;
         }
     }
 
     auto state = std::make_shared<TransferEngineOperationState>(
-        engine_, batch_id, batch_size);
+        engine_, batch_id, batch_size,
+        AscendStorageConfig::GetInstance().HasRoute());
 
     return TransferFuture(state);
 }
@@ -2248,6 +2306,24 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
     std::vector<Slice> io_slices;
     if (!BuildNofLogicalSlices(slices, logical_size, &io_slices))
         return std::nullopt;
+    auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
+    const auto is_device = [&](const Slice& slice) {
+        return runtime.FindDeviceForPointer(slice.ptr) != nullptr;
+    };
+    if (std::any_of(io_slices.begin(), io_slices.end(), is_device)) {
+        if (!std::all_of(io_slices.begin(), io_slices.end(), is_device))
+            return std::nullopt;
+        auto next = reinterpret_cast<uintptr_t>(io_slices.front().ptr);
+        for (const auto& slice : io_slices) {
+            if (reinterpret_cast<uintptr_t>(slice.ptr) != next) {
+                return submitNofOperation(handle, nullptr, logical_size,
+                                          op_code, &io_slices);
+            }
+            next += slice.size;
+        }
+        return submitNofOperation(handle, io_slices.front().ptr, logical_size,
+                                  op_code);
+    }
     const auto caps = nof_initiator_->GetCapabilities();
     // Preserve the contiguous path for backends without SGL support.
     if (!caps.supports_sgl) {
@@ -2259,11 +2335,9 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
         return submitNofOperation(handle, io_slices.front().ptr, logical_size,
                                   op_code);
     }
-    auto runtime = device::GetAcceleratorRegistry().RuntimeAccelerators();
     for (const auto& slice : io_slices) {
         if (!caps.dma_alignment ||
-            reinterpret_cast<uintptr_t>(slice.ptr) % caps.dma_alignment != 0 ||
-            runtime.FindDeviceForPointer(slice.ptr)) {
+            reinterpret_cast<uintptr_t>(slice.ptr) % caps.dma_alignment != 0) {
             LOG(ERROR) << "NoF SGL requires DMA-compatible Host slices";
             return std::nullopt;
         }
@@ -2296,7 +2370,7 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
 
 std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
     const AllocatedBuffer::Descriptor& handle, void* ptr, size_t size,
-    const TransferRequest::OpCode op_code) {
+    const TransferRequest::OpCode op_code, const std::vector<Slice>* slices) {
     if (!nof_pool_) {
         // Runtime form of the former "NoF transfer requested while USE_NOF
         // is disabled" error.
@@ -2304,7 +2378,7 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
                       "(no initiator in this process)";
         return std::nullopt;
     }
-    if (handle.transport_endpoint_.empty() || handle.size_ < size) {
+    if (!size || handle.transport_endpoint_.empty() || handle.size_ < size) {
         LOG(ERROR) << "Invalid NoF request endpoint="
                    << handle.transport_endpoint_
                    << ", buffer_size=" << handle.size_
@@ -2336,10 +2410,27 @@ std::optional<TransferFuture> TransferSubmitter::submitNofOperation(
         return std::nullopt;
     }
 
+    if (slices) {
+        if (!caps.supports_sgl) {
+            LOG(ERROR) << "NoF backend does not support vector I/O";
+            return std::nullopt;
+        }
+        for (const auto& slice : *slices) {
+            if (reinterpret_cast<uintptr_t>(slice.ptr) % ptr_alignment) {
+                LOG(ERROR) << "NoF slice address " << slice.ptr
+                           << " is not aligned to " << ptr_alignment
+                           << " bytes";
+                return std::nullopt;
+            }
+        }
+    }
     const NofIOOp op =
         (op_code == TransferRequest::READ) ? NofIOOp::kRead : NofIOOp::kWrite;
     auto state = std::make_shared<NofOperationState>();
     NofTask task(seg_handle, ptr, handle.buffer_address_, size, op, state);
+    if (slices)
+        for (const auto& slice : *slices)
+            task.buffers.push_back({slice.ptr, slice.size});
     task.metric = nof_metric_;
     nof_pool_->submitTask(std::move(task));
 

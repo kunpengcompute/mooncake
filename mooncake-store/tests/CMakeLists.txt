@@ -548,3 +548,6 @@ foreach(
 endforeach()
 
 add_store_test(master_heartbeat_metric_test master_heartbeat_metric_test.cpp)
+
+add_store_test(ascend_store_staging_test ascend_store_staging_test.cpp)
+add_store_test(parameter_plane_support_test parameter_plane_support_test.cpp)

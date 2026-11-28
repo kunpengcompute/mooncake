@@ -1,12 +1,13 @@
 #pragma once
 
 #include <cerrno>
-#include <memory>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "nof/io_buffer.h"
 #include "types.h"  // ErrorCode
 
 namespace mooncake {
@@ -54,6 +55,7 @@ struct NofIOAdaptor {
 struct NofSglIOAdaptor : NofIOAdaptor {
     void (*reset)(void* ctx, uint32_t offset);
     int (*next)(void* ctx, void** address, uint32_t* length);
+    bool split_at_registration_page{false};
 };
 
 struct NofCapabilities {
@@ -141,6 +143,29 @@ class NVMeoFInitiator {
         return -ENOTSUP;
     }
 
+    // Submit a byte range across discontiguous caller-owned buffers. The
+    // buffers and adaptor remain valid until completion. Simple backends can
+    // use this default for one buffer; SGL backends override it.
+    virtual int SubmitIOV(NofSegmentHandle* handle,
+                          const std::vector<NofBuffer>& buffers,
+                          uint64_t byte_offset, uint64_t byte_length,
+                          NofIOOp op, NofIOAdaptor* adaptor,
+                          size_t buffer_offset = 0) {
+        if (buffers.size() != 1) return -ENOTSUP;
+        const auto& buffer = buffers.front();
+        if (!buffer.data || buffer_offset > buffer.size ||
+            byte_length > buffer.size - buffer_offset)
+            return -EINVAL;
+        return SubmitIO(handle, static_cast<char*>(buffer.data) + buffer_offset,
+                        byte_offset, byte_length, op, adaptor);
+    }
+
+    // Register accelerator memory using the backend's device-memory path.
+    // It must never be sent to a Host hugepage registration table.
+    virtual ErrorCode RegisterDeviceMemory(void* ptr, size_t size) {
+        return ErrorCode::INVALID_PARAMS;
+    }
+
     // Poll completions on the calling thread. max_completions == 0 means
     // "all pending" (SPDK dialect, now an explicit contract).
     virtual int64_t PollCompletion(NofSegmentHandle* handle,
@@ -183,6 +208,11 @@ class NVMeoFInitiator {
     // buffers sharing a page must neither double-register it nor unregister
     // it early.
     virtual ErrorCode RegisterMemory(void* ptr, size_t size) = 0;
+    // Caller owns the whole host allocation until UnregisterMemory(ptr).
+    // Suballocations borrow this registration for I/O.
+    virtual ErrorCode RegisterHostPool(void* ptr, size_t size) {
+        return RegisterMemory(ptr, size);
+    }
     virtual ErrorCode UnregisterMemory(void* ptr) = 0;
 
     virtual NofCapabilities GetCapabilities() const = 0;
@@ -195,7 +225,6 @@ class NVMeoFInitiator {
 // implementation (reported via the RegisterMemory return code — see its
 // three-outcome contract for the cleanup/NOF_REGISTRATION_STUCK semantics).
 inline bool NofRangeIsRegistrable(const void* ptr, size_t size) {
-    constexpr uintptr_t kNofRegistrationPageSize = 2ULL << 20;  // 2MB
     // spdk_mem_register() also rejects addresses outside the 256TB window it
     // can represent (MASK_256TB) before marking anything (memory.c:339-348).
     constexpr uintptr_t kNofAddressMask = (1ULL << 48) - 1;  // MASK_256TB

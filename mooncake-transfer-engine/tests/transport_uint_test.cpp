@@ -358,14 +358,8 @@ TEST(TransferEngineAscendTransportTest, AscendHintsSelectAscendTransport) {
 }
 
 TEST(TransferEngineAscendTransportTest, HostHintsKeepHostTransportPath) {
-#if defined(USE_ASCEND) && !defined(USE_ASCEND_DIRECT)
-    // HCCL builds always install Ascend, whatever the hint names.
-    EXPECT_TRUE(shouldInstallAscendTransport("rdma"));
-    EXPECT_TRUE(shouldInstallAscendTransport("tcp"));
-#else
     EXPECT_FALSE(shouldInstallAscendTransport("rdma"));
     EXPECT_FALSE(shouldInstallAscendTransport("tcp"));
-#endif
 }
 
 TEST(TransferEngineAscendTransportTest, ProtocolHintMergeKeepsStoredProtocol) {
@@ -2303,3 +2297,20 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
+
+#ifdef USE_TCP
+TEST(TransferEngineAscendTransportTest,
+     IndependentStoreEnginesKeepOwnEndpoints) {
+    TransferEngine first(false), second(false);
+    ASSERT_EQ(first.init(P2PHANDSHAKE, "127.0.0.1:0", "", 0, "tcp"), 0);
+    ASSERT_EQ(second.init(P2PHANDSHAKE, "127.0.0.1:0", "", 0, "tcp"), 0);
+    ASSERT_NE(first.installTransport("tcp", nullptr), nullptr);
+    ASSERT_NE(second.installTransport("tcp", nullptr), nullptr);
+    EXPECT_EQ(first.getTransport("ascend"), nullptr);
+    EXPECT_EQ(second.getTransport("ascend"), nullptr);
+    EXPECT_NE(first.getRpcPort(), second.getRpcPort());
+    EXPECT_NE(first.getTransport("tcp"), second.getTransport("tcp"));
+    second.freeEngine();
+    EXPECT_NE(first.getTransport("tcp"), nullptr);
+}
+#endif

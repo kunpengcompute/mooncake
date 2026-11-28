@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include "nof/dma_buffer_allocator.h"
 #include "nof/nvmeof_initiator.h"
@@ -13,7 +14,7 @@ namespace mooncake {
 // acquired lazily on first OpenSegment / ProbeSegment.
 class SpdkInitiator : public NVMeoFInitiator {
    public:
-    SpdkInitiator();
+    explicit SpdkInitiator(std::string source_ip = {});
     ~SpdkInitiator() override;
 
     SpdkInitiator(const SpdkInitiator&) = delete;
@@ -41,9 +42,15 @@ class SpdkInitiator : public NVMeoFInitiator {
                   NofSglIOAdaptor* adaptor) override;
     int AcquirePadding(size_t size, bool for_write, void** ptr,
                        std::shared_ptr<void>* owner) override;
+    int SubmitIOV(NofSegmentHandle* handle,
+                  const std::vector<NofBuffer>& buffers, uint64_t byte_offset,
+                  uint64_t byte_length, NofIOOp op, NofIOAdaptor* adaptor,
+                  size_t buffer_offset = 0) override;
+    ErrorCode RegisterDeviceMemory(void* ptr, size_t size) override;
     int64_t PollCompletion(NofSegmentHandle* handle,
                            uint32_t max_completions) override;
     ErrorCode RegisterMemory(void* ptr, size_t size) override;
+    ErrorCode RegisterHostPool(void* ptr, size_t size) override;
     ErrorCode UnregisterMemory(void* ptr) override;
     NofCapabilities GetCapabilities() const override;
 

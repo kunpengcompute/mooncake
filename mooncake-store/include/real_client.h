@@ -84,6 +84,8 @@ class ResourceTracker {
 };
 
 class RealClient : public PyClient {
+    friend class AscendStoreTestPeer;
+
    public:
     RealClient();
     ~RealClient();
@@ -123,6 +125,7 @@ class RealClient : public PyClient {
             const ReplicateConfig &config = ReplicateConfig{});
 
     int register_buffer(void *buffer, size_t size);
+    int register_host_pool(void *buffer, size_t size);
 
     int unregister_buffer(void *buffer);
 
@@ -260,6 +263,8 @@ class RealClient : public PyClient {
      * memory, either explicit register_buffer() regions or the setup-time local
      * buffer
      */
+    bool IsAscendDataStaging() const { return ascend_data_staging_; }
+
     std::vector<int> batch_put_from_multi_buffers(
         const std::vector<std::string> &keys,
         const std::vector<std::vector<void *>> &all_buffers,
@@ -669,8 +674,8 @@ class RealClient : public PyClient {
         const std::shared_ptr<ClientBufferAllocator> &client_buffer_allocator =
             nullptr);
 
-    tl::expected<void, ErrorCode> register_buffer_internal(void *buffer,
-                                                           size_t size);
+    tl::expected<void, ErrorCode> register_buffer_internal(
+        void *buffer, size_t size, bool host_pool = false);
 
     struct RangedReadMetadata {
         QueryResult query_result;
@@ -1150,12 +1155,25 @@ class RealClient : public PyClient {
     mutable std::shared_mutex registered_buffer_mutex_;
     struct BufferRegistrationRecord {
         size_t size;
+        bool te_registered{true};
+        bool cleanup_pending{false};
     };
     // A present record means "registered OR cleanup-pending": a record is
     // retained when NoF/TE cleanup failed, in which case the buffer must
     // stay mapped until the cleanup retry succeeds (or process exit).
     std::unordered_map<void *, BufferRegistrationRecord>
         registered_buffer_sizes_;
+    std::unordered_set<void *> ascend_device_buffers_;
+    bool ValidateAscendBufferRangesLocked(
+        const std::vector<std::vector<void *>> &,
+        const std::vector<std::vector<size_t>> &) const;
+    tl::expected<void, ErrorCode> UnregisterAscendBufferLocked(void *buffer);
+    std::unordered_map<void *, size_t> ascend_registration_refs_;
+    bool ascend_data_staging_{false};
+    bool ascend_nof_host_buffers_{false};
+    bool ascend_parameter_direct_{false};
+    bool local_buffer_nof_registered_{false};
+    bool local_buffer_cleanup_failed_{false};
     std::optional<WritableBufferRegion> local_buffer_region_;
 
     // KV transfer sessions (process-local; not shared with DummyClient).

@@ -56,6 +56,8 @@ class ClientBufferAllocator
     [[nodiscard]] bool isSpdkHostDma() const { return is_spdk_host_dma_; }
 
     [[nodiscard]] std::optional<BufferHandle> allocate(size_t size);
+    [[nodiscard]] std::optional<BufferHandle> allocateAligned(size_t size,
+                                                              size_t alignment);
 
    protected:
     // Constructors accessible to derived classes

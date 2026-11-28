@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include "nof/dma_buffer_allocator.h"
 #include "nof/nvmeof_initiator.h"
@@ -22,7 +23,7 @@ struct NofRuntime {
 // {nullptr, SystemDmaAllocator}. MC_NOF_BACKEND selects the backend pair
 // ("spdk" default, "none" disables NoF at runtime); new backends plug in
 // here.
-NofRuntime CreateNofRuntime();
+NofRuntime CreateNofRuntime(const std::string& source_ip = {});
 
 // For the Python-ABI exception site (hugepage_memory_alloc/free) only:
 // creates just the DMA allocator, without constructing an initiator the

@@ -105,6 +105,9 @@ option(USE_NVMEOF "option for using NVMe over Fabric" OFF)
 option(USE_TCP "option for using TCP transport" ON)
 option(USE_BAREX "option for using accl-barex transport" OFF)
 option(USE_ASCEND "option for using npu with HCCL" OFF)
+option(USE_ASCEND_NDR "enable Ascend parameter-plane HBM registration" OFF)
+option(USE_ASCEND_STAGING "enable Ascend Store Host staging" OFF)
+option(USE_SPDK_NPU_UB "enable Ascend UB buffers in NVMe-oF" OFF)
 option(USE_ASCEND_DIRECT "option for using ascend npu with adxl engine" OFF)
 option(USE_UBSHMEM "option for using ascend npu with shmem" OFF)
 option(USE_ASCEND_HETEROGENEOUS
@@ -647,7 +650,9 @@ endif()
 if(USE_ASCEND
    OR USE_ASCEND_DIRECT
    OR USE_UBSHMEM
-   OR USE_MEMFABRIC)
+   OR USE_MEMFABRIC
+   OR USE_ASCEND_NDR
+   OR USE_ASCEND_STAGING)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DOPEN_BUILD_PROJECT ")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DOPEN_BUILD_PROJECT ")
   string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" CURRENT_CPU)
@@ -671,6 +676,19 @@ if(USE_ASCEND
   add_compile_options(-Wno-ignored-qualifiers)
   include_directories(/usr/local/include /usr/include ${ASCEND_INCLUDE_DIR})
   link_directories(${ASCEND_LIB_DIR})
+endif()
+
+if(USE_ASCEND_NDR)
+  add_compile_definitions(USE_ASCEND_NDR)
+endif()
+if(USE_ASCEND_STAGING)
+  add_compile_definitions(USE_ASCEND_STAGING)
+endif()
+if(USE_SPDK_NPU_UB)
+  add_compile_definitions(USE_SPDK_NPU_UB)
+endif()
+if(USE_SPDK_NPU_UB AND (NOT USE_NOF OR NOT USE_ASCEND_NDR))
+  message(FATAL_ERROR "USE_SPDK_NPU_UB requires USE_NOF and USE_ASCEND_NDR")
 endif()
 
 if(USE_ASCEND)

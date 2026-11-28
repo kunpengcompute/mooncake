@@ -259,6 +259,11 @@ struct NoFDebugEnvironmentVariables {
     MC_DEFINE_ENV_VAR(std::string, MC_NOF_DEBUG_INTERVAL_MS);
 };
 
+struct NoFHeartbeatEnvironmentVariables {
+    MC_DEFINE_ENV_VAR(bool, MC_NOF_HEARTBEAT_ENABLED);
+    MC_DEFINE_ENV_VAR(std::string, MC_NOF_HEARTBEAT_SRC_IP);
+};
+
 struct SpdkControllerEnvironmentVariables {
     MC_DEFINE_ENV_VAR(uint64_t, MC_SPDK_NOF_NAMESPACE_REFRESH_TIMEOUT_MS);
     MC_DEFINE_ENV_VAR(uint64_t, MC_SPDK_NOF_NAMESPACE_REFRESH_POLL_INTERVAL_MS);
